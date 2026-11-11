@@ -7,6 +7,7 @@ import android.content.pm.PackageInfo;
 import android.content.res.AssetManager;
 import android.database.Cursor;
 import android.hardware.display.DisplayManager;
+import android.hardware.input.InputManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -14,7 +15,9 @@ import android.os.PowerManager;
 import android.provider.OpenableColumns;
 import android.util.Log;
 import android.view.Display;
+import android.view.InputDevice;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -41,13 +44,15 @@ import java.util.concurrent.CountDownLatch;
  *  - Storage: where saves, mods and the ROM live, with the permission flow
  *    ({@link StorageAccess}); the native side asks via {@link #getDataDirectory()}.
  *  - A blocking document picker that the native nfd replacement calls over JNI.
+ *  - Touch controls ({@link TouchControllerView}) as an overlay when there's no physical
+ *    gamepad (or always / never, per Input > Touch > Touch Controls).
  *  - The graphics driver choice ({@link GpuDrivers}), crash detection and log sharing
  *    ({@link Diagnostics}).
  *  - Game-friendly window behaviour: immersive fullscreen, screen kept on, drawing into
  *    the display cutout, a steady 60 Hz on adaptive-refresh screens.
  */
 public class BTActivity extends SDLActivity
-        implements DisplayManager.DisplayListener {
+        implements InputManager.InputDeviceListener, DisplayManager.DisplayListener {
     private static final String TAG = "BTRecomp";
     private static final String ASSET_ROOT = "game";
     private static final int PICK_REQUEST_CODE = 0x6E6664; // "nfd"
@@ -59,6 +64,8 @@ public class BTActivity extends SDLActivity
     private StorageAccess storage;
 
     private DisplayManager displayManager;
+    private InputManager inputManager;
+    private TouchControllerView overlay;
 
     private final Object pickLock = new Object();
     private CountDownLatch pickLatch;
@@ -90,6 +97,7 @@ public class BTActivity extends SDLActivity
         offerCrashReport(lastCrash);
 
         displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
 
         // SDLActivity builds its layout (with the game surface) in onCreate. If the native
         // libraries failed to load it shows an error instead and mLayout stays null.
@@ -100,6 +108,9 @@ public class BTActivity extends SDLActivity
             for (int i = 0; i < mLayout.getChildCount(); i++) {
                 mLayout.getChildAt(i).setDefaultFocusHighlightEnabled(false);
             }
+            overlay = new TouchControllerView(this);
+            mLayout.addView(overlay, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
     }
 
@@ -108,15 +119,23 @@ public class BTActivity extends SDLActivity
         super.onResume();
         storage.onResume();
         displayManager.registerDisplayListener(this, null);
+        inputManager.registerInputDeviceListener(this, null);
         setForeground(true);
         hideSystemBars();
         preferSixtyHz();
+        // Controllers may have come or gone while we were away.
+        updateTouchControls();
         Diagnostics.markPlaying(this);
     }
 
     @Override
     protected void onPause() {
+        // Nothing may stay held while the game can't see the player's fingers.
+        if (overlay != null) {
+            overlay.releaseAll();
+        }
         displayManager.unregisterDisplayListener(this);
+        inputManager.unregisterInputDeviceListener(this);
         Diagnostics.markLeaving(this);
         super.onPause();
         setForeground(false);
@@ -125,6 +144,7 @@ public class BTActivity extends SDLActivity
     @Override
     protected void onDestroy() {
         Diagnostics.markLeaving(this);
+        TouchInput.shutdown();
         super.onDestroy();
     }
 
@@ -135,6 +155,9 @@ public class BTActivity extends SDLActivity
             // System bars come back after dialogs, the notification shade, etc.
             hideSystemBars();
             preferSixtyHz();
+            // By now the game has usually started SDL: create the virtual gamepad if the
+            // touch controls wanted it before SDL was ready.
+            TouchInput.ensure();
         }
     }
 
@@ -312,6 +335,70 @@ public class BTActivity extends SDLActivity
      * rate are left alone.
      */
     private int preferredModeId = -1;
+
+    // ------------------------------------------------------------------------------
+    // Touch controls
+    // ------------------------------------------------------------------------------
+
+    private static final String PREFS_TOUCH = "touch";
+
+    /** Input > Touch > Touch Controls: 0 auto (only without a controller), 1 on, 2 off. */
+    private int touchControlsPref() {
+        return getSharedPreferences(PREFS_TOUCH, MODE_PRIVATE).getInt("touch_controls", 0);
+    }
+
+    /** Shows the on-screen controller when it's wanted. */
+    private void updateTouchControls() {
+        if (overlay == null) {
+            return;
+        }
+        int mode = touchControlsPref();
+        overlay.setActive(mode == 1 || (mode == 0 && !hasPhysicalGamepad()));
+    }
+
+    /** From the game's settings (any thread): "" reads the mode, "0"-"2" sets it. */
+    @SuppressWarnings("unused")
+    public String touchControlsMode(String mode) {
+        if (mode != null && !mode.isEmpty()) {
+            int value = Math.max(0, Math.min(2, mode.charAt(0) - '0'));
+            getSharedPreferences(PREFS_TOUCH, MODE_PRIVATE).edit().putInt("touch_controls", value).apply();
+            runOnUiThread(this::updateTouchControls);
+            return String.valueOf(value);
+        }
+        return String.valueOf(touchControlsPref());
+    }
+
+    /** From the game's settings (Input > Touch > Edit Touch Layout): opens the layout editor. */
+    @SuppressWarnings("unused")
+    public String editTouchLayout(String unused) {
+        runOnUiThread(() -> {
+            if (overlay != null) {
+                overlay.bringToFront();
+                overlay.startEditing();
+            }
+        });
+        return null;
+    }
+
+    /** A real gamepad (a handheld's built-in controls count) is connected. */
+    private boolean hasPhysicalGamepad() {
+        for (int id : InputDevice.getDeviceIds()) {
+            InputDevice device = InputDevice.getDevice(id);
+            if (device == null || device.isVirtual()) {
+                continue;
+            }
+            int sources = device.getSources();
+            if ((sources & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+                    || (sources & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    @Override public void onInputDeviceAdded(int deviceId) { updateTouchControls(); }
+    @Override public void onInputDeviceRemoved(int deviceId) { updateTouchControls(); }
+    @Override public void onInputDeviceChanged(int deviceId) { updateTouchControls(); }
 
     @Override public void onDisplayAdded(int displayId) { }
     @Override public void onDisplayRemoved(int displayId) { }

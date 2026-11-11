@@ -70,6 +70,7 @@
 #include <mutex>
 #include <thread>
 #include "../android/jni/gpu_driver.h"
+#include "android_config.hpp"
 // android/jni/gpu_driver.cpp and perf_monitor.cpp.
 extern "C" void bt_android_watch_quit();
 extern "C" void bt_android_start_perf_monitor();
@@ -576,105 +577,6 @@ std::vector<recomp::GameEntry> supported_games = {
     },
 };
 
-#if defined(__ANDROID__)
-// Android settings: four tabs, Video, Input, Audio and Gameplay, plus Mods. The General config
-// still exists (and keeps its file) but its options are shown on the Input tab; the controller
-// setup opens from Input > Configure Inputs. (RecompFrontend Android patch: layout tabs and
-// page buttons.)
-static void initialize_android_config(const recompui::config::GeneralTabOptions& general_options) {
-    using Entry = recompui::config::LayoutEntry;
-    using Kind = Entry::Kind;
-
-    recompui::config::create_general_tab(general_options);
-    recompui::config::set_tab_visible(recompui::config::general::id, false);
-
-    // Video > Graphics Driver: a button that opens the driver menu (pick, install, remove).
-    // The driver loads when the app starts, so changing it restarts the app, which is only
-    // offered on the main menu.
-    auto& graphics_config = recompui::config::create_graphics_tab("Video");
-    {
-        Entry driver;
-        driver.kind = Kind::Button;
-        driver.text = "Graphics Driver";
-        driver.description = "Choose the Vulkan driver used for rendering: the device's own, or a custom one such as Turnip. "
-            "Install and remove drivers here too. Changing the driver restarts the app, so it can only be done from the main menu. "
-            "In use now: " + bt::android::active_gpu_driver() + ". App version: " + bt::android::app_version() + ".";
-        driver.on_press = []() {
-            if (ultramodern::is_game_started()) {
-                recompui::open_info_prompt("Graphics Driver",
-                    "The graphics driver can only be changed from the main menu, because the app restarts to use it. "
-                    "Use QUIT > Main Menu, then open Settings > Video > Graphics Driver.",
-                    "OK", []() {});
-                return;
-            }
-            bt::android::open_gpu_driver_manager();
-        };
-        recompui::config::add_page_button(graphics_config, std::move(driver));
-    }
-
-    const std::string g = recompui::config::general::id;
-    namespace gopts = recompui::config::general::options;
-    auto header = [](const std::string& text) { Entry e; e.kind = Kind::Header; e.text = text; return e; };
-    auto option = [](const std::string& cfg, const std::string& id) { Entry e; e.kind = Kind::Option; e.config_id = cfg; e.option_id = id; return e; };
-
-    Entry configure;
-    configure.kind = Kind::Button;
-    configure.text = "Configure Inputs";
-    configure.description = "Choose which button does what on your controller.";
-    configure.on_press = []() { recompui::config::set_tab(recompui::config::controls::id); };
-
-    recompui::config::create_layout_tab("Input", "input", {
-        header("Inputs"),
-        configure,
-        option(g, gopts::joystick_deadzone),
-        option(g, gopts::rumble_strength),
-    }, { g });
-
-    recompui::config::create_sound_tab("Audio");
-
-    // Where saves, settings, mods and the ROM are kept: app storage or a shared folder.
-    // Moving them restarts the app, so (like the graphics driver) only from the main menu.
-    Entry files;
-    files.kind = Kind::Button;
-    files.text = "Game Files Location";
-    {
-        const std::string where = bt::android::storage_description();
-        files.description = "Move your saves, settings, mods and ROM between app storage and a shared folder "
-            "(easy to reach from a PC, and kept if the app is uninstalled). Everything is copied, then the app restarts; "
-            "only from the main menu."
-            + (where.empty() ? std::string() : "<br />Now in " + where + ".");
-    }
-    files.on_press = []() {
-        if (ultramodern::is_game_started()) {
-            recompui::open_info_prompt("Game Files Location",
-                "The game files can only be moved from the main menu, because the app restarts to use the new place. "
-                "Use QUIT > Main Menu, then open Settings > Gameplay > Game Files Location.",
-                "OK", []() {});
-            return;
-        }
-        bt::android::change_storage_location();
-    };
-
-    Entry share;
-    share.kind = Kind::Button;
-    share.text = "Share Log";
-    share.description = "Send a log report (app version, device, graphics driver and the game's output from this "
-        "and the previous session) to fix a problem. Nothing personal is included. App version: "
-        + bt::android::app_version() + ".";
-    share.on_press = []() { bt::android::share_log(); };
-
-    recompui::config::create_layout_tab("Gameplay", "gameplay", {
-        header("Storage"),
-        files,
-        header("Help"),
-        share,
-    }, {});
-
-    recompui::config::create_controls_tab("Configure Inputs");
-    recompui::config::create_mods_tab();
-}
-#endif
-
 void initialize_config() {
     const std::filesystem::path recomp_dir =
         recompui::file::get_app_folder_path();
@@ -684,7 +586,7 @@ void initialize_config() {
 
     recompui::config::GeneralTabOptions general_options{};
 #if defined(__ANDROID__)
-    initialize_android_config(general_options);
+    bt::android::initialize_config(general_options);
 #else
     recompui::config::create_general_tab(general_options);
     recompui::config::create_graphics_tab();
@@ -693,6 +595,9 @@ void initialize_config() {
     recompui::config::create_mods_tab();
 #endif
     recompui::config::finalize();
+#if defined(__ANDROID__)
+    bt::android::after_config_loaded();
+#endif
 }
 
 // The launcher wallpaper.
@@ -972,6 +877,16 @@ int main(int argc, char** argv) {
 
     recompui::register_ui_exports();
     recompui::register_launcher_init_callback(initialize_launcher_menu);
+#if defined(__ANDROID__)
+    // First launch: Classic or Modern (src/android_config.cpp).
+    recompui::register_launcher_update_callback([](recompui::LauncherMenu*) {
+        static bool asked = false;
+        if (!asked) {
+            asked = true;
+            bt::android::on_launcher_first_update();
+        }
+    });
+#endif
     std::fprintf(stderr, "[tooie] step ui_exports\n"); std::fflush(stderr);
 
     tooie::register_overlays();

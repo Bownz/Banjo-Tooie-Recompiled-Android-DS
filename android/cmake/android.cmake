@@ -152,8 +152,10 @@ function(bt_configure_android_target target)
     set_source_files_properties("${CMAKE_SOURCE_DIR}/src/main.cpp"
         PROPERTIES COMPILE_DEFINITIONS "main=bt_main")
     target_sources(${target} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src/android_config.cpp"
         "${CMAKE_SOURCE_DIR}/android/jni/android_main.cpp"
         "${CMAKE_SOURCE_DIR}/android/jni/gpu_driver.cpp"
+        "${CMAKE_SOURCE_DIR}/android/jni/touch_controller.cpp"
         "${CMAKE_SOURCE_DIR}/android/jni/perf_monitor.cpp")
     if (BT_ANDROID_HAVE_ADRENOTOOLS)
         target_link_libraries(${target} PRIVATE adrenotools)

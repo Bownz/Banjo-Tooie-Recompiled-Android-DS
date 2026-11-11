@@ -463,7 +463,7 @@ index 277a421..a987bdf 100644
          true
      );
 +#ifdef __ANDROID__
-+    // Main Menu: restarts the app to the launcher (DK64 Android). Only while playing.
++    // Main Menu: restarts the app to the launcher (Android). Only while playing.
 +    if (bt_android_restart_to_launcher != nullptr && ultramodern::is_game_started()) {
 +        recompui::set_prompt_extra_button("Main Menu", []() { bt_android_restart_to_launcher(); }, recompui::ButtonStyle::Secondary);
 +    }
@@ -660,7 +660,7 @@ index 0000000..62d8030
 +++ b/recompui/src/composites/ui_menu_bar.cpp
 @@ -0,0 +1,275 @@
 +// Android: the in-game menu bar. The menu button opens a slim bar across the top of the
-+// screen (in the bottom screen's DK style) instead of the full settings window; the bar opens
++// screen (in the Banjo style) instead of the full settings window; the bar opens
 +// Settings or Mods in the settings window, or quits. Like the Dusklight port's.
 +#ifdef __ANDROID__
 +
@@ -679,7 +679,7 @@ index 0000000..62d8030
 +    const Color wood_edge{58, 30, 6, 255};
 +    const Color tan{232, 213, 168, 255};
 +    const Color cream{255, 244, 214, 255};
-+    const Color banana{249, 214, 72, 255};
++    const Color honey{255, 186, 40, 255};
 +
 +    ContextId menu_bar_context{};
 +    bool menu_bar_ready = false;
@@ -690,7 +690,7 @@ index 0000000..62d8030
 +    std::vector<MenuBarItem *> menu_bar_items;   // in order, for L / R
 +    void focus_neighbour(MenuBarItem *from, int step);
 +
-+    // One entry on the bar: chunky capitals, banana yellow in a rounded outline when focused.
++    // One entry on the bar: chunky capitals, honey gold in a rounded outline when focused.
 +    class MenuBarItem : public Element {
 +    private:
 +        std::function<void()> on_press;
@@ -746,8 +746,8 @@ index 0000000..62d8030
 +            set_color(tan);
 +            hover_style.set_color(cream);
 +            hover_style.set_background_color(Color{96, 62, 28, 230});
-+            focus_style.set_color(banana);
-+            focus_style.set_border_color(banana);
++            focus_style.set_color(honey);
++            focus_style.set_border_color(honey);
 +            focus_style.set_background_color(Color{42, 20, 4, 240});
 +            add_style(&hover_style, { hover_state });
 +            add_style(&focus_style, { focus_state });
@@ -1281,17 +1281,17 @@ index 86428c9..88e6c39 100644
  namespace recompui {
  
 +#ifdef __ANDROID__
-+// Colours of the bottom screen's DK look.
++// Colours of the Banjo look.
 +// Rows are dark, see-through wood with a thin edge (calmer, like the Dusklight port's rows);
-+// the focused row lights up with a banana-yellow edge.
-+static const Color dk_wood{62, 38, 16, 205};
-+static const Color dk_wood_light{96, 62, 28, 230};
-+static const Color dk_wood_edge{168, 128, 72, 120};
-+static const Color dk_banana{249, 214, 72, 255};
-+static const Color dk_cream{255, 244, 214, 255};
-+static const Color dk_tan{232, 213, 168, 255};
++// the focused row lights up with a honey-gold edge.
++static const Color wood{62, 38, 16, 205};
++static const Color wood_light{96, 62, 28, 230};
++static const Color wood_edge{168, 128, 72, 120};
++static const Color honey{255, 186, 40, 255};
++static const Color cream{255, 244, 214, 255};
++static const Color tan_colour{232, 213, 168, 255};
 +
-+void style_dk_option_row(Element *row) {
++void style_wood_option_row(Element *row) {
 +    // Every row the same height (70dp with its padding) and 10dp apart.
 +    row->set_display(Display::Flex);
 +    row->set_flex_direction(FlexDirection::Row);
@@ -1306,15 +1306,15 @@ index 86428c9..88e6c39 100644
 +    row->set_padding_right(28.0f);
 +    row->set_border_radius(24.0f);
 +    row->set_border_width(2.0f);
-+    row->set_border_color(dk_wood_edge);
-+    row->set_background_color(dk_wood);
++    row->set_border_color(wood_edge);
++    row->set_background_color(wood);
 +    row->set_gap(16.0f);
 +}
 +
 +ConfigEnumStepper::ConfigEnumStepper(ResourceId rid, Element *parent, const std::string &name_text) :
 +    Element(rid, parent, Events(EventType::Click, EventType::Hover, EventType::Focus, EventType::Navigate, EventType::Enable), "button", false)
 +{
-+    style_dk_option_row(this);
++    style_wood_option_row(this);
 +    set_cursor(Cursor::Pointer);
 +    set_focusable(true);
 +    set_tab_index_auto();
@@ -1322,9 +1322,9 @@ index 86428c9..88e6c39 100644
 +    set_nav_none(NavDirection::Left);
 +    set_nav_none(NavDirection::Right);
 +
-+    hover_style.set_background_color(dk_wood_light);
-+    focus_style.set_background_color(dk_wood_light);
-+    focus_style.set_border_color(dk_banana);
++    hover_style.set_background_color(wood_light);
++    focus_style.set_background_color(wood_light);
++    focus_style.set_border_color(honey);
 +    disabled_style.set_opacity(0.45f);
 +    disabled_style.set_cursor(Cursor::None);
 +    add_style(&hover_style, { hover_state });
@@ -1339,18 +1339,18 @@ index 86428c9..88e6c39 100644
 +    name = context.create_element<Label>(left, name_text, theme::Typography::LabelMD);
 +    name->set_text_transform(TextTransform::Uppercase);
 +    name->set_font_weight(700);
-+    name->set_color(dk_cream);
++    name->set_color(cream);
 +    details = context.create_element<Label>(left, "", theme::Typography::LabelXS);
-+    details->set_color(dk_tan);
++    details->set_color(tan_colour);
 +    details->set_display(Display::None);
 +
 +    value = context.create_element<Label>(this, "", theme::Typography::LabelMD);
 +    value->set_font_weight(700);
-+    value->set_color(dk_cream);
++    value->set_color(cream);
 +    value->set_white_space(WhiteSpace::Nowrap);
 +}
 +
-+// The value is plain text; the arrows (and banana yellow) only show on the focused row.
++// The value is plain text; the arrows (and honey gold) only show on the focused row.
 +void ConfigEnumStepper::set_value_text(const std::string &text) {
 +    value_text = text;
 +    show_value();
@@ -1359,10 +1359,10 @@ index 86428c9..88e6c39 100644
 +void ConfigEnumStepper::show_value() {
 +    if (focused) {
 +        value->set_text("\u2039  " + value_text + "  \u203A");
-+        value->set_color(dk_banana);
++        value->set_color(honey);
 +    } else {
 +        value->set_text(value_text);
-+        value->set_color(dk_cream);
++        value->set_color(cream);
 +    }
 +}
 +
@@ -1428,11 +1428,11 @@ index 86428c9..88e6c39 100644
 +    set_padding_left(0.0f);
 +    set_padding_right(0.0f);
 +    if (option.type != recomp::config::ConfigOptionType::Enum) {
-+        style_dk_option_row(this);
++        style_wood_option_row(this);
 +        name_label->set_margin_bottom(0.0f);
 +        name_label->set_text_transform(TextTransform::Uppercase);
 +        name_label->set_font_weight(700);
-+        name_label->set_color(dk_cream);
++        name_label->set_color(cream);
 +    }
 +#endif
 +
@@ -1579,8 +1579,8 @@ index 0561657..06088b1 100644
      };
  
 +#ifdef __ANDROID__
-+    // Android: a whole-row "stepper" for choice options, in the bottom screen's DK style (a
-+    // wooden pill: the option's name on the left, its value in banana yellow on the right
++    // Android: a whole-row "stepper" for choice options, in the Banjo style (a
++    // wooden pill: the option's name on the left, its value in honey gold on the right
 +    // between arrows). Tap or A steps to the next value; D-pad left/right step either way.
 +    class ConfigEnumStepper : public Element {
 +    private:
@@ -1607,7 +1607,7 @@ index 0561657..06088b1 100644
 +    };
 +
 +    // The wooden pill look shared by every option row on Android.
-+    void style_dk_option_row(Element *row);
++    void style_wood_option_row(Element *row);
 +#endif
 +
  class ConfigOptionEnum : public ConfigOptionElement {
@@ -1644,12 +1644,12 @@ index f379a6f..926d336 100644
      scroll_buffer = context.create_element<ScrollBuffer>(this, 16.0f);
 +
 +#ifdef __ANDROID__
-+    // The settings rows' DK look: dark wood with a thin edge, banana-yellow edge when active.
-+    style_dk_option_row(this);
++    // The settings rows' Banjo look: dark wood with a thin edge, honey-gold edge when active.
++    style_wood_option_row(this);
 +    set_height(70.0f);
 +    set_padding_right(14.0f);
 +    active_style.set_background_color(Color{96, 62, 28, 230});
-+    active_style.set_border_color(Color{249, 214, 72, 255});
++    active_style.set_border_color(Color{255, 186, 40, 255});
 +    label->set_text_transform(TextTransform::Uppercase);
 +    label->set_font_weight(700);
 +    label->set_color(Color{255, 244, 214, 255});
@@ -1762,7 +1762,7 @@ index f379a6f..926d336 100644
 +            top->set_padding_right(8.0f);
 +
 +            Element *device = context.create_element<Element>(top, 0, "div", false);
-+            style_dk_option_row(device);
++            style_wood_option_row(device);
 +            Label *device_name = context.create_element<Label>(device, "Device", theme::Typography::LabelMD);
 +            device_name->set_text_transform(TextTransform::Uppercase);
 +            device_name->set_font_weight(700);
@@ -1830,15 +1830,15 @@ index f379a6f..926d336 100644
 +}
 +
 +// A picture of a whole controller (Xbox / Nintendo / PlayStation labels). Buttons light up
-+// while they're pressed (filled banana yellow), and the buttons bound to the row you're on
-+// get a banana outline.
++// while they're pressed (filled honey gold), and the buttons bound to the row you're on
++// get a honey outline.
 +namespace {
 +    const Color pad_body{46, 28, 12, 235};
 +    const Color pad_edge{168, 128, 72, 255};
 +    const Color part_idle{78, 50, 22, 255};
 +    const Color part_edge{120, 86, 44, 255};
 +    const Color part_text{232, 213, 168, 255};
-+    const Color lit_fill{249, 214, 72, 255};
++    const Color lit_fill{255, 186, 40, 255};
 +    const Color lit_text{58, 30, 6, 255};
 +
 +    SDL_GameController *first_controller() {
@@ -2242,10 +2242,10 @@ index 6ba64e2..5871977 100644
 +            on_press(std::move(press)), on_focus(std::move(focus))
 +        {
 +#ifdef __ANDROID__
-+            style_dk_option_row(this);
++            style_wood_option_row(this);
 +            hover_style.set_background_color(Color{96, 62, 28, 230});
 +            focus_style.set_background_color(Color{96, 62, 28, 230});
-+            focus_style.set_border_color(Color{249, 214, 72, 255});
++            focus_style.set_border_color(Color{255, 186, 40, 255});
 +#else
 +            set_padding(16.0f);
 +#endif
@@ -2261,7 +2261,7 @@ index 6ba64e2..5871977 100644
 +            name->set_color(Color{255, 244, 214, 255});
 +            Label *arrow = context.create_element<Label>(this, "\u203A", theme::Typography::LabelMD);
 +            arrow->set_font_weight(700);
-+            arrow->set_color(Color{249, 214, 72, 255});
++            arrow->set_color(Color{255, 186, 40, 255});
 +        }
 +    };
 +}
@@ -2613,7 +2613,7 @@ index caa1020..355460f 100644
          disabled_style.set_cursor(Cursor::None);
  
 +#ifdef __ANDROID__
-+        // DK look: dark wooden chips; the selected one gets a banana-yellow edge.
++        // Banjo look: dark wooden chips; the selected one gets a honey-gold edge.
 +        set_border_color(Color{168, 128, 72, 110});
 +        set_background_color(Color{42, 20, 4, 200});
 +        set_color(Color{255, 244, 214, 255});
@@ -2621,9 +2621,9 @@ index caa1020..355460f 100644
 +        hover_style.set_border_color(Color{232, 213, 168, 200});
 +        hover_style.set_background_color(Color{70, 42, 18, 230});
 +        hover_style.set_color(Color{255, 244, 214, 255});
-+        focus_style.set_border_color(Color{249, 214, 72, 255});
++        focus_style.set_border_color(Color{255, 186, 40, 255});
 +        focus_style.set_background_color(Color{70, 42, 18, 240});
-+        focus_style.set_color(Color{249, 214, 72, 255});
++        focus_style.set_color(Color{255, 186, 40, 255});
 +#endif
          add_style(&hover_style, hover_state);
          add_style(&focus_style, focus_state);
@@ -2703,7 +2703,7 @@ index b057f46..010102f 100644
      modal_element->set_nav_wrapping(true);
  
 +#ifdef __ANDROID__
-+    // DK look: a gold frame round the jungle-green glass panel.
++    // Banjo look: a gold frame round the panel.
 +    modal_element->set_border_width(3.0f);
 +    modal_element->set_border_color(Color{206, 162, 70, 255});
 +    modal_element->set_border_radius(26.0f);
@@ -2896,11 +2896,11 @@ index 2c5dc52..3d04f98 100644
      indicator->set_background_color(theme::color::Transparent);
  
 +#ifdef __ANDROID__
-+    // The bottom screen's DK look, laid out like the Dusklight port's tabs: big chunky
++    // The Banjo look, laid out like the Dusklight port's tabs: big chunky
 +    // capitals spread across the wooden bar, tan when idle; the open tab is a darker inset
-+    // with a banana-yellow bar under it.
++    // with a honey-gold bar under it.
 +    {
-+        const Color tan{232, 213, 168, 255}, banana{249, 214, 72, 255}, cream{255, 244, 214, 255};
++        const Color tan{232, 213, 168, 255}, honey{255, 186, 40, 255}, cream{255, 244, 214, 255};
 +        label->set_font_family("LatoLatin");
 +        label->set_font_weight(400);
 +        label->set_font_size(28.0f);
@@ -2913,7 +2913,7 @@ index 2c5dc52..3d04f98 100644
 +        set_padding_right(32.0f);
 +        set_color(tan);
 +        hover_style.set_color(cream);
-+        checked_style.set_color(banana);
++        checked_style.set_color(honey);
 +        checked_style.set_background_color(Color{42, 20, 4, 110});
 +        pulsing_style.set_color(cream);
 +        indicator->set_height(5.0f);
@@ -2929,7 +2929,7 @@ index 2c5dc52..3d04f98 100644
          set_style_enabled(disabled_state, !active);
 +#ifdef __ANDROID__
 +        if (active && is_selected) {
-+            indicator->set_background_color(Color{249, 214, 72, 255});
++            indicator->set_background_color(Color{255, 186, 40, 255});
 +        } else {
 +            indicator->set_background_color(theme::color::Transparent);
 +        }
@@ -2957,7 +2957,7 @@ index 2c5dc52..3d04f98 100644
              pulsing_style.set_color(pulse_color);
              if (is_selected) {
 +#ifdef __ANDROID__
-+                indicator->set_background_color(Color{249, 214, 72, 255});
++                indicator->set_background_color(Color{255, 186, 40, 255});
 +#else
                  indicator->set_background_color(pulse_color);
 +#endif
@@ -2970,7 +2970,7 @@ index 2c5dc52..3d04f98 100644
      set_style_enabled(checked_state, enable);
 +#ifdef __ANDROID__
 +    if (enable) {
-+        indicator->set_background_color(Color{249, 214, 72, 255});
++        indicator->set_background_color(Color{255, 186, 40, 255});
 +    } else {
 +        indicator->set_background_color(theme::color::Transparent);
 +    }
