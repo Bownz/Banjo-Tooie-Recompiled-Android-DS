@@ -80,6 +80,36 @@ inline unsigned short host_backtrace(void** frames, unsigned count) {
 inline uintptr_t host_image_base() {
     return reinterpret_cast<uintptr_t>(&__ImageBase);
 }
+#elif defined(__ANDROID__)
+// Android's libc only has backtrace(3) from API 33, and the app supports API 28, so walk
+// the stack with the unwinder instead. The frames are absolute, as on Linux.
+#include <unwind.h>
+
+struct HostBacktraceState {
+    void** frames;
+    unsigned count;
+    unsigned captured;
+};
+
+inline _Unwind_Reason_Code host_backtrace_frame(_Unwind_Context* context, void* arg) {
+    auto* state = static_cast<HostBacktraceState*>(arg);
+    if (state->captured >= state->count) {
+        return _URC_END_OF_STACK;
+    }
+    const uintptr_t pc = _Unwind_GetIP(context);
+    if (pc != 0) {
+        state->frames[state->captured++] = reinterpret_cast<void*>(pc);
+    }
+    return _URC_NO_REASON;
+}
+
+inline unsigned short host_backtrace(void** frames, unsigned count) {
+    HostBacktraceState state{ frames, count, 0 };
+    _Unwind_Backtrace(host_backtrace_frame, &state);
+    return static_cast<unsigned short>(state.captured);
+}
+
+inline uintptr_t host_image_base() { return 0; }
 #else
 #include <execinfo.h>
 
