@@ -1,0 +1,461 @@
+diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
+index f1dd503..ca9530c 100644
+--- a/plume_vulkan.cpp
++++ b/plume_vulkan.cpp
+@@ -27,7 +27,18 @@
+ // TODO:
+ // - Fix resource pools.
+ 
++#if defined(__ANDROID__)
++// Defined by the DK64 Android glue (android/jni/gpu_driver.cpp) if present: returns the
++// vkGetInstanceProcAddr of a custom Vulkan driver to use instead of the system one, or null.
++extern "C" void *bt_android_vulkan_loader() __attribute__((weak));
++#endif
++
+ namespace plume {
++#if defined(__ANDROID__)
++    // Per-stage sampled-image limit of the device in use (for RT64's Android texture table).
++    uint32_t VulkanMaxPerStageSampledImages = 0;
++#endif
++
+     // Backend constants.
+ 
+     // Required buffer alignment for acceleration structures.
+@@ -1880,6 +1891,10 @@ namespace plume {
+         return it->second;
+     }
+ 
++#if defined(__ANDROID__)
++    ANativeWindow *(*AndroidWindowProvider)() = nullptr;
++#endif
++
+     // VulkanDescriptorSet
+ 
+     VulkanDescriptorSet::VulkanDescriptorSet(VulkanDevice *device, const RenderDescriptorSetDesc &desc) {
+@@ -1899,7 +1914,14 @@ namespace plume {
+             boundlessRangeSize = std::max(desc.boundlessRangeSize, 1U);
+ 
+             const RenderDescriptorRange &lastDescriptorRange = desc.descriptorRanges[desc.descriptorRangesCount - 1];
++#       if defined(__ANDROID__)
++            // Adreno drivers reserve a variable-count binding's declared upper bound when
++            // allocating, ignoring the variable count, so a pool sized for the variable count
++            // fails with VK_ERROR_OUT_OF_POOL_MEMORY. Size the pool for the upper bound.
++            typeCounts[toVk(lastDescriptorRange.type)] += std::max(boundlessRangeSize, lastDescriptorRange.count);
++#       else
+             typeCounts[toVk(lastDescriptorRange.type)] += boundlessRangeSize;
++#       endif
+             rangeCount--;
+         }
+ 
+@@ -1991,6 +2013,13 @@ namespace plume {
+             imageInfo.imageView = (interfaceTexture != nullptr) ? interfaceTexture->imageView : VK_NULL_HANDLE;
+         }
+ 
++#if defined(__ANDROID__)
++        // Writing a null image view is invalid without nullDescriptor; Adreno can corrupt the
++        // neighbouring texture slots. Leave the previous descriptor in place instead.
++        if (imageInfo.imageView == VK_NULL_HANDLE) {
++            return;
++        }
++#endif
+         setDescriptor(descriptorIndex, nullptr, &imageInfo, nullptr, nullptr);
+     }
+ 
+@@ -2310,6 +2339,20 @@ namespace plume {
+     }
+ 
+     bool VulkanSwapChain::resize() {
++#   if defined(__ANDROID__)
++        if (AndroidWindowProvider != nullptr) {
++            ANativeWindow *currentWindow = AndroidWindowProvider();
++            if (currentWindow == nullptr) {
++                // No surface right now (app in the background); try again later.
++                return false;
++            }
++
++            if ((currentWindow != desc.renderWindow) && !recreateAndroidSurface(currentWindow)) {
++                return false;
++            }
++        }
++#   endif
++
+         getWindowSize(width, height);
+ 
+         // Don't recreate the swap chain at all if the window doesn't have a valid size.
+@@ -2349,6 +2392,12 @@ namespace plume {
+         VkResult res = vkCreateSwapchainKHR(commandQueue->device->vk, &createInfo, nullptr, &vk);
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "vkCreateSwapchainKHR failed with error code 0x%X.\n", res);
++#       if defined(__ANDROID__)
++            // The old swap chain's image views were released above: drop it entirely so
++            // nothing renders into stale images, and the next resize starts clean.
++            vk = createInfo.oldSwapchain;
++            releaseSwapChain();
++#       endif
+             return false;
+         }
+ 
+@@ -2401,6 +2450,12 @@ namespace plume {
+     }
+ 
+     bool VulkanSwapChain::needsResize() const {
++#   if defined(__ANDROID__)
++        if ((AndroidWindowProvider != nullptr) && (AndroidWindowProvider() != desc.renderWindow)) {
++            return true;
++        }
++#   endif
++
+         uint32_t windowWidth, windowHeight;
+         getWindowSize(windowWidth, windowHeight);
+         return (vk == VK_NULL_HANDLE) || (windowWidth != width) || (windowHeight != height) || (requiredPresentMode != createdPresentMode);
+@@ -2494,6 +2549,42 @@ namespace plume {
+         return true;
+     }
+ 
++#if defined(__ANDROID__)
++    bool VulkanSwapChain::recreateAndroidSurface(ANativeWindow *window) {
++        // Everything built on the old surface goes: image views, swap chain, the surface.
++        releaseImageViews();
++        releaseSwapChain();
++
++        VulkanInterface *renderInterface = commandQueue->device->renderInterface;
++        if (surface != VK_NULL_HANDLE) {
++            vkDestroySurfaceKHR(renderInterface->instance, surface, nullptr);
++            surface = VK_NULL_HANDLE;
++        }
++
++        // The VkSurfaceKHR keeps its own reference to the window.
++        VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
++        surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
++        surfaceCreateInfo.window = window;
++        VkResult res = vkCreateAndroidSurfaceKHR(renderInterface->instance, &surfaceCreateInfo, nullptr, &surface);
++        if (res != VK_SUCCESS) {
++            fprintf(stderr, "vkCreateAndroidSurfaceKHR (recreate) failed with error code 0x%X.\n", res);
++            surface = VK_NULL_HANDLE;
++            return false;
++        }
++
++        // Presentation support is per surface; the queue family hasn't changed, but check.
++        VkBool32 presentSupported = VK_FALSE;
++        vkGetPhysicalDeviceSurfaceSupportKHR(commandQueue->device->physicalDevice, commandQueue->familyIndex, surface, &presentSupported);
++        if (!presentSupported) {
++            fprintf(stderr, "Recreated surface does not support presentation.\n");
++            return false;
++        }
++
++        desc.renderWindow = window;
++        return true;
++    }
++#endif
++
+     void VulkanSwapChain::releaseSwapChain() {
+         if (vk != VK_NULL_HANDLE) {
+             vkDestroySwapchainKHR(commandQueue->device->vk, vk, nullptr);
+@@ -2631,6 +2722,41 @@ namespace plume {
+             return;
+         }
+         
++#if defined(__ANDROID__)
++        const uint32_t firstWidth = width, firstHeight = height;
++        // Size the framebuffer to the smallest attachment. RT64 can pair a color target with a
++        // smaller depth buffer (or the reverse); desktop drivers clip to each image, but Adreno
++        // writes the whole render area and faults past the end of the smaller image (a "CCU
++        // write translation fault" that loses the device). Vulkan requires the framebuffer to
++        // fit every attachment anyway.
++        for (uint32_t i = 0; i < desc.colorAttachmentsCount; i++) {
++            const VulkanTexture *t = (desc.colorAttachmentViews && desc.colorAttachmentViews[i])
++                ? static_cast<const VulkanTextureView *>(desc.colorAttachmentViews[i])->texture
++                : static_cast<const VulkanTexture *>(desc.colorAttachments[i]);
++            if (t != nullptr) {
++                width = std::min(width, uint32_t(t->desc.width));
++                height = std::min(height, uint32_t(t->desc.height));
++            }
++        }
++        if (desc.depthAttachment != nullptr || desc.depthAttachmentView != nullptr) {
++            const VulkanTexture *t = desc.depthAttachmentView
++                ? static_cast<const VulkanTextureView *>(desc.depthAttachmentView)->texture
++                : static_cast<const VulkanTexture *>(desc.depthAttachment);
++            if (t != nullptr) {
++                width = std::min(width, uint32_t(t->desc.width));
++                height = std::min(height, uint32_t(t->desc.height));
++            }
++        }
++        if (width != firstWidth || height != firstHeight) {
++            static int logged = 0;
++            if (logged < 20) {
++                logged++;
++                fprintf(stderr, "plume: framebuffer attachments differ in size (%ux%u vs %ux%u); using the smaller\n",
++                    firstWidth, firstHeight, width, height);
++            }
++        }
++#endif
++
+         VkFramebufferCreateInfo fbInfo = {};
+         fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+         fbInfo.renderPass = renderPass;
+@@ -3077,12 +3203,36 @@ namespace plume {
+     }
+ 
+     void VulkanCommandList::setScissors(const RenderRect *scissorRects, uint32_t count) {
++#if defined(__ANDROID__)
++        // Vulkan requires scissor offsets >= 0 (VUID-vkCmdSetScissor-x-00595), but RT64 produces
++        // negative ones for widescreen and extended origins. Desktop drivers tolerate them; Adreno
++        // drops or mis-clips the draws. Clamp to the render target, which clips the same pixels.
++        auto toVkScissor = [this](const RenderRect &rect) {
++            int32_t left = rect.left, top = rect.top, right = rect.right, bottom = rect.bottom;
++            const int32_t maxWidth = (targetFramebuffer != nullptr) ? int32_t(targetFramebuffer->width) : INT32_MAX;
++            const int32_t maxHeight = (targetFramebuffer != nullptr) ? int32_t(targetFramebuffer->height) : INT32_MAX;
++            left = std::clamp(left, 0, maxWidth);
++            top = std::clamp(top, 0, maxHeight);
++            right = std::clamp(right, left, maxWidth);
++            bottom = std::clamp(bottom, top, maxHeight);
++            return VkRect2D{ VkOffset2D{ left, top }, VkExtent2D{ uint32_t(right - left), uint32_t(bottom - top) } };
++        };
++#else
++        auto toVkScissor = [](const RenderRect &rect) {
++            return VkRect2D{ VkOffset2D{ rect.left, rect.top }, VkExtent2D{ uint32_t(rect.right - rect.left), uint32_t(rect.bottom - rect.top) } };
++        };
++#endif
++#if defined(__ANDROID__)
++        if (scissorRects != androidScissors.data()) {
++            androidScissors.assign(scissorRects, scissorRects + count);
++        }
++#endif
+         if (count > 1) {
+             thread_local std::vector<VkRect2D> scissorVector;
+             scissorVector.clear();
+ 
+             for (uint32_t i = 0; i < count; i++) {
+-                scissorVector.emplace_back(VkRect2D{ VkOffset2D{ scissorRects[i].left, scissorRects[i].top }, VkExtent2D{ uint32_t(scissorRects[i].right - scissorRects[i].left), uint32_t(scissorRects[i].bottom - scissorRects[i].top) } });
++                scissorVector.emplace_back(toVkScissor(scissorRects[i]));
+             }
+ 
+             if (!scissorVector.empty()) {
+@@ -3091,7 +3241,7 @@ namespace plume {
+         }
+         else {
+             // Single element fast path.
+-            VkRect2D scissor = VkRect2D{ VkOffset2D{ scissorRects[0].left, scissorRects[0].top }, VkExtent2D{ uint32_t(scissorRects[0].right - scissorRects[0].left), uint32_t(scissorRects[0].bottom - scissorRects[0].top) } };
++            VkRect2D scissor = toVkScissor(scissorRects[0]);
+             vkCmdSetScissor(vk, 0, 1, &scissor);
+         }
+     }
+@@ -3102,6 +3252,12 @@ namespace plume {
+         if (framebuffer != nullptr) {
+             const VulkanFramebuffer *interfaceFramebuffer = static_cast<const VulkanFramebuffer *>(framebuffer);
+             targetFramebuffer = interfaceFramebuffer;
++#if defined(__ANDROID__)
++            // Scissors set before this target was bound were clamped to the old one: redo them.
++            if (!androidScissors.empty()) {
++                setScissors(androidScissors.data(), uint32_t(androidScissors.size()));
++            }
++#endif
+         }
+         else {
+             targetFramebuffer = nullptr;
+@@ -3118,10 +3274,26 @@ namespace plume {
+         if (clearRectsCount > 0) {
+             for (uint32_t i = 0; i < clearRectsCount; i++) {
+                 VkClearRect clearRect;
++#if defined(__ANDROID__)
++                // Clear rects must lie inside the render area; Adreno writes outside it
++                // (past the end of the image) instead of ignoring the excess.
++                const int32_t left = std::clamp(clearRects[i].left, 0, int32_t(width));
++                const int32_t top = std::clamp(clearRects[i].top, 0, int32_t(height));
++                const int32_t right = std::clamp(clearRects[i].right, left, int32_t(width));
++                const int32_t bottom = std::clamp(clearRects[i].bottom, top, int32_t(height));
++                if (right <= left || bottom <= top) {
++                    continue;
++                }
++                clearRect.rect.offset.x = left;
++                clearRect.rect.offset.y = top;
++                clearRect.rect.extent.width = uint32_t(right - left);
++                clearRect.rect.extent.height = uint32_t(bottom - top);
++#else
+                 clearRect.rect.offset.x = clearRects[i].left;
+                 clearRect.rect.offset.y = clearRects[i].top;
+                 clearRect.rect.extent.width = clearRects[i].right - clearRects[i].left;
+                 clearRect.rect.extent.height = clearRects[i].bottom - clearRects[i].top;
++#endif
+                 clearRect.baseArrayLayer = 0;
+                 clearRect.layerCount = 1;
+                 rectVector.emplace_back(clearRect);
+@@ -3157,6 +3329,9 @@ namespace plume {
+         rgba[3] = colorValue.a;
+         attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+         attachment.colorAttachment = attachmentIndex;
++        if (rectVector.empty()) {
++            return;   // every rect was outside the render target
++        }
+         vkCmdClearAttachments(vk, 1, &attachment, uint32_t(rectVector.size()), rectVector.data());
+     }
+ 
+@@ -3180,6 +3355,9 @@ namespace plume {
+             attachment.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+         }
+ 
++        if (rectVector.empty()) {
++            return;   // every rect was outside the render target
++        }
+         vkCmdClearAttachments(vk, 1, &attachment, uint32_t(rectVector.size()), rectVector.data());
+     }
+ 
+@@ -3703,13 +3881,29 @@ namespace plume {
+     
+     // VulkanQueueFamily
+ 
++#if defined(__ANDROID__)
++    bool vulkanHighPriorityQueueCreation = false;
++#endif
++
+     void VulkanQueueFamily::add(VulkanCommandQueue *virtualQueue) {
+         assert(virtualQueue != nullptr);
+ 
+         // Insert virtual queue into the queue with the least amount of virtual queues.
+         uint32_t queueIndex = 0;
+         uint32_t lowestCount = UINT_MAX;
+-        for (uint32_t i = 0; i < queues.size(); i++) {
++        uint32_t firstCandidate = 0;
++        uint32_t endCandidate = uint32_t(queues.size());
++#   if defined(__ANDROID__)
++        if (queues.size() >= 2) {
++            if (vulkanHighPriorityQueueCreation) {
++                endCandidate = 1; // Queue 0 is the high-priority one.
++            }
++            else {
++                firstCandidate = 1;
++            }
++        }
++#   endif
++        for (uint32_t i = firstCandidate; i < endCandidate; i++) {
+             uint32_t virtualQueueCount = uint32_t(queues[i].virtualQueues.size());
+             if (virtualQueueCount < lowestCount) {
+                 queueIndex = i;
+@@ -3828,6 +4022,12 @@ namespace plume {
+ 
+         // Store properties.
+         vkGetPhysicalDeviceProperties(physicalDevice, &physicalDeviceProperties);
++#if defined(__ANDROID__)
++        VulkanMaxPerStageSampledImages = std::min(physicalDeviceProperties.limits.maxPerStageDescriptorSampledImages,
++            physicalDeviceProperties.limits.maxDescriptorSetSampledImages);
++        fprintf(stdout, "Vulkan sampled image limits: per stage %u, per set %u\n",
++            physicalDeviceProperties.limits.maxPerStageDescriptorSampledImages, physicalDeviceProperties.limits.maxDescriptorSetSampledImages);
++#endif
+ 
+         // Check for supported features.
+         void *featuresChain = nullptr;
+@@ -4018,12 +4218,22 @@ namespace plume {
+         // Create the logical device with the desired family queues.
+         std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
+         std::vector<float> queuePriorities(MaxQueuesPerFamilyCount, 1.0f);
++#   if defined(__ANDROID__)
++        // Queue 0 is the high-priority one (see vulkanHighPriorityQueueCreation).
++        for (uint32_t i = 1; i < MaxQueuesPerFamilyCount; i++) {
++            queuePriorities[i] = 0.5f;
++        }
++#   endif
+         queueCreateInfos.reserve(queueFamilyCount);
+         for (uint32_t i = 0; i < queueFamilyCount; i++) {
+             if (queueFamilyUsed[i]) {
+                 VkDeviceQueueCreateInfo queueCreateInfo = {};
+                 queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+                 queueCreateInfo.queueCount = std::min(queueFamilyProperties[i].queueCount, MaxQueuesPerFamilyCount);
++#           if defined(__ANDROID__)
++                fprintf(stdout, "Vulkan queue family %u: %u queues available, %u used, flags 0x%X\n", i, queueFamilyProperties[i].queueCount, queueCreateInfo.queueCount, uint32_t(queueFamilyProperties[i].queueFlags));
++                fflush(stdout);
++#           endif
+                 queueCreateInfo.queueFamilyIndex = i;
+                 queueCreateInfo.pQueuePriorities = queuePriorities.data();
+                 queueCreateInfos.emplace_back(queueCreateInfo);
+@@ -4149,7 +4359,15 @@ namespace plume {
+ #   endif
+ 
+         // Fill Vulkan-only capabilities.
++#if defined(__ANDROID__)
++        // LOAD/STORE_OP_NONE on read-only depth leaves depth undefined inside the render pass.
++        // Desktop GPUs keep the old values anyway; tile-based GPUs (Adreno, Mali) don't load them
++        // into tile memory, so depth tests (e.g. DK64's water) pass or fail per tile, giving
++        // rectangular blocks drawn over the scene. Use LOAD/STORE instead.
++        loadStoreOpNoneSupported = false;
++#else
+         loadStoreOpNoneSupported = supportedOptionalExtensions.find(VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME) != supportedOptionalExtensions.end();
++#endif
+ 
+         if (!nullDescriptorSupported) {
+             nullBuffer = createBuffer(RenderBufferDesc::DefaultBuffer(16, RenderBufferFlag::VERTEX));
+@@ -4464,7 +4682,19 @@ namespace plume {
+ #else
+     VulkanInterface::VulkanInterface() {
+ #endif
++#if defined(__ANDROID__)
++        // A custom driver the player installed (DK64 Android glue, via libadrenotools), if any.
++        VkResult res = VK_SUCCESS;
++        void *customGetInstanceProcAddr = (bt_android_vulkan_loader != nullptr) ? bt_android_vulkan_loader() : nullptr;
++        if (customGetInstanceProcAddr != nullptr) {
++            volkInitializeCustom(reinterpret_cast<PFN_vkGetInstanceProcAddr>(customGetInstanceProcAddr));
++        }
++        else {
++            res = volkInitialize();
++        }
++#else
+         VkResult res = volkInitialize();
++#endif
+         if (res != VK_SUCCESS) {
+             fprintf(stderr, "volkInitialize failed with error code 0x%X.\n", res);
+             return;
+diff --git a/plume_vulkan.h b/plume_vulkan.h
+index 0a1edbe..3477b4b 100644
+--- a/plume_vulkan.h
++++ b/plume_vulkan.h
+@@ -42,6 +42,14 @@
+ #endif
+ 
+ namespace plume {
++#if defined(__ANDROID__)
++    // Optional, set by the application: returns the ANativeWindow currently backing the game
++    // window, or nullptr while it has none (app in the background). Android replaces the
++    // window's surface when the activity is covered (e.g. by a file picker); with this set,
++    // swap chains notice and recreate their VkSurfaceKHR on the new window.
++    extern ANativeWindow *(*AndroidWindowProvider)();
++#endif
++
+     struct VulkanCommandQueue;
+     struct VulkanDevice;
+     struct VulkanInterface;
+@@ -261,6 +269,9 @@ namespace plume {
+         void getWindowSize(uint32_t &dstWidth, uint32_t &dstHeight) const;
+         void releaseSwapChain();
+         void releaseImageViews();
++#   if defined(__ANDROID__)
++        bool recreateAndroidSurface(ANativeWindow *window);
++#   endif
+     };
+ 
+     struct VulkanFramebuffer : RenderFramebuffer {
+@@ -298,6 +309,10 @@ namespace plume {
+         VkCommandPool commandPool = VK_NULL_HANDLE;
+         VulkanCommandQueue *queue = nullptr;
+         const VulkanFramebuffer *targetFramebuffer = nullptr;
++#if defined(__ANDROID__)
++        // The last scissors set, re-clamped when the target framebuffer changes (see setScissors).
++        std::vector<RenderRect> androidScissors;
++#endif
+         const VulkanPipelineLayout *activeComputePipelineLayout = nullptr;
+         const VulkanPipelineLayout *activeGraphicsPipelineLayout = nullptr;
+         const VulkanPipelineLayout *activeRaytracingPipelineLayout = nullptr;
+@@ -395,6 +410,15 @@ namespace plume {
+         std::unordered_set<const VulkanCommandQueue *> virtualQueues;
+     };
+ 
++#if defined(__ANDROID__)
++    // Android: while true, newly created command queues go to the family's first hardware
++    // queue, which is created with a higher priority than the others (when the family has
++    // more than one). Everything else is spread over the remaining queues. RT64 uses this so
++    // its small display-list renders and texture uploads, which the game waits on, can run
++    // ahead of the full-resolution frames instead of queueing behind them.
++    extern bool vulkanHighPriorityQueueCreation;
++#endif
++
+     struct VulkanQueueFamily {
+         std::vector<VulkanQueue> queues;
+ 

@@ -1,0 +1,14 @@
+// Top-level build file for the Android port of Banjo-Tooie: Recompiled.
+//
+// The Android app lives in the `app` module, which builds the existing top-level
+// CMakeLists.txt with the NDK. Desktop builds (CMake directly) are unaffected.
+// See BUILDING-ANDROID.md.
+
+plugins {
+    // Matches the Android Studio this was set up with: AGP 9.4.1 on Gradle 9.6.0.
+    id 'com.android.application' version '9.4.1' apply false
+}
+
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
+}

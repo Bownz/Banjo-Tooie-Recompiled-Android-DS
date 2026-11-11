@@ -64,8 +64,14 @@ set(RECOMPFRONTEND_DIR ${CMAKE_SOURCE_DIR}/lib/RecompFrontend)
 # gtk_file_chooser_dialog_new on a non-main thread. The portal backend talks
 # D-Bus, has no thread affinity, and drops the GTK runtime dependency. It must
 # be set before rt64, which owns the nfd subdirectory.
-if (UNIX AND NOT APPLE)
+if (UNIX AND NOT APPLE AND NOT ANDROID)
     set(NFD_PORTAL ON CACHE BOOL "Use xdg-desktop-portal instead of GTK")
+endif()
+
+# Android: SDL2 and FreeType from source, the nfd replacement (Android's document picker)
+# and the libmain.so setup. Must come before rt64. See BUILDING-ANDROID.md.
+if (ANDROID)
+    include(${CMAKE_SOURCE_DIR}/android/cmake/android.cmake)
 endif()
 
 add_subdirectory(${RT64_DIR} ${CMAKE_BINARY_DIR}/rt64)
@@ -101,7 +107,13 @@ file(GLOB FUNC_CXX_SOURCES ${CMAKE_SOURCE_DIR}/RecompiledFuncs/*.cpp)
 target_sources(RecompiledFuncs PRIVATE ${FUNC_C_SOURCES} ${FUNC_CXX_SOURCES})
 
 # --- Main executable --------------------------------------------------------
-add_executable(BanjoTooieRecompiled)
+# On Android it's libmain.so, which SDLActivity loads and runs.
+if (ANDROID)
+    add_library(BanjoTooieRecompiled SHARED)
+    bt_configure_android_target(BanjoTooieRecompiled)
+else()
+    add_executable(BanjoTooieRecompiled)
+endif()
 
 set(SOURCES
     ${CMAKE_SOURCE_DIR}/src/main.cpp
@@ -263,11 +275,15 @@ endif()
 # so RecompFrontend's calls do not see rt64's copy -- they see this one. Without
 # it the command line starts with the first option and the shell reports
 # `-spirv: not found`.
-if (WIN32)
+#
+# It runs on the *build* machine, so it is chosen by the host platform. For native builds
+# host and target are the same; for the Android cross-build (an x86_64 Linux or Windows host
+# building for arm64) the target's processor would pick a dxc that can't run here.
+if (CMAKE_HOST_WIN32)
     set(DXC "${RT64_DIR}/src/contrib/dxc/bin/x64/dxc.exe")
-elseif (APPLE)
+elseif (CMAKE_HOST_APPLE)
     # dxc-macos is a shell script that finds its libraries through DYLD_LIBRARY_PATH.
-    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+    if (CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64")
         set(DXC "DYLD_LIBRARY_PATH=${RT64_DIR}/src/contrib/dxc/lib/x64" "${RT64_DIR}/src/contrib/dxc/bin/x64/dxc-macos")
     else()
         set(DXC "DYLD_LIBRARY_PATH=${RT64_DIR}/src/contrib/dxc/lib/arm64" "${RT64_DIR}/src/contrib/dxc/bin/arm64/dxc-macos")
@@ -277,7 +293,7 @@ else()
     # so the leading `VAR=value` element is load-bearing: CMake emits it
     # unquoted, and the shell reads it as an environment assignment for the
     # command that follows.
-    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+    if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
         set(DXC "LD_LIBRARY_PATH=${RT64_DIR}/src/contrib/dxc/lib/x64" "${RT64_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
     else()
         set(DXC "LD_LIBRARY_PATH=${RT64_DIR}/src/contrib/dxc/lib/arm64" "${RT64_DIR}/src/contrib/dxc/bin/arm64/dxc-linux")
@@ -319,10 +335,12 @@ elseif (DEFINED ENV{BT_VERSION} AND NOT "$ENV{BT_VERSION}" STREQUAL "")
 endif()
 
 # recompui loads its stylesheet and fonts from `assets/` relative to the
-# working directory.
+# working directory. (Android packages them in the APK instead: app/build.gradle.)
+if (NOT ANDROID)
 add_custom_command(TARGET BanjoTooieRecompiled POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_SOURCE_DIR}/assets
         $<TARGET_FILE_DIR:BanjoTooieRecompiled>/assets)
+endif()
 
 set_property(TARGET BanjoTooieRecompiled PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")

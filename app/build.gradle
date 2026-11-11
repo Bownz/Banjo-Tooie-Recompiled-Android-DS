@@ -1,0 +1,361 @@
+plugins {
+    id 'com.android.application'
+}
+
+// ---------------------------------------------------------------------------------
+// Inputs the native build needs that don't live in this repository's sources.
+// They are prepared while Gradle configures the project, because Android Studio runs
+// the CMake configure step during project sync (before any task executes).
+// ---------------------------------------------------------------------------------
+
+def repoRoot = rootProject.projectDir
+
+// SDL2 for Android, built from source. The Java glue in SDLActivity must come from exactly
+// the same SDL release as libSDL2.so. 2.32.x is needed for NDK r27+ (SDL 2.30.3, the
+// desktop pin, uses ALooper_pollAll, which newer NDKs no longer allow). Keep in step with
+// SDL_VERSION in android/build-native.sh.
+def sdlVersion = '2.32.10'
+def sdlDir = new File(repoRoot, "android/third_party/SDL2-${sdlVersion}")
+
+def runCommand = { List<String> command, File workingDir ->
+    try {
+        // toString(): arguments may be Groovy GStrings, which ProcessBuilder can't take.
+        def process = new ProcessBuilder(command.collect { it.toString() }).directory(workingDir).redirectErrorStream(true).start()
+        def output = process.inputStream.text
+        [process.waitFor(), output]
+    } catch (IOException e) {
+        throw new GradleException("Could not run '${command[0]}'. Is it installed and on PATH? (${e.message})")
+    }
+}
+
+def ensureSdl2 = {
+    if (new File(sdlDir, 'CMakeLists.txt').isFile()) {
+        return
+    }
+    def url = "https://github.com/libsdl-org/SDL/releases/download/release-${sdlVersion}/SDL2-${sdlVersion}.tar.gz"
+    def archive = new File(repoRoot, "build/android-downloads/SDL2-${sdlVersion}.tar.gz")
+    archive.parentFile.mkdirs()
+    logger.lifecycle("Downloading SDL2 ${sdlVersion} from ${url}")
+    URI.create(url).toURL().withInputStream { input -> archive.withOutputStream { it << input } }
+    copy {
+        from tarTree(resources.gzip(archive))
+        into sdlDir.parentFile
+    }
+    if (!new File(sdlDir, 'CMakeLists.txt').isFile()) {
+        throw new GradleException("SDL2 archive did not unpack to ${sdlDir}")
+    }
+}
+
+// libadrenotools (BSD-2-Clause): lets the game load a custom Vulkan driver package (e.g.
+// Mesa Turnip) that the player installs, instead of the device's own Adreno driver.
+def adrenotoolsCommit = '8fae8ce254dfc1344527e05301e43f37dea2df80'
+def linkernsbypassCommit = 'aa3975893d83ef1bc84c321ec60c65fbf1287887'
+def adrenotoolsDir = new File(repoRoot, "android/third_party/libadrenotools-${adrenotoolsCommit}")
+
+def ensureAdrenotools = {
+    if (new File(adrenotoolsDir, 'lib/linkernsbypass/CMakeLists.txt').isFile()) {
+        return
+    }
+    def fetch = { String repo, String commit ->
+        def archive = new File(repoRoot, "build/android-downloads/${repo}-${commit}.tar.gz")
+        archive.parentFile.mkdirs()
+        def url = "https://github.com/bylaws/${repo}/archive/${commit}.tar.gz"
+        logger.lifecycle("Downloading ${repo} from ${url}")
+        URI.create(url).toURL().withInputStream { input -> archive.withOutputStream { it << input } }
+        copy {
+            from tarTree(resources.gzip(archive))
+            into adrenotoolsDir.parentFile
+        }
+        new File(adrenotoolsDir.parentFile, "${repo}-${commit}")
+    }
+    fetch('libadrenotools', adrenotoolsCommit)
+    def bypass = fetch('liblinkernsbypass', linkernsbypassCommit)
+    copy {
+        from bypass
+        into new File(adrenotoolsDir, 'lib/linkernsbypass')
+    }
+    if (!new File(adrenotoolsDir, 'lib/linkernsbypass/CMakeLists.txt').isFile()) {
+        throw new GradleException("libadrenotools did not unpack to ${adrenotoolsDir}")
+    }
+}
+
+// FreeType (FreeType License), RmlUi's font engine. Desktop Linux uses the system's copy and
+// Windows a prebuilt one; Android builds it from source (android/cmake/android.cmake).
+def freetypeVersion = '2.13.3'
+def freetypeSha256 = '5c3a8e78f7b24c20b25b54ee575d6daa40007a5f4eea2845861c3409b3021747'
+def freetypeDir = new File(repoRoot, "android/third_party/freetype-${freetypeVersion}")
+
+def ensureFreetype = {
+    if (new File(freetypeDir, 'CMakeLists.txt').isFile()) {
+        return
+    }
+    def archive = new File(repoRoot, "build/android-downloads/freetype-${freetypeVersion}.tar.gz")
+    archive.parentFile.mkdirs()
+    def urls = [
+        "https://download.savannah.gnu.org/releases/freetype/freetype-${freetypeVersion}.tar.gz",
+        "https://downloads.sourceforge.net/project/freetype/freetype2/${freetypeVersion}/freetype-${freetypeVersion}.tar.gz",
+    ]
+    def ok = false
+    for (url in urls) {
+        try {
+            logger.lifecycle("Downloading FreeType ${freetypeVersion} from ${url}")
+            URI.create(url).toURL().withInputStream { input -> archive.withOutputStream { it << input } }
+            def digest = java.security.MessageDigest.getInstance('SHA-256').digest(archive.bytes).encodeHex().toString()
+            if (digest == freetypeSha256) {
+                ok = true
+                break
+            }
+            logger.warn("FreeType download from ${url} has the wrong checksum (${digest})")
+        } catch (Exception e) {
+            logger.warn("FreeType download from ${url} failed: ${e.message}")
+        }
+    }
+    if (!ok) {
+        archive.delete()
+        throw new GradleException("Could not download FreeType ${freetypeVersion}")
+    }
+    copy {
+        from tarTree(resources.gzip(archive))
+        into freetypeDir.parentFile
+    }
+    if (!new File(freetypeDir, 'CMakeLists.txt').isFile()) {
+        throw new GradleException("FreeType archive did not unpack to ${freetypeDir}")
+    }
+}
+
+// Patches for git submodules. Two layers, applied in this order:
+//   1. patches/*.patch: the port's own runtime fixes, the same ones the desktop build applies
+//      with tools/setup_deps.py (without them the game doesn't boot; see AGENTS.md).
+//   2. android/patches/*.patch: the Android changes, written against the tree after layer 1.
+// Applied once; re-running is a no-op. --ignore-whitespace tolerates CRLF checkouts (Git for
+// Windows' default).
+def ensurePatches = {
+    def isApplied = { File dir, String patchFile ->
+        runCommand(['git', 'apply', '--reverse', '--check', '--ignore-whitespace', patchFile], dir)[0] == 0
+    }
+    def apply = { File dir, String patchFile, String name, String submodule ->
+        def (code, output) = runCommand(
+            ['git', 'apply', '--ignore-whitespace', '--whitespace=nowarn', patchFile], dir)
+        if (code != 0) {
+            throw new GradleException("Could not apply ${name} to ${submodule} (submodule updated?):\n${output}")
+        }
+        logger.lifecycle("Applied ${name}")
+    }
+    [
+        // [submodule, port patch or null, Android patch]
+        ['lib/N64ModernRuntime', 'patches/N64ModernRuntime.patch', 'android/patches/n64modernruntime-android.patch'],
+        ['lib/rt64', 'patches/rt64.patch', 'android/patches/rt64-android.patch'],
+        ['lib/rt64/src/contrib/plume', null, 'android/patches/plume-android.patch'],
+        ['lib/RecompFrontend', null, 'android/patches/recompfrontend-android.patch'],
+    ].each { submodule, portPatch, androidPatch ->
+        def dir = new File(repoRoot, submodule)
+        if (!new File(dir, 'CMakeLists.txt').isFile()) {
+            throw new GradleException("${submodule} is empty. Run: git submodule update --init --recursive")
+        }
+        def androidFile = new File(repoRoot, androidPatch).absolutePath
+        if (isApplied(dir, androidFile)) {
+            return   // both layers are in place
+        }
+        if (portPatch != null) {
+            def portFile = new File(repoRoot, portPatch).absolutePath
+            if (!isApplied(dir, portFile)) {
+                apply(dir, portFile, portPatch, submodule)
+            }
+        }
+        apply(dir, androidFile, androidPatch, submodule)
+    }
+}
+
+// Fixes for the downloaded SDL2 source (android/patches/sdl2-android.patch). SDL lives inside
+// this repository's work tree (git-ignored), so git apply has to run from the repository
+// root with --directory; run from inside the SDL folder it silently applies nothing.
+def ensureSdlPatch = {
+    def patchFile = new File(repoRoot, 'android/patches/sdl2-android.patch').absolutePath
+    def sdlRelative = repoRoot.toPath().relativize(sdlDir.toPath()).toString().replace('\\', '/')
+    def (alreadyApplied, ignored) = runCommand(
+        ['git', 'apply', '--reverse', '--check', '--ignore-whitespace', "--directory=${sdlRelative}", patchFile], repoRoot)
+    if (alreadyApplied == 0) {
+        return
+    }
+    def (code, output) = runCommand(
+        ['git', 'apply', '--ignore-whitespace', '--whitespace=nowarn', "--directory=${sdlRelative}", patchFile], repoRoot)
+    if (code != 0) {
+        throw new GradleException("Could not apply sdl2-android.patch to ${sdlRelative}:\n${output}")
+    }
+    logger.lifecycle("Applied android/patches/sdl2-android.patch")
+}
+
+// App version for testers' reports: the release number plus the commit it was built from.
+def appVersion = '0.1.0-beta'
+def gitCommit = {
+    def sha = System.getenv('GITHUB_SHA')
+    if (sha) {
+        return sha.take(7)
+    }
+    try {
+        def (code, output) = runCommand(['git', 'rev-parse', '--short=7', 'HEAD'], repoRoot)
+        return code == 0 ? output.trim() : 'local'
+    } catch (Exception ignored) {
+        return 'local'
+    }
+}()
+
+ensureSdl2()
+ensureSdlPatch()
+ensurePatches()
+ensureAdrenotools()
+ensureFreetype()
+
+def signingValue = { String name -> System.getenv(name) ?: findProperty(name) }
+def releaseKeystore = signingValue('BT_KEYSTORE_FILE')
+if (releaseKeystore && !file(releaseKeystore).isFile()) {
+    throw new GradleException("BT_KEYSTORE_FILE is set but not found: ${releaseKeystore}")
+}
+
+// ---------------------------------------------------------------------------------
+// Android application
+// ---------------------------------------------------------------------------------
+
+android {
+    namespace 'io.github.bownz.btrecomp'
+    compileSdk {
+        version = release(37)
+    }
+    ndkVersion '30.0.16248370' // NDK r30
+
+    defaultConfig {
+        applicationId 'io.github.bownz.btrecomp'
+        // Android 9: the UI's slot map uses aligned_alloc, which Android's libc has from API 28.
+        minSdk 28
+        targetSdk 36
+        versionCode 1
+        // Shown in the app (Banjo-Tooie Tools, settings) and in log reports, so bug
+        // reports name the exact build.
+        versionName "${appVersion} (${gitCommit})"
+
+        ndk {
+            // RT64, sse2neon and the recompiled code are only set up for 64-bit ARM.
+            abiFilters 'arm64-v8a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                // The adrenotools hooks are loaded by path at run time, so they're built and
+                // packaged as libraries of their own.
+                targets 'BanjoTooieRecompiled', 'main_hook', 'file_redirect_hook', 'gsl_alloc_hook', 'hook_impl'
+                // android/cmake/android.cmake builds SDL2, FreeType and file_to_c's replacement
+                // itself, so only these are needed.
+                // CI's compiler cache (see .github/workflows/android.yml), when set up.
+                def ccacheArgs = System.getenv('CCACHE_DIR') ?
+                    ['-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache'] : []
+                arguments(*ccacheArgs,
+                    '-DANDROID_STL=c++_shared',
+                    "-DBT_ANDROID_SDL2_DIR=${sdlDir.absolutePath.replace('\\', '/')}",
+                    "-DBT_ANDROID_ADRENOTOOLS_DIR=${adrenotoolsDir.absolutePath.replace('\\', '/')}",
+                    "-DBT_ANDROID_FREETYPE_DIR=${freetypeDir.absolutePath.replace('\\', '/')}",
+                    // The version the game reports in its log and launcher (MAJOR.MINOR.PATCH-suffix).
+                    "-DBT_VERSION=${appVersion}"
+                )
+            }
+        }
+    }
+
+    // Release signing from the environment (or ~/.gradle/gradle.properties), so no secrets
+    // live in the repo. Keep using the same key: Android only installs an update over an
+    // existing install when both are signed with the same key.
+    //   BT_KEYSTORE_FILE      path to the .jks/.keystore file
+    //   BT_KEYSTORE_PASSWORD  keystore password
+    //   BT_KEY_ALIAS          key alias
+    //   BT_KEY_PASSWORD       key password (defaults to the keystore password)
+    signingConfigs {
+        release {
+            if (releaseKeystore) {
+                storeFile file(releaseKeystore)
+                storePassword signingValue('BT_KEYSTORE_PASSWORD')
+                keyAlias signingValue('BT_KEY_ALIAS')
+                keyPassword signingValue('BT_KEY_PASSWORD') ?: signingValue('BT_KEYSTORE_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            externalNativeBuild {
+                cmake {
+                    // Unoptimised recompiled code is far too slow to play; keep symbols, but optimise.
+                    cFlags '-O2'
+                    cppFlags '-O2'
+                }
+            }
+        }
+        release {
+            // Your own key if BT_KEYSTORE_FILE is set (see signingConfigs below), else the
+            // debug key so `assembleRelease` always produces an installable APK.
+            signingConfig releaseKeystore ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            // The existing desktop CMake project, unchanged in layout.
+            path file('../CMakeLists.txt')
+            version '4.1.2'
+        }
+    }
+
+    sourceSets {
+        main {
+            // SDLActivity and friends, from the SDL2 release downloaded above.
+            java.srcDir("${sdlDir}/android-project/app/src/main/java")
+            // A resolved File, not a Provider: AGP 9 rejects Providers in sourceSets. The
+            // stageGameAssets task (wired to preBuild below) fills this folder.
+            assets.srcDir(layout.buildDirectory.dir('generated/bt-assets').get().asFile)
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // libmain.so holds the entire recompiled game and is very large. Legacy packaging
+            // keeps it compressed in the APK and extracts it on install.
+            useLegacyPackaging true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------------
+
+// The desktop build reads assets/ relative to the working directory. Package it under
+// assets/game/; BTActivity extracts it on first run (and after each update).
+def stageGameAssets = tasks.register('stageGameAssets', Sync) {
+    into layout.buildDirectory.dir('generated/bt-assets/game')
+    from(new File(repoRoot, 'assets')) {
+        into 'assets'
+        // The Windows executable's icon resources.
+        exclude 'icon.ico', 'icon.rc'
+    }
+}
+
+// The recompiled C code is committed (RecompiledFuncs/, rsp/n_aspMain.cpp), so no ROM is
+// needed to build. Fail early with a clear message if a checkout is missing it.
+def checkRecompiledSources = tasks.register('checkRecompiledSources') {
+    def funcs = new File(repoRoot, 'RecompiledFuncs')
+    def rsp = new File(repoRoot, 'rsp/n_aspMain.cpp')
+    doLast {
+        if (!funcs.isDirectory() || funcs.list().length == 0 || !rsp.isFile()) {
+            throw new GradleException(
+                'RecompiledFuncs/ or rsp/n_aspMain.cpp is missing. They are committed to the ' +
+                'repository; check out the full tree (see AGENTS.md, "The pipeline").')
+        }
+    }
+}
+
+tasks.named('preBuild') {
+    dependsOn stageGameAssets, checkRecompiledSources
+}

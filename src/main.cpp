@@ -63,6 +63,19 @@
 #include <timeapi.h>
 #endif
 
+#if defined(__ANDROID__)
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <thread>
+#include "../android/jni/gpu_driver.h"
+// android/jni/gpu_driver.cpp and perf_monitor.cpp.
+extern "C" void bt_android_watch_quit();
+extern "C" void bt_android_start_perf_monitor();
+extern "C" int bt_android_app_in_foreground();
+#endif
+
 // The release workflow stamps the version it is publishing into the binary
 // (CMakeLists.txt turns the BT_VERSION environment variable into this define),
 // so the launcher's version label -- and any bug report that quotes it --
@@ -100,6 +113,13 @@ ultramodern::gfx_callbacks_t::gfx_data_t create_gfx() {
                  SDL_INIT_HAPTIC) > 0) {
         exit_error("Failed to initialize SDL2: %s\n", SDL_GetError());
     }
+
+#if defined(__ANDROID__)
+    // A crash while the game closes shouldn't be offered as a crash report (gpu_driver.cpp).
+    bt_android_watch_quit();
+    // Where frame time goes, every 5 seconds in the log (android/jni/perf_monitor.cpp).
+    bt_android_start_perf_monitor();
+#endif
 
     std::fprintf(stderr, "[tooie] create_gfx done\n"); std::fflush(stderr);
     return {};
@@ -164,6 +184,21 @@ void update_gfx(void*) {
 static SDL_AudioCVT audio_convert;
 static SDL_AudioDeviceID audio_device = 0;
 
+#if defined(__ANDROID__)
+// Audio watchdog (Android). Android's audio output can stop for good after a headphone or
+// Bluetooth change, a call or another interruption: the game keeps queueing sound but none
+// plays. A thread checks twice a second and reopens the output device when it isn't playing
+// or its queue never drains. It also logs when the game itself stops sending sound.
+// The mutex guards audio_device against the reopen.
+static std::recursive_mutex audio_device_mutex;
+static std::atomic<uint64_t> audio_last_queued_ms{ 0 };   // when the game last queued sound
+static SDL_AudioSpec audio_spec_desired{};
+static void start_audio_watchdog();
+#define BT_AUDIO_LOCK std::lock_guard<std::recursive_mutex> audio_lock_{ audio_device_mutex }
+#else
+#define BT_AUDIO_LOCK do { } while (0)
+#endif
+
 static uint32_t sample_rate = 48000;
 static uint32_t output_sample_rate = 48000;
 
@@ -219,6 +254,10 @@ void queue_samples(int16_t* audio_data, size_t sample_count) {
         return;
     }
 
+    BT_AUDIO_LOCK;
+#if defined(__ANDROID__)
+    audio_last_queued_ms.store(SDL_GetTicks64(), std::memory_order_relaxed);
+#endif
     const uint64_t cur_queued_microseconds =
         static_cast<uint64_t>(SDL_GetQueuedAudioSize(audio_device)) /
         bytes_per_frame * 1000000 / sample_rate;
@@ -228,7 +267,13 @@ void queue_samples(int16_t* audio_data, size_t sample_count) {
     float* samples_to_queue =
         swap_buffer.data() + output_channels * discarded_output_frames / 2;
 
+#if defined(__ANDROID__)
+    // Android output drains in bursts, so the queue naturally swings by over 100 ms; trimming
+    // at 100 ms (the desktop value) dropped ~20% of chunks on an AYN Thor and garbled audio.
+    const uint32_t skip_factor = cur_queued_microseconds / 300000;
+#else
     const uint32_t skip_factor = cur_queued_microseconds / 100000;
+#endif
     if (skip_factor != 0) {
         const uint32_t skip_ratio = 1 << skip_factor;
         num_bytes_to_queue /= skip_ratio;
@@ -241,11 +286,52 @@ void queue_samples(int16_t* audio_data, size_t sample_count) {
     }
 
     SDL_QueueAudio(audio_device, samples_to_queue, num_bytes_to_queue);
+
+#if defined(__ANDROID__)
+    // Diagnostics: every 5 s, log how much audio the game generated compared to real time
+    // and how full the output queue ran. Below ~100% means the game is running slower than
+    // the N64 would, so the speaker runs dry and audio breaks up.
+    {
+        static uint64_t window_start_ms = 0;
+        static uint64_t produced_frames = 0;
+        static uint32_t chunks = 0, skipped_chunks = 0;
+        static uint64_t min_queued_us = UINT64_MAX, max_queued_us = 0;
+
+        const uint64_t now_ms = SDL_GetTicks64();
+        if (window_start_ms == 0) {
+            window_start_ms = now_ms;
+        }
+        produced_frames += sample_count / input_channels;
+        chunks++;
+        if (skip_factor != 0) {
+            skipped_chunks++;
+        }
+        min_queued_us = std::min(min_queued_us, cur_queued_microseconds);
+        max_queued_us = std::max(max_queued_us, cur_queued_microseconds);
+
+        const uint64_t elapsed_ms = now_ms - window_start_ms;
+        if (elapsed_ms >= 5000) {
+            const double expected_frames = double(sample_rate) * double(elapsed_ms) / 1000.0;
+            std::printf("Audio stats: game produced %.0f%% of real time (%u Hz), %u chunks, %u trimmed, queue %llu-%llu ms\n",
+                100.0 * double(produced_frames) / expected_frames, sample_rate, chunks, skipped_chunks,
+                (unsigned long long)(min_queued_us / 1000), (unsigned long long)(max_queued_us / 1000));
+            window_start_ms = now_ms;
+            produced_frames = 0;
+            chunks = skipped_chunks = 0;
+            min_queued_us = UINT64_MAX;
+            max_queued_us = 0;
+        }
+    }
+#endif
 }
 
 size_t get_frames_remaining() {
     constexpr float buffer_offset_frames = 1.0f;
-    uint64_t buffered_byte_count = SDL_GetQueuedAudioSize(audio_device);
+    uint64_t buffered_byte_count;
+    {
+        BT_AUDIO_LOCK;
+        buffered_byte_count = SDL_GetQueuedAudioSize(audio_device);
+    }
 
     buffered_byte_count =
         buffered_byte_count * 2 * sample_rate / output_sample_rate /
@@ -284,10 +370,18 @@ bool reset_audio(uint32_t output_freq) {
     spec_desired.freq = static_cast<int>(output_freq);
     spec_desired.format = AUDIO_F32;
     spec_desired.channels = static_cast<Uint8>(output_channels);
+#if defined(__ANDROID__)
+    spec_desired.samples = 0x400; // ~21 ms: Android audio needs more headroom than desktop to avoid underruns
+#else
     spec_desired.samples = 0x100;
+#endif
     spec_desired.callback = nullptr;
     spec_desired.userdata = nullptr;
 
+    BT_AUDIO_LOCK;
+#if defined(__ANDROID__)
+    audio_spec_desired = spec_desired;
+#endif
     audio_device =
         SDL_OpenAudioDevice(nullptr, false, &spec_desired, nullptr, 0);
     if (audio_device == 0) {
@@ -299,8 +393,134 @@ bool reset_audio(uint32_t output_freq) {
     SDL_PauseAudioDevice(audio_device, 0);
     output_sample_rate = output_freq;
     update_audio_converter();
+#if defined(__ANDROID__)
+    start_audio_watchdog();
+#endif
     return true;
 }
+
+#if defined(__ANDROID__)
+static void audio_watchdog_thread() {
+    constexpr uint64_t check_ms = 500;
+    constexpr uint64_t stuck_queue_ms = 350;      // the queue never drained below this...
+    constexpr uint64_t stuck_window_ms = 2000;    // ...for this long: the output isn't playing
+    constexpr uint64_t not_playing_ms = 1000;     // device reports not playing for this long
+    constexpr uint64_t resume_grace_ms = 2000;    // after coming back from the background
+    constexpr uint64_t reopen_gap_ms = 5000;      // at most one reopen per this long
+    constexpr uint64_t game_silent_ms = 3000;     // the game sent no sound for this long
+
+    uint64_t window_start = 0, min_queued_ms = UINT64_MAX, not_playing_since = 0, last_reopen = 0;
+    uint64_t foreground_since = SDL_GetTicks64();
+    bool was_foreground = true, logged_game_silent = false;
+    int reopens = 0;
+
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(check_ms));
+        const uint64_t now = SDL_GetTicks64();
+        const bool foreground = bt_android_app_in_foreground() != 0;
+        if (foreground && !was_foreground) {
+            foreground_since = now;
+        }
+        was_foreground = foreground;
+        if (!foreground || now - foreground_since < resume_grace_ms) {
+            // Android pauses audio in the background on purpose; start over once back.
+            window_start = 0;
+            min_queued_ms = UINT64_MAX;
+            not_playing_since = 0;
+            continue;
+        }
+
+        const uint64_t last_queued = audio_last_queued_ms.load(std::memory_order_relaxed);
+        const bool game_sending = last_queued != 0 && now - last_queued < 1000;
+
+        // The game stopped sending sound: nothing to reopen, but say so in the log.
+        if (last_queued != 0 && now - last_queued >= game_silent_ms && ultramodern::is_game_started()) {
+            if (!logged_game_silent) {
+                logged_game_silent = true;
+                std::printf("Audio watchdog: the game hasn't sent any sound for %llu ms (the output device is fine; "
+                    "the game's own audio stopped)\n", (unsigned long long)(now - last_queued));
+                std::fflush(stdout);
+            }
+        } else if (game_sending && logged_game_silent) {
+            logged_game_silent = false;
+            std::printf("Audio watchdog: the game is sending sound again\n");
+            std::fflush(stdout);
+        }
+
+        SDL_AudioStatus status;
+        uint64_t queued_ms;
+        {
+            BT_AUDIO_LOCK;
+            if (audio_device == 0) {
+                status = SDL_AUDIO_STOPPED;   // a reopen failed: keep trying
+                queued_ms = 0;
+            } else {
+                status = SDL_GetAudioDeviceStatus(audio_device);
+                queued_ms = uint64_t(SDL_GetQueuedAudioSize(audio_device)) / (output_channels * sizeof(float)) * 1000 / std::max(output_sample_rate, 1u);
+            }
+        }
+
+        // Not playing (stopped or paused) while the app is in front.
+        if (status != SDL_AUDIO_PLAYING) {
+            if (not_playing_since == 0) {
+                not_playing_since = now;
+            }
+        } else {
+            not_playing_since = 0;
+        }
+        // The queue should keep draining; if it never gets low while the game fills it, the
+        // output has stalled.
+        if (window_start == 0) {
+            window_start = now;
+            min_queued_ms = queued_ms;
+        } else {
+            min_queued_ms = std::min(min_queued_ms, queued_ms);
+        }
+        bool stuck = false;
+        if (now - window_start >= stuck_window_ms) {
+            stuck = game_sending && min_queued_ms >= stuck_queue_ms;
+            window_start = now;
+            min_queued_ms = queued_ms;
+        }
+        const bool dead = not_playing_since != 0 && now - not_playing_since >= not_playing_ms;
+        if (!(stuck || dead) || now - last_reopen < reopen_gap_ms) {
+            continue;
+        }
+
+        // Reopen the output device.
+        last_reopen = now;
+        BT_AUDIO_LOCK;
+        SDL_CloseAudioDevice(audio_device);
+        SDL_AudioSpec spec = audio_spec_desired;
+        SDL_AudioDeviceID device = SDL_OpenAudioDevice(nullptr, false, &spec, nullptr, 0);
+        reopens++;
+        if (device == 0) {
+            audio_device = 0;
+            std::printf("Audio watchdog: output %s (queue %llu ms); reopening failed: %s (will retry)\n",
+                dead ? "stopped" : "stuck", (unsigned long long)queued_ms, SDL_GetError());
+            // audio_device stays 0 until a reopen works; try again shortly.
+            not_playing_since = now - not_playing_ms;
+        } else {
+            audio_device = device;
+            SDL_PauseAudioDevice(audio_device, 0);
+            update_audio_converter();
+            std::printf("Audio watchdog: output %s (status %d, queue %llu ms); reopened the audio device (%d so far)\n",
+                dead ? "stopped" : "stuck", int(status), (unsigned long long)queued_ms, reopens);
+            not_playing_since = 0;
+        }
+        std::fflush(stdout);
+        window_start = 0;
+        min_queued_ms = UINT64_MAX;
+    }
+}
+
+static void start_audio_watchdog() {
+    static std::once_flag started;
+    std::call_once(started, []() {
+        std::thread(audio_watchdog_thread).detach();
+    });
+}
+#endif
 
 // --- Input -----------------------------------------------------------------
 
@@ -356,6 +576,105 @@ std::vector<recomp::GameEntry> supported_games = {
     },
 };
 
+#if defined(__ANDROID__)
+// Android settings: four tabs, Video, Input, Audio and Gameplay, plus Mods. The General config
+// still exists (and keeps its file) but its options are shown on the Input tab; the controller
+// setup opens from Input > Configure Inputs. (RecompFrontend Android patch: layout tabs and
+// page buttons.)
+static void initialize_android_config(const recompui::config::GeneralTabOptions& general_options) {
+    using Entry = recompui::config::LayoutEntry;
+    using Kind = Entry::Kind;
+
+    recompui::config::create_general_tab(general_options);
+    recompui::config::set_tab_visible(recompui::config::general::id, false);
+
+    // Video > Graphics Driver: a button that opens the driver menu (pick, install, remove).
+    // The driver loads when the app starts, so changing it restarts the app, which is only
+    // offered on the main menu.
+    auto& graphics_config = recompui::config::create_graphics_tab("Video");
+    {
+        Entry driver;
+        driver.kind = Kind::Button;
+        driver.text = "Graphics Driver";
+        driver.description = "Choose the Vulkan driver used for rendering: the device's own, or a custom one such as Turnip. "
+            "Install and remove drivers here too. Changing the driver restarts the app, so it can only be done from the main menu. "
+            "In use now: " + bt::android::active_gpu_driver() + ". App version: " + bt::android::app_version() + ".";
+        driver.on_press = []() {
+            if (ultramodern::is_game_started()) {
+                recompui::open_info_prompt("Graphics Driver",
+                    "The graphics driver can only be changed from the main menu, because the app restarts to use it. "
+                    "Use QUIT > Main Menu, then open Settings > Video > Graphics Driver.",
+                    "OK", []() {});
+                return;
+            }
+            bt::android::open_gpu_driver_manager();
+        };
+        recompui::config::add_page_button(graphics_config, std::move(driver));
+    }
+
+    const std::string g = recompui::config::general::id;
+    namespace gopts = recompui::config::general::options;
+    auto header = [](const std::string& text) { Entry e; e.kind = Kind::Header; e.text = text; return e; };
+    auto option = [](const std::string& cfg, const std::string& id) { Entry e; e.kind = Kind::Option; e.config_id = cfg; e.option_id = id; return e; };
+
+    Entry configure;
+    configure.kind = Kind::Button;
+    configure.text = "Configure Inputs";
+    configure.description = "Choose which button does what on your controller.";
+    configure.on_press = []() { recompui::config::set_tab(recompui::config::controls::id); };
+
+    recompui::config::create_layout_tab("Input", "input", {
+        header("Inputs"),
+        configure,
+        option(g, gopts::joystick_deadzone),
+        option(g, gopts::rumble_strength),
+    }, { g });
+
+    recompui::config::create_sound_tab("Audio");
+
+    // Where saves, settings, mods and the ROM are kept: app storage or a shared folder.
+    // Moving them restarts the app, so (like the graphics driver) only from the main menu.
+    Entry files;
+    files.kind = Kind::Button;
+    files.text = "Game Files Location";
+    {
+        const std::string where = bt::android::storage_description();
+        files.description = "Move your saves, settings, mods and ROM between app storage and a shared folder "
+            "(easy to reach from a PC, and kept if the app is uninstalled). Everything is copied, then the app restarts; "
+            "only from the main menu."
+            + (where.empty() ? std::string() : "<br />Now in " + where + ".");
+    }
+    files.on_press = []() {
+        if (ultramodern::is_game_started()) {
+            recompui::open_info_prompt("Game Files Location",
+                "The game files can only be moved from the main menu, because the app restarts to use the new place. "
+                "Use QUIT > Main Menu, then open Settings > Gameplay > Game Files Location.",
+                "OK", []() {});
+            return;
+        }
+        bt::android::change_storage_location();
+    };
+
+    Entry share;
+    share.kind = Kind::Button;
+    share.text = "Share Log";
+    share.description = "Send a log report (app version, device, graphics driver and the game's output from this "
+        "and the previous session) to fix a problem. Nothing personal is included. App version: "
+        + bt::android::app_version() + ".";
+    share.on_press = []() { bt::android::share_log(); };
+
+    recompui::config::create_layout_tab("Gameplay", "gameplay", {
+        header("Storage"),
+        files,
+        header("Help"),
+        share,
+    }, {});
+
+    recompui::config::create_controls_tab("Configure Inputs");
+    recompui::config::create_mods_tab();
+}
+#endif
+
 void initialize_config() {
     const std::filesystem::path recomp_dir =
         recompui::file::get_app_folder_path();
@@ -364,11 +683,15 @@ void initialize_config() {
     }
 
     recompui::config::GeneralTabOptions general_options{};
+#if defined(__ANDROID__)
+    initialize_android_config(general_options);
+#else
     recompui::config::create_general_tab(general_options);
     recompui::config::create_graphics_tab();
     recompui::config::create_controls_tab();
     recompui::config::create_sound_tab();
     recompui::config::create_mods_tab();
+#endif
     recompui::config::finalize();
 }
 
@@ -583,6 +906,11 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     std::fprintf(stderr, "[tooie] step version\n"); std::fflush(stderr);
+#if defined(__ANDROID__)
+    std::printf("Banjo-Tooie: Recompiled for Android %s (game version %s)\n",
+        bt::android::app_version().c_str(), version_string.c_str());
+    std::fflush(stdout);
+#endif
 
 #ifdef _WIN32
     timeBeginPeriod(1);

@@ -1,0 +1,1289 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 79dfc38..ff188ea 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -35,7 +35,7 @@ function(preprocess INFILE OUTFILE OPTIONS)
+     endif()
+ endfunction()
+ 
+-if (WIN32)
++if (CMAKE_HOST_WIN32)
+     set (DXC "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc.exe")
+     add_compile_definitions(
+         NOMINMAX
+@@ -45,8 +45,8 @@ if (WIN32)
+     # Dependencies that must be next to the DLL.
+     configure_file("${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxcompiler.dll" "dxcompiler.dll" COPYONLY)
+     configure_file("${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxil.dll" "dxil.dll" COPYONLY)
+-elseif (APPLE)
+-    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
++elseif (CMAKE_HOST_APPLE)
++    if (CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64")
+         # find zlib and include in dyld path
+         find_library(ZLIB_LIBRARY NAMES z)
+         get_filename_component(ZLIB_PATH ${ZLIB_LIBRARY} DIRECTORY)
+@@ -58,7 +58,7 @@ elseif (APPLE)
+         set (SPIRVCROSS "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/spirv-cross/lib/arm64:$ENV{DYLD_LIBRARY_PATH}" "${PROJECT_SOURCE_DIR}/src/contrib/spirv-cross/bin/arm64/spirv-cross")
+     endif()
+ else()
+-    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
++    if (CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64")
+         set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
+     else()
+         set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/arm64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/arm64/dxc-linux")
+@@ -69,9 +69,22 @@ set(ZSTD_LEGACY_SUPPORT OFF)
+ set(ZSTD_BUILD_STATIC ON)
+ set(ZSTD_BUILD_SHARED OFF)
+ 
+-add_subdirectory(src/tools/file_to_c)
++if (CMAKE_CROSSCOMPILING AND DEFINED RT64_HOST_FILE_TO_C)
++    # Cross-compiling (e.g. Android): file_to_c must run on the build host, so use a prebuilt host binary.
++    add_executable(file_to_c IMPORTED GLOBAL)
++    set_target_properties(file_to_c PROPERTIES IMPORTED_LOCATION "${RT64_HOST_FILE_TO_C}")
++else()
++    add_subdirectory(src/tools/file_to_c)
++endif()
+ add_subdirectory(src/contrib/re-spirv)
+-add_subdirectory(src/contrib/nativefiledialog-extended)
++if (ANDROID)
++    # Android has no native file dialog backend; the parent project must provide an `nfd` target.
++    if (NOT TARGET nfd)
++        message(FATAL_ERROR "Android build requires the parent project to define an nfd target.")
++    endif()
++else()
++    add_subdirectory(src/contrib/nativefiledialog-extended)
++endif()
+ add_subdirectory(src/contrib/zstd/build/cmake)
+ 
+ if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
+@@ -446,8 +459,10 @@ target_link_libraries(rt64 libzstd_static)
+ target_link_libraries(rt64 plume)
+ 
+ # Add tools.
+-add_subdirectory(src/tools/texture_hasher)
+-add_subdirectory(src/tools/texture_packer)
++if (NOT ANDROID)
++    add_subdirectory(src/tools/texture_hasher)
++    add_subdirectory(src/tools/texture_packer)
++endif()
+ 
+ # Add any Apple-specific source files and libraries
+ if (APPLE)
+diff --git a/src/common/rt64_thread.cpp b/src/common/rt64_thread.cpp
+index c4b080b..45e070a 100644
+--- a/src/common/rt64_thread.cpp
++++ b/src/common/rt64_thread.cpp
+@@ -12,6 +12,10 @@
+ #   include "utf8conv/utf8conv.h"
+ #elif defined(__linux__)
+ #   include <pthread.h>
++#   if defined(__ANDROID__)
++#       include <sys/resource.h>
++#       include <unistd.h>
++#   endif
+ #endif
+ 
+ namespace RT64 {
+@@ -55,6 +59,21 @@ namespace RT64 {
+     void Thread::setCurrentThreadPriority(Priority priority) {
+ #   if defined(_WIN32)
+         SetThreadPriority(GetCurrentThread(), toWindowsPriority(priority));
++#   elif defined(__ANDROID__)
++        // Android: Linux "nice" values are per thread (setpriority on the thread id), and apps
++        // may use them for their own threads. Keeping shader compilation and texture streaming
++        // below the game and render threads stops them stealing time from a frame.
++        int nice = 0;
++        switch (priority) {
++        case Thread::Priority::Idle: nice = 19; break;
++        case Thread::Priority::Lowest: nice = 15; break;
++        case Thread::Priority::Low: nice = 10; break;
++        case Thread::Priority::Normal: nice = 0; break;
++        case Thread::Priority::High: nice = -4; break;
++        case Thread::Priority::Highest: nice = -8; break;
++        default: break;
++        }
++        setpriority(PRIO_PROCESS, gettid(), nice);
+ #   elif defined(__linux__) || defined(__APPLE__)
+         // On Linux, thread priorities can't be changed under the default scheduler policy (SCHED_OTHER) and the other policies
+         // that are available without root privileges are lower priority. Instead you can set the thread's "nice" value, which ranges
+diff --git a/src/gbi/rt64_gbi.cpp b/src/gbi/rt64_gbi.cpp
+index 7006549..cec813b 100644
+--- a/src/gbi/rt64_gbi.cpp
++++ b/src/gbi/rt64_gbi.cpp
+@@ -437,6 +437,12 @@ namespace RT64 {
+ 
+         if (textSegmentIndex < 0 || dataSegmentIndex < 0) {
+             fprintf(stderr, "Unable to find a matching GBI in the current database. This game is not supported in HLE.\n");
++#       if defined(__ANDROID__)
++            // What was actually in memory, to compare against a launch where it's recognized.
++            fprintf(stderr, "GBI lookup: text 0x%08X hash 0x%016llX (%s), data 0x%08X hash 0x%016llX (%s)\n",
++                textAddress, (unsigned long long)XXH3_64bits(&RDRAM[textAddress], 0x1390), textSegmentIndex >= 0 ? "known" : "unknown",
++                dataAddress, (unsigned long long)XXH3_64bits(&RDRAM[dataAddress], 0x420), dataSegmentIndex >= 0 ? "known" : "unknown");
++#       endif
+             deduceGBIInformation(RDRAM, textAddress, dataAddress);
+             return nullptr;
+         }
+diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
+index ee8bc1f..55dbd2b 100644
+--- a/src/hle/rt64_application.cpp
++++ b/src/hle/rt64_application.cpp
+@@ -3,6 +3,10 @@
+ //
+ 
+ #include "rt64_application.h"
++
++#if defined(__ANDROID__)
++#   include "plume_vulkan.h"
++#endif
+ #include "rhi/rt64_render_hooks.h"
+ 
+ #include <cinttypes>
+@@ -18,11 +22,13 @@
+ 
+ //#define LOG_DISPLAY_LISTS
+ 
++// On Android, plume builds its Vulkan surface from the ANativeWindow when the swap chain
++// is created (VK_KHR_android_surface), so its instance is created without a window.
+ namespace plume {
+     // External functions to create the backends.
+     extern std::unique_ptr<RenderInterface> CreateD3D12Interface();
+     extern std::unique_ptr<RenderInterface> CreateMetalInterface();
+-#ifdef RT64_SDL_WINDOW_VULKAN
++#if defined(RT64_SDL_WINDOW_VULKAN) && !defined(__ANDROID__)
+     extern std::unique_ptr<RenderInterface> CreateVulkanInterface(RenderWindow renderWindow);
+ #else
+     extern std::unique_ptr<RenderInterface> CreateVulkanInterface();
+@@ -33,7 +39,7 @@ namespace RT64 {
+     // Constants
+ 
+     static std::unique_ptr<RenderInterface> CreateVulkanInterfaceWrapper(RenderWindow renderWindow) {
+-#ifdef RT64_SDL_WINDOW_VULKAN
++#if defined(RT64_SDL_WINDOW_VULKAN) && !defined(__ANDROID__)
+         return plume::CreateVulkanInterface(renderWindow);
+ #else
+         return plume::CreateVulkanInterface();
+@@ -316,16 +322,38 @@ namespace RT64 {
+         workloadExtrasUploader = std::make_unique<BufferUploader>(device.get());
+         workloadVelocityUploader = std::make_unique<BufferUploader>(device.get());
+         workloadTilesUploader = std::make_unique<BufferUploader>(device.get());
++#   if defined(__ANDROID__)
++        // Android: the game waits on the display-list thread's GPU work (its native-resolution
++        // render for Render to RAM, and texture uploads), so those workers get the high-priority
++        // GPU queue and can run ahead of the full-resolution frames (see plume).
++        plume::vulkanHighPriorityQueueCreation = true;
++#   endif
+         framebufferGraphicsWorker = std::make_unique<RenderWorker>(device.get(), "Framebuffer Graphics", RenderCommandListType::DIRECT);
+         textureDirectWorker = std::make_unique<RenderWorker>(device.get(), "Texture Direct", RenderCommandListType::DIRECT);
+         textureCopyWorker = std::make_unique<RenderWorker>(device.get(), "Texture Copy", RenderCommandListType::COPY);
++#   if defined(__ANDROID__)
++        plume::vulkanHighPriorityQueueCreation = false;
++#   endif
+         workloadGraphicsWorker = std::make_unique<RenderWorker>(device.get(), "Workload Graphics", RenderCommandListType::DIRECT);
+         presentGraphicsWorker = std::make_unique<RenderWorker>(device.get(), "Present Graphics", RenderCommandListType::DIRECT);
++#   if defined(__ANDROID__)
++        fprintf(stdout, "GPU queues: display list %s; texture uploads %s; presentation %s\n",
++            framebufferGraphicsWorker->sharesQueueWith(*workloadGraphicsWorker) ? "shares the renderer's queue" : "has its own high-priority queue",
++            textureDirectWorker->sharesQueueWith(*workloadGraphicsWorker) ? "share the renderer's queue" : "use the high-priority queue",
++            presentGraphicsWorker->sharesQueueWith(*workloadGraphicsWorker) ? "shares the renderer's queue" : "uses another queue");
++        fflush(stdout);
++#   endif
+ 
+         // Create the swap chain with the texture count specified from the configuration.
+         RenderSwapChainDesc swapChainDesc;
+         swapChainDesc.renderWindow = appWindow->windowHandle;
++#   if defined(__ANDROID__)
++        // Android guarantees RGBA8 for window surfaces; BGRA8 is often not offered (e.g. Adreno),
++        // and plume refuses to create a swap chain in a format the surface doesn't list.
++        swapChainDesc.format = RenderFormat::R8G8B8A8_UNORM;
++#   else
+         swapChainDesc.format = RenderFormat::B8G8R8A8_UNORM;
++#   endif
+         swapChainDesc.textureCount = (userConfig.displayBuffering == UserConfiguration::DisplayBuffering::Triple) ? 3 : 2;
+ 
+         // Enable present wait if supported by the device. We specify a max latency of 1 as we use it to wait right before the next
+@@ -441,6 +469,7 @@ namespace RT64 {
+         stateExt.device = device.get();
+         stateExt.swapChain = swapChain.get();
+         stateExt.framebufferGraphicsWorker = framebufferGraphicsWorker.get();
++        stateExt.workloadGraphicsWorker = workloadGraphicsWorker.get();
+         stateExt.shaderLibrary = shaderLibrary.get();
+         stateExt.drawDataUploader = drawDataUploader.get();
+         stateExt.transformsUploader = transformsUploader.get();
+@@ -522,6 +551,41 @@ namespace RT64 {
+         appWindow->sdlCheckFilterInstallation();
+         screenApiProfiler.logAndRestart();
+         state->updateScreen(core.decodeVI(), false);
++#   if defined(__ANDROID__)
++        // Android performance log: every 5 seconds, where each frame's time goes (averages
++        // over RT64's own profilers, in milliseconds), so slow spots can be traced to the
++        // game's code, RT64's CPU work or the GPU.
++        static ElapsedTimer statsTimer;
++        if (statsTimer.elapsedMilliseconds() >= 5000.0) {
++            statsTimer.reset();
++            fprintf(stdout, "Perf: game frame %.1f ms (DL interval), DL parse %.1f ms, workload %.1f ms, renderer CPU %.1f ms, GPU %.1f ms, present %.1f ms\n",
++                dlApiProfiler.average(), state->dlCpuProfiler.average(), workloadQueue->workloadProfiler.average(),
++                workloadQueue->rendererCPUProfiler.average(), workloadQueue->rendererGPUProfiler.average(), presentQueue->presentProfiler.average());
++            // Per rendered frame (game frames and in-between ones) over the last 5 seconds.
++            const uint64_t renders = AndroidRenderStats::renders.exchange(0);
++            const uint64_t passes = AndroidRenderStats::passes.exchange(0);
++            const uint64_t depthSwitches = AndroidRenderStats::depthSwitches.exchange(0);
++            const uint64_t draws = AndroidRenderStats::draws.exchange(0);
++            const uint64_t recordMicros = AndroidRenderStats::recordMicros.exchange(0);
++            const uint64_t waitMicros = AndroidRenderStats::waitMicros.exchange(0);
++            if (renders > 0) {
++                const double n = double(renders);
++                const UserConfiguration &config = sharedQueueResources->userConfig;
++                fprintf(stdout, "Perf frames: %.1f rendered/s, target %ux%u, %.1f passes, %.1f depth switches, %.0f draws, record %.1f ms, GPU wait %.1f ms per frame; framerate mode %d (target %d), resolution mode %d (x%.1f)\n",
++                    n / 5.0, AndroidRenderStats::targetWidth.load(), AndroidRenderStats::targetHeight.load(),
++                    double(passes) / n, double(depthSwitches) / n, double(draws) / n, double(recordMicros) / n / 1000.0, double(waitMicros) / n / 1000.0,
++                    int(config.refreshRate), config.refreshRateTarget, int(config.resolution), config.resolutionMultiplier);
++            }
++            const uint64_t syncs = AndroidRenderStats::dlSyncs.exchange(0);
++            if (syncs > 0) {
++                const double m = double(syncs) * 1000.0;
++                fprintf(stdout, "Perf DL waits (ms per game frame): framebuffer worker %.2f, texture uploads %.2f, buffer uploaders %.2f, background RAM copy %.2f; %.1f game frames/s\n",
++                    double(AndroidRenderStats::dlWaitFbWorker.exchange(0)) / m, double(AndroidRenderStats::dlWaitUploads.exchange(0)) / m,
++                    double(AndroidRenderStats::dlWaitUploaders.exchange(0)) / m, double(AndroidRenderStats::dlWaitRAMCopy.exchange(0)) / m, double(syncs) / 5.0);
++            }
++            fflush(stdout);
++        }
++#   endif
+     }
+ 
+     void Application::destroyShaderCache() {
+diff --git a/src/hle/rt64_application_window.cpp b/src/hle/rt64_application_window.cpp
+index 08f83e5..104cf49 100755
+--- a/src/hle/rt64_application_window.cpp
++++ b/src/hle/rt64_application_window.cpp
+@@ -51,7 +51,22 @@ namespace RT64 {
+ 
+         windowHandle = window;
+ 
+-#   if defined(RT64_SDL_WINDOW_VULKAN)
++#   if defined(__ANDROID__)
++        // RenderWindow is the ANativeWindow* here; find the SDL window that owns it.
++        sdlWindow = nullptr;
++        for (Uint32 windowId = 1; (windowId <= 16) && (sdlWindow == nullptr); windowId++) {
++            SDL_Window *candidate = SDL_GetWindowFromID(windowId);
++            if (candidate == nullptr) {
++                continue;
++            }
++
++            SDL_SysWMinfo wmInfo;
++            SDL_VERSION(&wmInfo.version);
++            if (SDL_GetWindowWMInfo(candidate, &wmInfo) && (wmInfo.info.android.window == window)) {
++                sdlWindow = candidate;
++            }
++        }
++#   elif defined(RT64_SDL_WINDOW_VULKAN)
+         sdlWindow = window;
+ #   endif
+ 
+@@ -103,8 +118,6 @@ namespace RT64 {
+         bounds.top = rect.top;
+         bounds.width = rect.right - rect.left;
+         bounds.height = rect.bottom - rect.top;
+-#   elif defined(__ANDROID__)
+-        static_assert(false && "Android unimplemented");
+ #   elif defined(__linux__) || defined(__APPLE__)
+         if (SDL_VideoInit(nullptr) != 0) {
+             printf("Failed to init SDL2 video: %s\n", SDL_GetError());
+@@ -145,10 +158,11 @@ namespace RT64 {
+         SDL_GetWindowWMInfo(sdlWindow, &wmInfo);
+ #   if defined(_WIN32)
+         windowHandle = wmInfo.info.win.window;
++#   elif defined(__ANDROID__)
++        // plume::RenderWindow is an ANativeWindow* on Android.
++        windowHandle = wmInfo.info.android.window;
+ #   elif defined(RT64_SDL_WINDOW_VULKAN)
+         windowHandle = sdlWindow;
+-#   elif defined(__ANDROID__)
+-        static_assert(false && "Android unimplemented");
+ #   elif defined(__linux__)
+         windowHandle.display = wmInfo.info.x11.display;
+         windowHandle.window = wmInfo.info.x11.window;
+@@ -231,9 +245,9 @@ namespace RT64 {
+         windowWrapper->toggleFullscreen();
+ #   elif defined(RT64_SDL_WINDOW_VULKAN)
+         if (newFullScreen) {
+-            SDL_SetWindowFullscreen(windowHandle, SDL_WINDOW_FULLSCREEN_DESKTOP);
++            SDL_SetWindowFullscreen(sdlWindow, SDL_WINDOW_FULLSCREEN_DESKTOP);
+         } else {
+-            SDL_SetWindowFullscreen(windowHandle, 0);
++            SDL_SetWindowFullscreen(sdlWindow, 0);
+         }
+         fullScreen = newFullScreen;
+ #   endif
+@@ -280,7 +294,7 @@ namespace RT64 {
+             refreshRate++;
+         }
+ #   elif defined(RT64_SDL_WINDOW_VULKAN)
+-        int displayIndex = SDL_GetWindowDisplayIndex(windowHandle);
++        int displayIndex = SDL_GetWindowDisplayIndex(sdlWindow);
+         if (displayIndex < 0) {
+             fprintf(stderr, "SDL_GetWindowDisplayIndex failed. Error: %s.\n", SDL_GetError());
+             return;
+@@ -348,7 +362,7 @@ namespace RT64 {
+         newWindowLeft = rect.left;
+         newWindowTop = rect.top;
+ #   elif defined(RT64_SDL_WINDOW_VULKAN)
+-        SDL_GetWindowPosition(windowHandle, &newWindowLeft, &newWindowTop);
++        SDL_GetWindowPosition(sdlWindow, &newWindowLeft, &newWindowTop);
+ #   elif defined(__linux__)
+         XWindowAttributes attributes;
+         XGetWindowAttributes(windowHandle.display, windowHandle.window, &attributes);
+diff --git a/src/hle/rt64_framebuffer_manager.cpp b/src/hle/rt64_framebuffer_manager.cpp
+index d7caa12..bc247dc 100644
+--- a/src/hle/rt64_framebuffer_manager.cpp
++++ b/src/hle/rt64_framebuffer_manager.cpp
+@@ -14,6 +14,7 @@
+ #include "hle/rt64_rdp.h"
+ #include "render/rt64_render_target.h"
+ #include "render/rt64_render_worker.h"
++#include "render/rt64_framebuffer_renderer.h"
+ 
+ namespace RT64 {
+     static void fixSizeToMultiple(uint32_t &width, uint32_t &height) {
+@@ -958,17 +959,26 @@ namespace RT64 {
+         for (const FramebufferOperation &op : operations) {
+             switch (op.type) {
+             case FramebufferOperation::Type::WriteChanges: {
++#           if defined(__ANDROID__)
++                AndroidRenderStats::writeChanges.fetch_add(1, std::memory_order_relaxed);
++#           endif
+                 assert(fbChangePool != nullptr);
+                 writeChanges(renderWorker, *fbChangePool, op, targetManager, shaderLibrary);
+                 break;
+             }
+             case FramebufferOperation::Type::CreateTileCopy: {
+                 assert(fbStorage != nullptr);
++#           if defined(__ANDROID__)
++                AndroidRenderStats::tileCopies.fetch_add(1, std::memory_order_relaxed);
++#           endif
+                 createTileCopyRecord(renderWorker, op, *fbStorage, targetManager, resolutionScale, maxFbPairIndex, cmdListCopies, cmdListDiscards, shaderLibrary);
+                 break;
+             }
+             case FramebufferOperation::Type::ReinterpretTile: {
+                 assert(textureCache != nullptr);
++#           if defined(__ANDROID__)
++                AndroidRenderStats::reinterprets.fetch_add(1, std::memory_order_relaxed);
++#           endif
+                 reinterpretTileRecord(renderWorker, op, *textureCache, resolutionScale, submissionFrame, shaderLibrary->usesHDR, cmdListReinterpretations, cmdListDiscards);
+                 break;
+             }
+diff --git a/src/hle/rt64_interpreter.cpp b/src/hle/rt64_interpreter.cpp
+index dccaa87..5a0cbe9 100644
+--- a/src/hle/rt64_interpreter.cpp
++++ b/src/hle/rt64_interpreter.cpp
+@@ -37,8 +37,18 @@ namespace RT64 {
+                 state->rsp->setGBI(hleGBI);
+             }
+ 
++#       if defined(__ANDROID__)
++            // Only remember the microcode once it's been recognized, so an unrecognized one is
++            // looked up again on the next task (seen once on a first launch) instead of every
++            // display list after it running with no GBI.
++            if (hleGBI != nullptr) {
++                UCode.textAddress = maskedTextAddress;
++                UCode.dataAddress = maskedDataAddress;
++            }
++#       else
+             UCode.textAddress = maskedTextAddress;
+             UCode.dataAddress = maskedDataAddress;
++#       endif
+         }
+ 
+         if (hleGBI != nullptr) {
+@@ -155,6 +165,13 @@ namespace RT64 {
+ 
+     void Interpreter::processDisplayLists(uint32_t dlStartAdddress, DisplayList *dlStart) {
+         assert(hleGBI != nullptr);
++#   if defined(__ANDROID__)
++        if (hleGBI == nullptr) {
++            // The microcode wasn't recognized (see loadUCodeGBI): skip this frame's display
++            // list rather than crash; the next task looks the microcode up again.
++            return;
++        }
++#   endif
+ 
+         state->dlCpuProfiler.start();
+ 
+diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
+index 7de5b69..99c1807 100644
+--- a/src/hle/rt64_present_queue.cpp
++++ b/src/hle/rt64_present_queue.cpp
+@@ -4,6 +4,16 @@
+ 
+ #include "rt64_present_queue.h"
+ 
++#if defined(__ANDROID__)
++#   include <atomic>
++// Frames actually shown on screen (including the in-between frames made for a higher
++// Framerate setting), for the game's Show FPS counter.
++static std::atomic<uint32_t> androidPresentedFrames{ 0 };
++extern "C" uint32_t rt64_android_presented_frames() {
++    return androidPresentedFrames.load(std::memory_order_relaxed);
++}
++#endif
++
+ #include "common/rt64_thread.h"
+ #include "rhi/rt64_render_hooks.h"
+ 
+@@ -257,8 +267,9 @@ namespace RT64 {
+             }
+         }
+ 
+-        // Create the framebuffers if necessary.
+-        if (swapChainFramebuffers.empty()) {
++        // Create the framebuffers if necessary. Not while the swap chain is invalid: its images
++        // may be gone (e.g. a failed resize after Android replaced the window's surface).
++        if (swapChainFramebuffers.empty() && swapChainValid) {
+             uint32_t textureCount = ext.swapChain->getTextureCount();
+             swapChainFramebuffers.resize(textureCount);
+             for (uint32_t i = 0; i < textureCount; i++) {
+@@ -403,6 +414,9 @@ namespace RT64 {
+                 presentTimestamp = Timer::current();
+                 swapChainValid = ext.swapChain->present(swapChainIndex, &waitSemaphore, 1);
+                 presentProfiler.logAndRestart();
++#           if defined(__ANDROID__)
++                androidPresentedFrames.fetch_add(1, std::memory_order_relaxed);
++#           endif
+             }
+         }
+     }
+@@ -433,6 +447,7 @@ namespace RT64 {
+ 
+     void PresentQueue::threadLoop() {
+         Thread::setCurrentThreadName("RT64 Present");
++        Thread::setCurrentThreadPriority(Thread::Priority::High);
+ 
+         // Create the semaphore the acquire method will use.
+         acquiredSemaphore = ext.device->createCommandSemaphore();
+diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
+index 2970e71..6200a1e 100644
+--- a/src/hle/rt64_state.cpp
++++ b/src/hle/rt64_state.cpp
+@@ -64,7 +64,28 @@ namespace RT64 {
+         reset();
+     }
+ 
+-    State::~State() { }
++    State::~State() {
++#   if defined(__ANDROID__)
++        if (asyncRAMThread.joinable()) {
++            asyncRAMThread.join();
++        }
++#   endif
++    }
++
++#if defined(__ANDROID__)
++    void State::finishAsyncRenderToRAM() {
++        if (!asyncRAMPending) {
++            return;
++        }
++
++        RT64_ANDROID_TIME(dlWaitRAMCopy, asyncRAMThread.join());
++        asyncRAMCopies.clear();
++        asyncRAMPending = false;
++
++        // Done here rather than at the end of fullSync, so the hashes match what was written.
++        framebufferManager.hashTracking(RDRAM);
++    }
++#endif
+ 
+     void State::setup(const External &ext) {
+         this->ext = ext;
+@@ -617,6 +638,9 @@ namespace RT64 {
+     }
+     
+     void State::checkRDRAM() {
++#   if defined(__ANDROID__)
++        finishAsyncRenderToRAM();
++#   endif
+         if (!rdramCheckPending) {
+             return;
+         }
+@@ -790,6 +814,9 @@ namespace RT64 {
+     }
+ 
+     void State::fullSync() {
++#   if defined(__ANDROID__)
++        finishAsyncRenderToRAM();
++#   endif
+         flush();
+         submitFramebufferPair(FramebufferPair::FlushReason::ProcessDisplayListsEnd);
+ 
+@@ -1237,6 +1264,7 @@ namespace RT64 {
+             uint32_t framebufferIndex = 0;
+             auto renderSetup = [&]() {
+                 scratchFbChangePool.reset();
++                ext.framebufferGraphicsWorker->flushPendingWait();
+                 ext.framebufferGraphicsWorker->commandList->begin();
+                 framebufferManager.resetOperations();
+                 framebufferRenderer->resetFramebuffers(ext.framebufferGraphicsWorker, false, workload.extended.ditherNoiseStrength, renderTargetManager.multisampling);
+@@ -1310,7 +1338,7 @@ namespace RT64 {
+                 }
+ 
+                 // Synchronize all texture uploads before filling out the GPU tiles and update the texture cache on the framebuffer renderer.
+-                ext.textureCache->waitForGPUUploads();
++                RT64_ANDROID_TIME(dlWaitUploads, ext.textureCache->waitForGPUUploads());
+                 framebufferRenderer->updateTextureCache(ext.textureCache);
+ 
+                 thread_local std::vector<BufferUploader *> bufferUploaders;
+@@ -1469,9 +1497,43 @@ namespace RT64 {
+                 }
+ 
+                 ext.framebufferGraphicsWorker->commandList->end();
+-                framebufferRenderer->waitForUploaders();
+-                ext.framebufferGraphicsWorker->execute();
+-                ext.framebufferGraphicsWorker->wait();
++                RT64_ANDROID_TIME(dlWaitUploaders, framebufferRenderer->waitForUploaders());
++#           if defined(__ANDROID__)
++                // The last batch of the frame: let the game carry on and copy the results into
++                // RDRAM when the GPU is done (see finishAsyncRenderToRAM). Earlier batches are
++                // synchronous, as the rest of the frame may sample what they wrote.
++                if (maxFramebufferPair == workload.fbPairCount) {
++                    asyncRAMCopies.clear();
++                    pairCursor = framebufferPairCursor;
++                    while (pairCursor < maxFramebufferPair) {
++                        if (getFramebufferPairs(pairCursor)) {
++                            asyncRAMCopies.push_back({ colorFb, &RDRAM[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height) });
++                            if (depthWriteWidth > 0) {
++                                asyncRAMCopies.push_back({ depthFb, &RDRAM[depthFb->addressStart], depthWriteWidth, depthRowStart, std::min(depthRowEnd, depthFb->height) });
++                            }
++                        }
++
++                        pairCursor++;
++                    }
++
++                    RT64_ANDROID_TIME(dlWaitFbWorker, ext.framebufferGraphicsWorker->execute());
++                    RenderWorker *worker = ext.framebufferGraphicsWorker;
++                    std::vector<AsyncRAMCopy> *copies = &asyncRAMCopies;
++                    asyncRAMThread = std::thread([worker, copies]() {
++                        worker->wait();
++                        for (const AsyncRAMCopy &copy : *copies) {
++                            if (copy.rowStart < copy.rowEnd) {
++                                copy.fb->copyNativeToRAM(copy.dst, copy.rowWidth, copy.rowStart, copy.rowEnd);
++                            }
++                        }
++                    });
++
++                    asyncRAMPending = true;
++                    framebufferPairCursor = maxFramebufferPair;
++                    return;
++                }
++#           endif
++                RT64_ANDROID_TIME(dlWaitFbWorker, ext.framebufferGraphicsWorker->execute(); ext.framebufferGraphicsWorker->wait());
+ 
+                 pairCursor = framebufferPairCursor;
+                 while (pairCursor < maxFramebufferPair) {
+@@ -1570,6 +1632,7 @@ namespace RT64 {
+             }
+ 
+             // Do not render anything, just wait for the data to be uploaded.
++            ext.framebufferGraphicsWorker->flushPendingWait();
+             ext.framebufferGraphicsWorker->commandList->begin();
+             ext.drawDataUploader->commandListBeforeBarriers(ext.framebufferGraphicsWorker);
+             ext.transformsUploader->commandListBeforeBarriers(ext.framebufferGraphicsWorker);
+@@ -1578,11 +1641,28 @@ namespace RT64 {
+             ext.drawDataUploader->commandListAfterBarriers(ext.framebufferGraphicsWorker);
+             ext.transformsUploader->commandListAfterBarriers(ext.framebufferGraphicsWorker);
+             ext.framebufferGraphicsWorker->commandList->end();
+-            ext.drawDataUploader->wait();
+-            ext.transformsUploader->wait();
+-            ext.framebufferGraphicsWorker->execute();
+-            ext.framebufferGraphicsWorker->wait();
+-            ext.textureCache->waitForGPUUploads();
++            RT64_ANDROID_TIME(dlWaitUploaders, ext.drawDataUploader->wait(); ext.transformsUploader->wait());
++#       if defined(__ANDROID__)
++            // Android: the copies go to this workload's own buffers, and the workload's draws are
++            // submitted to the same GPU queue afterwards, so the GPU runs them in order; there's
++            // no need for the game to wait here (behind the frames the GPU is still drawing).
++            // The wait happens when this worker is next used, by which time it's long done.
++            static const bool deferUploadWait = (ext.workloadGraphicsWorker != nullptr) && ext.framebufferGraphicsWorker->sharesQueueWith(*ext.workloadGraphicsWorker);
++            static bool loggedDefer = false;
++            if (!loggedDefer) {
++                loggedDefer = true;
++                fprintf(stdout, "Display list uploads: %s\n", deferUploadWait ? "not waited for (same GPU queue as the renderer)" : "waited for (different GPU queue from the renderer)");
++                fflush(stdout);
++            }
++            if (deferUploadWait) {
++                RT64_ANDROID_TIME(dlWaitFbWorker, ext.framebufferGraphicsWorker->executeDeferred());
++            }
++            else
++#       endif
++            {
++                RT64_ANDROID_TIME(dlWaitFbWorker, ext.framebufferGraphicsWorker->execute(); ext.framebufferGraphicsWorker->wait());
++            }
++            RT64_ANDROID_TIME(dlWaitUploads, ext.textureCache->waitForGPUUploads());
+         }
+ 
+         // Evict from the texture cache that are too old and should no longer be maintained.
+@@ -1595,7 +1675,13 @@ namespace RT64 {
+             // Indicate to the texture cache it's safe to delete the textures if no locks are active.
+             ext.textureCache->decrementLock();
+ 
+-            framebufferManager.hashTracking(RDRAM);
++#       if defined(__ANDROID__)
++            // With the RAM copy still running, the hashes are taken when it finishes.
++            if (!asyncRAMPending)
++#       endif
++            {
++                framebufferManager.hashTracking(RDRAM);
++            }
+ 
+             advanceFramebufferRenderer();
+ 
+@@ -1624,6 +1710,9 @@ namespace RT64 {
+         }
+ 
+         // Log and reset profilers.
++#   if defined(__ANDROID__)
++        AndroidRenderStats::dlSyncs.fetch_add(1, std::memory_order_relaxed);
++#   endif
+         dlCpuProfiler.end();
+         dlCpuProfiler.log();
+         screenCpuProfiler.log();
+@@ -1836,6 +1925,9 @@ namespace RT64 {
+     }
+     
+     void State::updateScreen(const VI &newVI, bool fromEarlyPresent) {
++#   if defined(__ANDROID__)
++        finishAsyncRenderToRAM();
++#   endif
+         // If the debugger has paused the plugin, keep submitting the last workload and screen VI for rendering and a present event.
+         if (debuggerInspector.paused && !fromEarlyPresent) {
+             if (ext.userConfig->developerMode) {
+diff --git a/src/hle/rt64_state.h b/src/hle/rt64_state.h
+index 7a8c13b..bd198be 100644
+--- a/src/hle/rt64_state.h
++++ b/src/hle/rt64_state.h
+@@ -4,6 +4,8 @@
+ 
+ #pragma once
+ 
++#include <thread>
++
+ #include "xxHash/xxh3.h"
+ 
+ #include "common/rt64_emulator_configuration.h"
+@@ -46,6 +48,7 @@ namespace RT64 {
+             RenderDevice *device;
+             RenderSwapChain *swapChain;
+             RenderWorker *framebufferGraphicsWorker;
++            RenderWorker *workloadGraphicsWorker = nullptr; // Android: to check it shares the framebuffer worker's GPU queue.
+             ShaderLibrary *shaderLibrary;
+             BufferUploader *drawDataUploader;
+             BufferUploader *transformsUploader;
+@@ -95,6 +98,24 @@ namespace RT64 {
+         uint32_t displayListAddress;
+         uint64_t displayListCounter;
+         bool rdramCheckPending;
++#   if defined(__ANDROID__)
++        // Android: Render to RAM's copy of the frame's native-resolution result into RDRAM runs
++        // on a helper thread once the GPU has finished, instead of the game waiting for the GPU
++        // (which is busy with the full-resolution frames). finishAsyncRenderToRAM waits for it
++        // and records the framebuffers' RAM hashes; it runs before anything reads RDRAM's
++        // framebuffers or uses the framebuffer worker again (next display list, screen update).
++        struct AsyncRAMCopy {
++            Framebuffer *fb;
++            uint8_t *dst;
++            uint32_t rowWidth;
++            uint32_t rowStart;
++            uint32_t rowEnd;
++        };
++        std::vector<AsyncRAMCopy> asyncRAMCopies;
++        std::thread asyncRAMThread;
++        bool asyncRAMPending = false;
++        void finishAsyncRenderToRAM();
++#   endif
+         uint32_t lastWorkloadIndex;
+         VI lastScreenVI;
+         uint64_t lastScreenHash;
+diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
+index 5a331aa..df80119 100644
+--- a/src/hle/rt64_workload_queue.cpp
++++ b/src/hle/rt64_workload_queue.cpp
+@@ -11,6 +11,7 @@
+ #define ENABLE_HIGH_RESOLUTION_RENDERER 1
+ 
+ namespace RT64 {
++
+     // WorkloadQueue
+ 
+     WorkloadQueue::WorkloadQueue() {
+@@ -188,7 +189,18 @@ namespace RT64 {
+         switch (resolutionMode) {
+         case UserConfiguration::Resolution::WindowIntegerScale:
+             if (ext.sharedResources->swapChainHeight > 0) {
++#           if defined(__ANDROID__)
++                // Android: exactly the screen's height (1080 is 4.5x the N64's 240), not the
++                // next whole multiple (5x, 1200 lines: about 23% more pixels than the screen),
++                // and at most 1080 lines. Big screens (a Galaxy Z Fold's inner screen is ~1968
++                // lines tall) would otherwise draw about twice the pixels of a 1080p handheld,
++                // more than phone GPUs keep up with at 60 FPS; 1080 still looks sharp there.
++                static constexpr float maxAutoHeight = 1080.0f;
++                const float autoHeight = std::min(float(ext.sharedResources->swapChainHeight), maxAutoHeight);
++                resolutionMultiplier = std::max(autoHeight / float(referenceHeight), 1.0f);
++#           else
+                 resolutionMultiplier = std::max(float((ext.sharedResources->swapChainHeight + referenceHeight - 1) / referenceHeight), 1.0f);
++#           endif
+             }
+             else {
+                 resolutionMultiplier = 1.0f;
+@@ -301,6 +313,10 @@ namespace RT64 {
+         const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
+ 
+         rendererCPUProfiler.start();
++#   if defined(__ANDROID__)
++        ElapsedTimer androidRecordTimer;
++        AndroidRenderStats::renders.fetch_add(1, std::memory_order_relaxed);
++#   endif
+ 
+         const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
+         const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
+@@ -484,6 +500,10 @@ namespace RT64 {
+ 
+                     if (colorTarget != nullptr) {
+                         rtWidth = std::max(rtWidth, colorTarget->width);
++#                   if defined(__ANDROID__)
++                        AndroidRenderStats::targetWidth.store(colorTarget->width, std::memory_order_relaxed);
++                        AndroidRenderStats::targetHeight.store(colorTarget->height, std::memory_order_relaxed);
++#                   endif
+                         rtHeight = std::max(rtHeight, colorTarget->height);
+                         chosenRt = colorTarget;
+                     }
+@@ -840,8 +860,15 @@ namespace RT64 {
+             ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 1);
+             ext.workloadGraphicsWorker->commandList->end();
+             framebufferRenderer->waitForUploaders();
++#       if defined(__ANDROID__)
++            AndroidRenderStats::recordMicros.fetch_add(uint64_t(androidRecordTimer.elapsedMicroseconds()), std::memory_order_relaxed);
++            ElapsedTimer androidWaitTimer;
++#       endif
+             ext.workloadGraphicsWorker->execute();
+             ext.workloadGraphicsWorker->wait();
++#       if defined(__ANDROID__)
++            AndroidRenderStats::waitMicros.fetch_add(uint64_t(androidWaitTimer.elapsedMicroseconds()), std::memory_order_relaxed);
++#       endif
+             workerMutex.unlock();
+ 
+             // Update the GPU profiler with the results from the timestamps of the frame.
+@@ -880,6 +907,7 @@ namespace RT64 {
+ 
+     void WorkloadQueue::renderThreadLoop() {
+         Thread::setCurrentThreadName("RT64 Workload");
++        Thread::setCurrentThreadPriority(Thread::Priority::High);
+ 
+         WorkloadConfiguration workloadConfig;
+         int64_t logicalTicks = 0;
+@@ -1070,7 +1098,19 @@ namespace RT64 {
+                         const int64_t currentTimeMicro = workloadTimer.elapsedMicroseconds() - setupTimeMicro;
+                         const int64_t expectedTimeMicro = frame * maxTimePerFrameMicro;
+                         const int64_t measuredFrameMicro = renderTimeTotalMicro / framesRendered;
+-                        if ((currentTimeMicro > expectedTimeMicro) || ((currentTimeMicro + measuredFrameMicro) > adjustedTimeWindowMicro)) {
++#                   if defined(__ANDROID__)
++                        // Android: only skip an in-between frame once rendering is a whole frame
++                        // behind. Skipping as soon as a frame runs a little late halves the GPU's
++                        // load, so the phone's GPU governor lowers its clock, frames get slower
++                        // still and the game stays stuck at 30 FPS. Rendering it anyway keeps the
++                        // GPU busy enough to stay clocked up. (A new game frame waiting still
++                        // skips the rest below.)
++                        const bool skipFrame = (currentTimeMicro > (expectedTimeMicro + maxTimePerFrameMicro));
++                        (void)measuredFrameMicro;
++#                   else
++                        const bool skipFrame = (currentTimeMicro > expectedTimeMicro) || ((currentTimeMicro + measuredFrameMicro) > adjustedTimeWindowMicro);
++#                   endif
++                        if (skipFrame) {
+                             displayTicks += workload.viOriginalRate;
+                             skippedFrames = true;
+                             continue;
+diff --git a/src/render/rt64_descriptor_sets.h b/src/render/rt64_descriptor_sets.h
+index 69a82ac..3f7dd70 100644
+--- a/src/render/rt64_descriptor_sets.h
++++ b/src/render/rt64_descriptor_sets.h
+@@ -290,9 +290,24 @@ namespace RT64 {
+         }
+     };
+ 
++#if defined(__ANDROID__)
++}
++namespace plume {
++    extern uint32_t VulkanMaxPerStageSampledImages; // plume Android patch
++}
++namespace RT64 {
++#endif
++
+     struct FramebufferRendererDescriptorTextureSet : RenderDescriptorSetBase {
+         static const int UpperRange = 8192;
+ 
++#if defined(__ANDROID__)
++        // Fixed-size table when the device can hold all of it in one draw (see below).
++        static bool useFixedTable() {
++            return plume::VulkanMaxPerStageSampledImages >= uint32_t(UpperRange + 64);
++        }
++#endif
++
+         uint32_t textureCacheSize = 0;
+         uint32_t gTextures;
+         uint32_t gTMEM;
+@@ -303,7 +318,21 @@ namespace RT64 {
+             builder.begin();
+             gTextures = builder.addTexture(0, UpperRange);
+             gTMEM = gTextures;
++#if defined(__ANDROID__)
++            if (!useFixedTable()) {
++                builder.end(true, textureCacheSize);
++            }
++            else
++            // Adreno's handling of the variable-count, partially-bound, update-after-bind
++            // texture table makes draws sample the wrong textures (wrong-coloured or swapped
++            // surfaces). A plain fixed-size table, as Zelda64Recomp-Android does on the same
++            // GPUs, renders correctly. RT64 waits for each workload before rewriting slots.
++            {
++                builder.end();
++            }
++#else
+             builder.end(true, textureCacheSize);
++#endif
+ 
+             if (device != nullptr) {
+                 create(device);
+diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
+index ff85358..063167a 100644
+--- a/src/render/rt64_framebuffer_renderer.cpp
++++ b/src/render/rt64_framebuffer_renderer.cpp
+@@ -53,6 +53,29 @@ namespace interop {
+ };
+ 
+ namespace RT64 {
++#if defined(__ANDROID__)
++    std::atomic<uint64_t> AndroidRenderStats::renders{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::passes{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::depthSwitches{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::draws{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::uberDraws{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::ditherDraws{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::passPixels{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::readingPasses{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::tileCopies{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::reinterprets{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::writeChanges{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::dlWaitFbWorker{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::dlWaitUploads{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::dlWaitUploaders{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::dlSyncs{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::dlWaitRAMCopy{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::recordMicros{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::waitMicros{ 0 };
++    std::atomic<uint32_t> AndroidRenderStats::targetWidth{ 0 };
++    std::atomic<uint32_t> AndroidRenderStats::targetHeight{ 0 };
++#endif
++
+     // TEMPORARY diagnostic (Banjo-Tooie port). RT64 takes the widescreen decision
+     // twice: the projection processor widens the projection's field of view, and
+     // this file decides whether the viewport is stretched instead. The two must
+@@ -337,7 +360,14 @@ namespace RT64 {
+         
+         const bool createSet = (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
+         if (createSet) {
++#if defined(__ANDROID__)
++            // Fixed-size table on Android (see FramebufferRendererDescriptorTextureSet): create it
++            // once at full size instead of regrowing it.
++            descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device,
++                FramebufferRendererDescriptorTextureSet::useFixedTable() ? uint32_t(FramebufferRendererDescriptorTextureSet::UpperRange) : ((textureCacheSize + 1) * 3) / 2);
++#else
+             descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, ((textureCacheSize + 1) * 3) / 2);
++#endif
+         }
+ 
+         if (createSet || (descriptorTextureReplacementMapEnabled != textureCacheReplacementMapEnabled)) {
+@@ -487,6 +517,9 @@ namespace RT64 {
+         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(fbStorage->depthTarget->texture.get(), readOnly ? depthReadState : RenderTextureLayout::DEPTH_WRITE));
+         worker->commandList->setFramebuffer(renderFramebuffer);
+         depthState = readOnly;
++#   if defined(__ANDROID__)
++        AndroidRenderStats::depthSwitches.fetch_add(1, std::memory_order_relaxed);
++#   endif
+         return true;
+     }
+     
+@@ -579,7 +612,12 @@ namespace RT64 {
+                 const interop::OtherMode otherMode = triangles.shaderDesc.otherMode;
+                 bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
+                 bool depthWrite = otherMode.zUpd();
+-                if (depthDecal) {
++                if (depthDecal && triangles.hardwareDecal) {
++                    // Android: tested by the depth test, so the depth buffer stays a render
++                    // target and the pass carries on.
++                    switchToDepthWrite();
++                }
++                else if (depthDecal) {
+                     switchToDepthRead();
+                 }
+                 else if (!depthDecal && depthWrite) {
+@@ -595,7 +633,22 @@ namespace RT64 {
+                     worker->commandList->setPipeline(triangles.pipeline);
+                     previousPipeline = triangles.pipeline;
+                 }
++
++#           if defined(__ANDROID__)
++                if (depthDecal && triangles.hardwareDecal) {
++                    // Match the shader's decal tolerance (RasterPS): the larger of the coplanar
++                    // tolerance (up to 0.0005 of depth; about 8192 units of a D32 float's
++                    // precision near the far plane) and the depth change across a pixel times the
++                    // resolution scale (ddx + ddy, so up to twice the steepest slope). Without the
++                    // resolution scale, decals a little behind the surface (the ring under a
++                    // charging Kong, shadows) partly failed at high resolutions.
++                    worker->commandList->setDepthBias(-8192.0f, 0.0f, -2.0f * std::max(framebuffer.resolutionScaleY, 1.0f));
++                }
++#           endif
+                 
++#           if defined(__ANDROID__)
++                AndroidRenderStats::draws.fetch_add(1, std::memory_order_relaxed);
++#           endif
+                 rasterParams.renderIndex = i;
+                 rasterParams.screenScale = triangles.screenScale;
+                 rasterParams.screenOffset = triangles.screenOffset;
+@@ -605,6 +658,9 @@ namespace RT64 {
+ 
+                 // Simulate dither noise.
+                 if (triangles.postBlendDitherNoise) {
++#               if defined(__ANDROID__)
++                    AndroidRenderStats::ditherDraws.fetch_add(1, std::memory_order_relaxed);
++#               endif
+                     if (triangles.postBlendDitherNoiseNegative) {
+                         worker->commandList->setPipeline(postBlendDitherNoiseSubNegativePipeline);
+                     }
+@@ -1254,6 +1310,9 @@ namespace RT64 {
+     }
+ 
+     void FramebufferRenderer::recordFramebuffer(RenderWorker *worker, uint32_t framebufferIndex) {
++#   if defined(__ANDROID__)
++        AndroidRenderStats::passes.fetch_add(1, std::memory_order_relaxed);
++#   endif
+         // Submit all transition barriers first.
+         thread_local std::vector<RenderTextureBarrier> startBarriers;
+         startBarriers.clear();
+@@ -1269,6 +1328,14 @@ namespace RT64 {
+         if (colorTarget != nullptr) {
+             startBarriers.emplace_back(RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE));
+         }
++#   if defined(__ANDROID__)
++        if (colorTarget != nullptr) {
++            AndroidRenderStats::passPixels.fetch_add(uint64_t(colorTarget->width) * uint64_t(colorTarget->height), std::memory_order_relaxed);
++        }
++        if (!framebuffer.transitionRenderTargetSet.empty()) {
++            AndroidRenderStats::readingPasses.fetch_add(1, std::memory_order_relaxed);
++        }
++#   endif
+ 
+         startBarriers.emplace_back(RenderTextureBarrier(depthTarget->texture.get(), RenderTextureLayout::DEPTH_WRITE));
+         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, startBarriers);
+@@ -1467,6 +1534,7 @@ namespace RT64 {
+         const float originalWidth = p.fbWidth * p.resolutionScale.y;
+         const float commonHeight = float(p.targetHeight);
+         framebuffer.viewport = RenderViewport(0.0f, 0.0f, wideWidth, commonHeight);
++        framebuffer.resolutionScaleY = p.resolutionScale.y;
+         
+         const interop::float2 halfViewportSize = { framebuffer.viewport.width / 2.0f, framebuffer.viewport.height / 2.0f };
+         const interop::float2 halfPixelOffset = { 1.0f / framebuffer.viewport.width, -1.0f / framebuffer.viewport.height };
+@@ -1713,10 +1781,15 @@ namespace RT64 {
+                         triangles.shaderDesc = call.shaderDesc;
+ 
+                         RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
++                        triangles.hardwareDecal = false;
+                         if (gpuShader != nullptr) {
+                             triangles.pipeline = gpuShader->pipeline.get();
++                            triangles.hardwareDecal = gpuShader->hardwareDecal;
+                         }
+                         else {
++#                       if defined(__ANDROID__)
++                            AndroidRenderStats::uberDraws.fetch_add(1, std::memory_order_relaxed);
++#                       endif
+                             const bool copyMode = (call.shaderDesc.otherMode.cycleType() == G_CYC_COPY);
+                             triangles.pipeline = rasterShaderUber->getPipeline(
+                                 !copyMode && call.shaderDesc.otherMode.zCmp() && (call.shaderDesc.otherMode.zMode() != ZMODE_DEC),
+diff --git a/src/render/rt64_framebuffer_renderer.h b/src/render/rt64_framebuffer_renderer.h
+index 3add9c3..ba64600 100644
+--- a/src/render/rt64_framebuffer_renderer.h
++++ b/src/render/rt64_framebuffer_renderer.h
+@@ -4,6 +4,8 @@
+ 
+ #pragma once
+ 
++#include <atomic>
++
+ #include <stdint.h>
+ 
+ #include "common/rt64_emulator_configuration.h"
+@@ -30,6 +32,38 @@
+ #endif
+ 
+ namespace RT64 {
++#if defined(__ANDROID__)
++    // Android performance log: what each rendered frame costs on a tile-based GPU. Every
++    // render pass break (a framebuffer pass, or a switch between writing and reading depth for
++    // decals) stores the whole colour and depth targets to memory and loads them back.
++    struct AndroidRenderStats {
++        static std::atomic<uint64_t> renders;        // frames rendered (game + in-between)
++        static std::atomic<uint64_t> passes;         // framebuffer passes recorded
++        static std::atomic<uint64_t> depthSwitches;  // depth write <-> read (decal) switches
++        static std::atomic<uint64_t> draws;          // triangle / rect draws
++        static std::atomic<uint64_t> recordMicros;   // CPU time recording, before the GPU wait
++        static std::atomic<uint64_t> waitMicros;     // time waiting for the GPU
++        static std::atomic<uint32_t> targetWidth;    // the last target's size, in pixels
++        static std::atomic<uint32_t> targetHeight;
++        static std::atomic<uint64_t> uberDraws;      // draws using the general (slow) ubershader
++        static std::atomic<uint64_t> ditherDraws;    // extra draws simulating dither noise
++        static std::atomic<uint64_t> passPixels;     // colour-target pixels of all passes
++        static std::atomic<uint64_t> readingPasses;  // passes that sample another render target
++        static std::atomic<uint64_t> tileCopies;     // framebuffer -> texture copies
++        static std::atomic<uint64_t> reinterprets;   // framebuffer format reinterpretations
++        static std::atomic<uint64_t> writeChanges;   // GPU -> RDRAM framebuffer write-backs
++        // Display-list thread: time spent waiting on the GPU (by what it waited for).
++        static std::atomic<uint64_t> dlWaitFbWorker;    // framebuffer worker execute + wait
++        static std::atomic<uint64_t> dlWaitUploads;     // texture uploads
++        static std::atomic<uint64_t> dlWaitUploaders;   // buffer uploaders
++        static std::atomic<uint64_t> dlSyncs;           // display lists finished (full syncs)
++        static std::atomic<uint64_t> dlWaitRAMCopy;     // waiting for the background Render to RAM copy
++    };
++#   define RT64_ANDROID_TIME(counter, expr) do { ElapsedTimer androidTimer_; expr; AndroidRenderStats::counter.fetch_add(uint64_t(androidTimer_.elapsedMicroseconds()), std::memory_order_relaxed); } while (0)
++#else
++#   define RT64_ANDROID_TIME(counter, expr) do { expr; } while (0)
++#endif
++
+     struct DynamicTextureView {
+         const RenderTexture *texture = nullptr;
+         uint32_t dstIndex = 0;
+@@ -118,6 +152,7 @@ namespace RT64 {
+             std::set<RenderTarget *> transitionRenderTargetSet;
+             RenderTargetDrawCall renderTargetDrawCall;
+             RenderViewport viewport;
++            float resolutionScaleY = 1.0f; // Android: sizes the hardware decal depth bias.
+         };
+ 
+         std::vector<Framebuffer> framebufferVector;
+diff --git a/src/render/rt64_framebuffer_renderer_call.h b/src/render/rt64_framebuffer_renderer_call.h
+index f2eee70..b64d898 100644
+--- a/src/render/rt64_framebuffer_renderer_call.h
++++ b/src/render/rt64_framebuffer_renderer_call.h
+@@ -41,6 +41,7 @@ namespace RT64 {
+                 bool vertexTestZ : 1;
+                 bool postBlendDitherNoise : 1;
+                 bool postBlendDitherNoiseNegative : 1;
++                bool hardwareDecal : 1;   // Android: the depth test does the decal check
+             } triangles;
+ 
+             struct {
+diff --git a/src/render/rt64_raster_shader.cpp b/src/render/rt64_raster_shader.cpp
+index 721a01e..f23dc17 100644
+--- a/src/render/rt64_raster_shader.cpp
++++ b/src/render/rt64_raster_shader.cpp
+@@ -84,6 +84,17 @@ namespace RT64 {
+ 
+     // RasterShader
+ 
++    bool RasterShader::useHardwareDecal(const ShaderDescription &desc) {
++#   if defined(__ANDROID__)
++        const bool copyMode = (desc.otherMode.cycleType() == G_CYC_COPY);
++        // Only decals that test depth and don't write it (all of DK64's), so nothing else changes.
++        return !copyMode && (desc.otherMode.zMode() == ZMODE_DEC) && desc.otherMode.zCmp() && !desc.otherMode.zUpd();
++#   else
++        (void)(desc);
++        return false;
++#   endif
++    }
++
+     RasterShader::RasterShader(RenderDevice *device, const ShaderDescription &desc, const RenderPipelineLayout *pipelineLayout, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, 
+         const ShaderCompiler *shaderCompiler, const OptimizerCacheSPIRV *optimizerCacheSPIRV)
+     {
+@@ -124,7 +135,8 @@ namespace RT64 {
+                 specConstantsSetup = true;
+             }
+             
+-            specConstants[0].values[0] = desc.otherMode.L;
++            // Android hardware decals: the shader doesn't do the decal depth check itself.
++            specConstants[0].values[0] = useHardwareDecal(desc) ? (desc.otherMode.L & ~uint32_t(ZMODE_MASK)) : desc.otherMode.L;
+             specConstants[1].values[0] = desc.otherMode.H;
+             specConstants[2].values[0] = desc.colorCombiner.L;
+             specConstants[3].values[0] = desc.colorCombiner.H;
+@@ -227,7 +239,9 @@ namespace RT64 {
+         creation.pixelShader = pixelShader.get();
+         creation.alphaBlend = !copyMode && interop::Blender::usesAlphaBlend(desc.otherMode);
+         creation.culling = !copyMode && desc.flags.culling;
+-        creation.zCmp = !copyMode && desc.otherMode.zCmp() && (desc.otherMode.zMode() != ZMODE_DEC);
++        hardwareDecal = (shaderFormat == RenderShaderFormat::SPIRV) && useHardwareDecal(desc);
++        creation.hardwareDecal = hardwareDecal;
++        creation.zCmp = !copyMode && desc.otherMode.zCmp() && ((desc.otherMode.zMode() != ZMODE_DEC) || hardwareDecal);
+         creation.zUpd = !copyMode && desc.otherMode.zUpd();
+         creation.cvgAdd = (desc.otherMode.cvgDst() == CVG_DST_WRAP) || (desc.otherMode.cvgDst() == CVG_DST_SAVE);
+         creation.NoN = desc.flags.NoN;
+@@ -315,6 +329,15 @@ namespace RT64 {
+         pipelineDesc.depthClipEnabled = !c.NoN;
+         pipelineDesc.depthEnabled = c.zCmp || c.zUpd;
+         pipelineDesc.depthFunction = c.zCmp ? RenderComparisonFunction::LESS : RenderComparisonFunction::ALWAYS;
++        if (c.hardwareDecal) {
++            // The decal passes where it's at, or within the tolerance in front of, what's
++            // already there: the bias pulls it towards the camera by about the shader's
++            // tolerance (a constant part for the depth's precision and a slope part for the
++            // triangle's depth change across a pixel), capped at the shader's largest one.
++            pipelineDesc.depthFunction = RenderComparisonFunction::LESS_EQUAL;
++            // Set per draw, as it depends on the resolution scale (FramebufferRenderer).
++            pipelineDesc.dynamicDepthBiasEnabled = true;
++        }
+         pipelineDesc.depthWriteEnabled = c.zUpd;
+         pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
+         pipelineDesc.multisampling = c.multisampling;
+diff --git a/src/render/rt64_raster_shader.h b/src/render/rt64_raster_shader.h
+index 3b991ff..2829369 100644
+--- a/src/render/rt64_raster_shader.h
++++ b/src/render/rt64_raster_shader.h
+@@ -51,6 +51,7 @@ namespace RT64 {
+         bool zUpd;
+         bool cvgAdd;
+         bool usesHDR;
++        bool hardwareDecal = false;   // Android: decal by the depth test (see RasterShader)
+         std::vector<RenderSpecConstant> specConstants;
+         RenderMultisampling multisampling;
+     };
+@@ -65,6 +66,14 @@ namespace RT64 {
+         RenderDevice *device;
+         std::unique_ptr<RenderPipeline> pipeline;
+ 
++        // Android (tile-based GPUs): decals (ZMODE_DEC) are tested by the depth test against
++        // the depth buffer, pulled towards the camera by a bias for the decal tolerance, instead
++        // of the pixel shader reading the depth buffer. Reading it means ending the render pass
++        // (the whole colour and depth targets go to memory and back) every time a decal follows
++        // a draw that wrote depth: about 50 times a frame in busy DK64 scenes.
++        bool hardwareDecal = false;
++        static bool useHardwareDecal(const ShaderDescription &desc);
++
+         RasterShader(RenderDevice *device, const ShaderDescription &desc, const RenderPipelineLayout *pipelineLayout, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, 
+             const ShaderCompiler *shaderCompiler, const OptimizerCacheSPIRV *optimizerCacheSPIRV);
+ 
+diff --git a/src/render/rt64_render_worker.cpp b/src/render/rt64_render_worker.cpp
+index 0250645..34bc797 100644
+--- a/src/render/rt64_render_worker.cpp
++++ b/src/render/rt64_render_worker.cpp
+@@ -4,6 +4,10 @@
+ 
+ #include "rt64_render_worker.h"
+ 
++#if defined(__ANDROID__)
++#   include "plume_vulkan.h"
++#endif
++
+ namespace RT64 {
+     // RenderWorker
+ 
+@@ -26,6 +30,28 @@ namespace RT64 {
+ 
+     void RenderWorker::wait() {
+         commandQueue->waitForCommandFence(commandFence.get());
++        pendingWait.store(false, std::memory_order_relaxed);
++    }
++
++    void RenderWorker::executeDeferred() {
++        execute();
++        pendingWait.store(true, std::memory_order_relaxed);
++    }
++
++    void RenderWorker::flushPendingWait() {
++        if (pendingWait.exchange(false, std::memory_order_relaxed)) {
++            commandQueue->waitForCommandFence(commandFence.get());
++        }
++    }
++
++    bool RenderWorker::sharesQueueWith(const RenderWorker &other) const {
++#   if defined(__ANDROID__)
++        const auto *a = static_cast<const plume::VulkanCommandQueue *>(commandQueue.get());
++        const auto *b = static_cast<const plume::VulkanCommandQueue *>(other.commandQueue.get());
++        return (a->queue != nullptr) && (a->queue == b->queue);
++#   else
++        return false;
++#   endif
+     }
+ 
+     // RenderWorkerExecution
+@@ -34,6 +60,7 @@ namespace RT64 {
+         assert(worker != nullptr);
+ 
+         this->worker = worker;
++        worker->flushPendingWait();
+         worker->commandList->begin();
+     }
+ 
+diff --git a/src/render/rt64_render_worker.h b/src/render/rt64_render_worker.h
+index 85d12ee..1d6381c 100644
+--- a/src/render/rt64_render_worker.h
++++ b/src/render/rt64_render_worker.h
+@@ -4,6 +4,8 @@
+ 
+ #pragma once
+ 
++#include <atomic>
++
+ #include "common/rt64_plume.h"
+ 
+ namespace RT64 {
+@@ -14,10 +16,25 @@ namespace RT64 {
+         std::unique_ptr<RenderCommandList> commandList;
+         std::unique_ptr<RenderCommandFence> commandFence;
+ 
++        // Android: an execution whose wait was put off until this worker is next used
++        // (see executeDeferred).
++        std::atomic<bool> pendingWait{ false };
++
+         RenderWorker(RenderDevice *device, const std::string &name, RenderCommandListType commandListType);
+         ~RenderWorker();
+         void execute();
+         void wait();
++
++        // Submits the command list and waits for it only when the worker is next used (by
++        // flushPendingWait, wait or a RenderWorkerExecution), so the CPU doesn't stall while
++        // the GPU is still busy with earlier work. Only safe when whatever reads the results
++        // is submitted to the same GPU queue afterwards (see sharesQueueWith), which keeps
++        // them in order on the GPU.
++        void executeDeferred();
++        void flushPendingWait();
++
++        // True when both workers submit to the same hardware queue.
++        bool sharesQueueWith(const RenderWorker &other) const;
+     };
+ 
+     // RAII convenience class for aiding opening, closing and execution of command lists inside a scope.
+diff --git a/src/render/rt64_shader_library.cpp b/src/render/rt64_shader_library.cpp
+index d1c5273..0f14d91 100644
+--- a/src/render/rt64_shader_library.cpp
++++ b/src/render/rt64_shader_library.cpp
+@@ -599,7 +599,11 @@ namespace RT64 {
+             RenderGraphicsPipelineDesc pipelineDesc;
+             pipelineDesc.vertexShader = fullScreenVertexShader.get();
+             pipelineDesc.pixelShader = regularShader.get();
++#       if defined(__ANDROID__)
++            pipelineDesc.renderTargetFormat[0] = RenderFormat::R8G8B8A8_UNORM; // Must match the swap chain (rt64_application.cpp).
++#       else
+             pipelineDesc.renderTargetFormat[0] = RenderFormat::B8G8R8A8_UNORM; // TODO: Use whatever format the swap chain was created with.
++#       endif
+             pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+             pipelineDesc.renderTargetCount = 1;
+             pipelineDesc.pipelineLayout = videoInterfaceNearest.pipelineLayout.get();
+diff --git a/src/shaders/FbCommon.hlsli b/src/shaders/FbCommon.hlsli
+index 973ee67..51aea3b 100644
+--- a/src/shaders/FbCommon.hlsli
++++ b/src/shaders/FbCommon.hlsli
+@@ -8,7 +8,12 @@
+ #include "Formats.hlsli"
+ 
+ uint EndianSwapUINT16(uint i) {
+-    return ((i << 8) & 0xFF00) | ((i >> 8) & 0xFF);
++    // Some Qualcomm Vulkan compilers fail to build compute shaders with the
++    // OR-of-two-masked-shifts form (vkCreateComputePipelines -> VK_ERROR_UNKNOWN), leaving the
++    // framebuffer read/write pipelines null. Masking once after the OR is equivalent for 16-bit
++    // input and compiles everywhere (see Goemon64Recomp-Android's RT64).
++    i &= 0xFFFFu;
++    return (i << 8 | i >> 8) & 0xFFFFu;
+ }
+ 
+ // This endian swapping function generates a DXC-LLVM code generation bug when optimizations are enabled. All files that include this 

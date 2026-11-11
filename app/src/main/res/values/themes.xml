@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- No focus highlight: after controller navigation through a text box (Find Mods'
+         search), Android otherwise outlines the focused game surface in the accent colour. -->
+    <style name="BT.Theme" parent="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+        <item name="android:defaultFocusHighlightEnabled">false</item>
+    </style>
+</resources>

@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:installLocation="auto">
+
+    <!-- RT64 renders through Vulkan only; there is no GLES fallback.
+         0x00401000 = Vulkan 1.1, the minimum the plume backend's feature set needs. -->
+    <uses-feature
+        android:name="android.hardware.vulkan.version"
+        android:version="0x00401000"
+        android:required="true" />
+    <uses-feature
+        android:name="android.hardware.vulkan.level"
+        android:version="0"
+        android:required="true" />
+
+    <!-- Input: none of these are required, so phones without a pad can still install. -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+
+    <!-- Controller rumble (SDL haptics). -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- SDL's HIDAPI driver for Bluetooth controllers. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- Storage. Only used if the player picks the shared "BanjoTooieRecompiled" folder on first
+         launch (StorageAccess); app storage and the document picker need no permission.
+         Android 9-10 use the classic permissions; Android 11+ uses "All files access",
+         which the player grants on a Settings screen. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="true"
+        android:hardwareAccelerated="true"
+        android:isGame="true"
+        android:appCategory="game"
+        android:hasFragileUserData="true"
+        android:enableOnBackInvokedCallback="false"
+        android:requestLegacyExternalStorage="true"
+        android:theme="@style/BT.Theme">
+        <!-- enableOnBackInvokedCallback=false: SDL 2 handles Back as a key event, which
+             predictive back (the default when targeting API 36) would swallow.
+             requestLegacyExternalStorage: lets Android 10 use the shared folder with the
+             classic permission (ignored on 11+, which uses All files access). -->
+
+        <!-- SDL routes window, input and lifecycle through this single activity.
+             configChanges keeps Android from restarting it (and tearing down the
+             native renderer) on rotation, keyboard or controller changes. -->
+        <activity
+            android:name=".BTActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:resizeableActivity="true"
+            android:preferMinimalPostProcessing="true"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|density|fontScale">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+
+            <!-- Let SDL notice controllers attached over USB while running. -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+
+        </activity>
+
+        <!-- Picks the Vulkan driver (system, or a custom one such as Turnip). Its own process,
+             so it can restart the game's process to apply the choice. -->
+        <activity
+            android:name=".GpuDriverActivity"
+            android:exported="false"
+            android:process=":settings"
+            android:label="Graphics driver"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.DeviceDefault.Dialog.NoActionBar" />
+
+        <!-- Restarts the game's process after a ROM is supplied (its own process, no UI). -->
+        <activity
+            android:name=".RestartActivity"
+            android:exported="false"
+            android:process=":settings"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+
+        <!-- Shares log reports (Diagnostics) with the app the player picks. -->
+        <provider
+            android:name=".LogProvider"
+            android:authorities="${applicationId}.logs"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <!-- Let the app use the full display on tall/notched screens. -->
+        <meta-data android:name="android.max_aspect" android:value="2.4" />
+    </application>
+</manifest>

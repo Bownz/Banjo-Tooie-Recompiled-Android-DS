@@ -1,0 +1,3172 @@
+diff --git a/recompinput/include/recompinput/input_types.h b/recompinput/include/recompinput/input_types.h
+index f5ed6c0..1bff207 100644
+--- a/recompinput/include/recompinput/input_types.h
++++ b/recompinput/include/recompinput/input_types.h
+@@ -68,6 +68,13 @@ namespace recompinput {
+ 
+     
+     // A single input. Combines the source of the input (see InputType) and a specific key/button/axis.
++    // Android: whether the connected controller has Nintendo-style face buttons (A on the
++    // right, B at the bottom), e.g. the AYN Thor/Odin in its "Nintendo" mode, and its name.
++    enum class FaceButtonStyle { Xbox, Nintendo, PlayStation };
++    FaceButtonStyle get_face_button_style();
++    bool controller_uses_nintendo_layout();
++    std::string connected_controller_name();
++
+     struct InputField {
+         InputType input_type;
+         // Represents a single source input. e.g. A keyboard's shift key, or a controller's R trigger
+diff --git a/recompinput/src/input_events.cpp b/recompinput/src/input_events.cpp
+index c76a1dc..fae66f0 100644
+--- a/recompinput/src/input_events.cpp
++++ b/recompinput/src/input_events.cpp
+@@ -1,3 +1,4 @@
++#include <atomic>
+ #include "recompinput/recompinput.h"
+ #include "recompinput/input_binding.h"
+ #include "recompinput/input_events.h"
+@@ -38,6 +39,20 @@ void purge_deferred_controller_profiles() {
+     deferred_controller_profiles.clear();
+ }
+ 
++#ifdef __ANDROID__
++// Android handhelds (e.g. the AYN Thor) have their motion sensors in the device, not in the
++// built-in controller. The game's Android glue (android/jni/device_motion.cpp) reads those
++// and adds them as gyro input, but only while no controller sends gyro data of its own.
++namespace {
++    std::atomic<uint32_t> controller_gyro_ticks{0};
++    std::atomic<bool> controller_gyro_seen{false};
++}
++
++extern "C" bool recompinput_android_controller_gyro_active() {
++    return controller_gyro_seen.load() && SDL_GetTicks() - controller_gyro_ticks.load() < 1000;
++}
++#endif
++
+ bool sdl_event_filter(void* userdata, SDL_Event* event) {
+     switch (event->type) {
+     case SDL_EventType::SDL_KEYDOWN:
+@@ -72,10 +87,20 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
+     break;
+     case SDL_EventType::SDL_CONTROLLERDEVICEADDED:
+     {
+-        SDL_ControllerDeviceEvent* controller_event = &event->cdevice;
+-        SDL_GameController* controller = SDL_GameControllerOpen(controller_event->which);
+-        printf("Controller added: %d\n", controller_event->which);
+-        if (controller != nullptr) {
++        // The event's device index can be stale by the time it's handled: when one device is
++        // removed and two are added together (e.g. a handheld switching controller modes while
++        // a virtual pad attaches), both events can name the same index and one device is never
++        // opened. So open every game controller that isn't open yet instead of trusting it.
++        for (int device_index = 0; device_index < SDL_NumJoysticks(); device_index++) {
++            if (!SDL_IsGameController(device_index) ||
++                SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(device_index)) != nullptr) {
++                continue;
++            }
++            SDL_GameController* controller = SDL_GameControllerOpen(device_index);
++            printf("Controller added: %d\n", device_index);
++            if (controller == nullptr) {
++                continue;
++            }
+             printf("  Instance ID: %d\n", SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller)));
+             printf("  Path: %s\n", SDL_JoystickPath(SDL_GameControllerGetJoystick(controller)));
+             recompinput::add_controller_state(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller)), controller);
+@@ -84,15 +109,15 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
+                 SDL_GameControllerSetSensorEnabled(controller, SDL_SensorType::SDL_SENSOR_GYRO, SDL_TRUE);
+                 SDL_GameControllerSetSensorEnabled(controller, SDL_SensorType::SDL_SENSOR_ACCEL, SDL_TRUE);
+             }
+-        }
+-        
+-        ControllerGUID guid = profiles::get_guid_from_sdl_controller(controller);
+-        if (profiles::get_controller_by_guid(guid) < 0) {
+-            if (players::is_single_player_mode()) {
+-                deferred_controller_profiles[guid.hash] = guid;
+-            } else {
+-                int profile_index = get_or_create_controller_profile_index(guid);
+-                profiles::add_controller(guid, profile_index);
++
++            ControllerGUID guid = profiles::get_guid_from_sdl_controller(controller);
++            if (profiles::get_controller_by_guid(guid) < 0) {
++                if (players::is_single_player_mode()) {
++                    deferred_controller_profiles[guid.hash] = guid;
++                } else {
++                    int profile_index = get_or_create_controller_profile_index(guid);
++                    profiles::add_controller(guid, profile_index);
++                }
+             }
+         }
+     }
+@@ -199,6 +224,10 @@ bool sdl_event_filter(void* userdata, SDL_Event* event) {
+             state.latest_accelerometer[2] = z;
+         }
+         else if (event->csensor.sensor == SDL_SensorType::SDL_SENSOR_GYRO) {
++#ifdef __ANDROID__
++            controller_gyro_seen.store(true);
++            controller_gyro_ticks.store(SDL_GetTicks());
++#endif
+             // constexpr float gyro_threshold = 0.05f;
+             // Convert rotational velocity to degrees per second.
+             constexpr float rad_to_deg = 180.0f / M_PI;
+diff --git a/recompinput/src/input_types.cpp b/recompinput/src/input_types.cpp
+index c6786e6..73eda2e 100644
+--- a/recompinput/src/input_types.cpp
++++ b/recompinput/src/input_types.cpp
+@@ -1,5 +1,6 @@
+ #include "recompinput.h"
+ #include <string>
++#include <cstring>
+ #include <array>
+ #include <unordered_map>
+ #include <unordered_set>
+@@ -85,7 +86,114 @@ const std::string& get_game_input_enum_name(GameInput input) {
+     return game_input_enum_names.at(static_cast<size_t>(input));
+ }
+ 
++// Which kind of face buttons the connected controller has (used for the button symbols).
++// SDL knows the common families (Xbox, PlayStation, Switch) from its controller database; for
++// others the name decides (AYN's "Odin Controller" is the Thor/Odin in its Nintendo mode).
++static FaceButtonStyle face_button_style() {
++    for (int i = 0; i < SDL_NumJoysticks(); i++) {
++        if (!SDL_IsGameController(i)) {
++            continue;
++        }
++        // Like SDL3's SDL_GetGamepadButtonLabel: a "face:" field or the button-labels hint
++        // in the controller's mapping wins, then the controller type, then (our addition)
++        // the name.
++        if (char *mapping = SDL_GameControllerMappingForDeviceIndex(i)) {
++            std::string m = mapping;
++            SDL_free(mapping);
++            size_t face = m.find("face:");
++            if (face != std::string::npos) {
++                std::string value = m.substr(face + 5, 4);
++                if (value == "sony") return FaceButtonStyle::PlayStation;
++                if (value == "bayx") return FaceButtonStyle::Nintendo;
++                if (value == "abxy") return FaceButtonStyle::Xbox;
++            }
++            if (m.find("SDL_GAMECONTROLLER_USE_BUTTON_LABELS") != std::string::npos) {
++                return FaceButtonStyle::Nintendo;
++            }
++        }
++        switch (SDL_GameControllerTypeForIndex(i)) {
++        case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
++            return FaceButtonStyle::Nintendo;
++        case SDL_CONTROLLER_TYPE_PS3:
++        case SDL_CONTROLLER_TYPE_PS4:
++        case SDL_CONTROLLER_TYPE_PS5:
++            return FaceButtonStyle::PlayStation;
++        default:
++            break;
++        }
++        const char *name = SDL_GameControllerNameForIndex(i);
++        if (name != nullptr) {
++            std::string n = name;
++            for (auto &ch : n) {
++                ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
++            }
++            if (n.find("odin") != std::string::npos || n.find("nintendo") != std::string::npos
++                    || n.find("switch") != std::string::npos) {
++                return FaceButtonStyle::Nintendo;
++            }
++            if (n.find("playstation") != std::string::npos || n.find("dualshock") != std::string::npos
++                    || n.find("dualsense") != std::string::npos || n.find("wireless controller") == 0) {
++                return FaceButtonStyle::PlayStation;
++            }
++        }
++        return FaceButtonStyle::Xbox;   // the first controller decides
++    }
++    return FaceButtonStyle::Xbox;
++}
++
++FaceButtonStyle get_face_button_style() {
++    return face_button_style();
++}
++
++bool controller_uses_nintendo_layout() {
++    return face_button_style() == FaceButtonStyle::Nintendo;
++}
++
++std::string connected_controller_name() {
++    for (int i = 0; i < SDL_NumJoysticks(); i++) {
++        if (SDL_IsGameController(i)) {
++            const char *name = SDL_GameControllerNameForIndex(i);
++            return name != nullptr ? name : "Controller";
++        }
++    }
++    return "";
++}
++
+ static std::string controller_button_to_string(SDL_GameControllerButton button) {
++#ifdef __ANDROID__
++    // Face buttons: the symbol shows where the button is on the controller, plus its letter.
++    // With Nintendo-style buttons, A is on the right, B at the bottom, X on top, Y on the left.
++    const FaceButtonStyle style = face_button_style();
++    if (style == FaceButtonStyle::PlayStation) {
++        switch (button) {
++        case SDL_CONTROLLER_BUTTON_A: return PF_SONY_A;
++        case SDL_CONTROLLER_BUTTON_B: return PF_SONY_B;
++        case SDL_CONTROLLER_BUTTON_X: return PF_SONY_X;
++        case SDL_CONTROLLER_BUTTON_Y: return PF_SONY_Y;
++        default: break;
++        }
++    } else if (style == FaceButtonStyle::Nintendo) {
++        switch (button) {
++        case SDL_CONTROLLER_BUTTON_A: return std::string(PF_GAMEPAD_B) + "A";
++        case SDL_CONTROLLER_BUTTON_B: return std::string(PF_GAMEPAD_A) + "B";
++        case SDL_CONTROLLER_BUTTON_X: return std::string(PF_GAMEPAD_Y) + "X";
++        case SDL_CONTROLLER_BUTTON_Y: return std::string(PF_GAMEPAD_X) + "Y";
++        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return PF_NINTENDO_LEFT_SHOULDER;
++        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return PF_NINTENDO_RIGHT_SHOULDER;
++        case SDL_CONTROLLER_BUTTON_START: return PF_NINTENDO_PLUS;
++        case SDL_CONTROLLER_BUTTON_BACK: return PF_NINTENDO_MINUS;
++        default: break;
++        }
++    } else {
++        switch (button) {
++        case SDL_CONTROLLER_BUTTON_A: return std::string(PF_GAMEPAD_A) + "A";
++        case SDL_CONTROLLER_BUTTON_B: return std::string(PF_GAMEPAD_B) + "B";
++        case SDL_CONTROLLER_BUTTON_X: return std::string(PF_GAMEPAD_X) + "X";
++        case SDL_CONTROLLER_BUTTON_Y: return std::string(PF_GAMEPAD_Y) + "Y";
++        default: break;
++        }
++    }
++#endif
+     switch (button) {
+     case SDL_GameControllerButton::SDL_CONTROLLER_BUTTON_A:
+         return PF_GAMEPAD_A;
+@@ -240,8 +348,18 @@ static std::string controller_axis_to_string(int axis) {
+     case SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_RIGHTY:
+         return positive ? PF_ANALOG_R_DOWN : PF_ANALOG_R_UP;
+     case SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_TRIGGERLEFT:
++#ifdef __ANDROID__
++        if (recompinput::controller_uses_nintendo_layout()) {
++            return PF_NINTENDO_LEFT_TRIGGER;
++        }
++#endif
+         return positive ? PF_XBOX_LEFT_TRIGGER : PF_XBOX_LEFT_TRIGGER_PULL;
+     case SDL_GameControllerAxis::SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
++#ifdef __ANDROID__
++        if (recompinput::controller_uses_nintendo_layout()) {
++            return PF_NINTENDO_RIGHT_TRIGGER;
++        }
++#endif
+         return positive ? PF_XBOX_RIGHT_TRIGGER : PF_XBOX_RIGHT_TRIGGER_PULL;
+     default:
+         return recompinput::unknown_device_input;
+diff --git a/recompinput/src/profiles.cpp b/recompinput/src/profiles.cpp
+index c89956e..75f2a3e 100644
+--- a/recompinput/src/profiles.cpp
++++ b/recompinput/src/profiles.cpp
+@@ -371,6 +371,18 @@ namespace recompinput {
+         return "SERIAL_" + guid.serial + "_VID_" + std::to_string(guid.vendor) + "_PID_" + std::to_string(guid.product) +"_VERSION_" + std::to_string(guid.version) +"_CRC16_" + std::to_string(guid.crc16);
+     }
+ 
++#ifdef __ANDROID__
++    // Defined by the game's Android glue (android/jni/touch_controller.cpp), if present: N64
++    // buttons held by on-screen buttons that act directly on the game, whatever the mappings.
++    extern "C" uint16_t bt_android_touch_n64_buttons() __attribute__((weak));
++    // Told player 1's own N64 buttons (from the controller/keyboard, before the on-screen
++    // ones are added), e.g. so a toggle that holds Z can hand over to a real Z press.
++    extern "C" void bt_android_report_physical_n64_buttons(uint16_t buttons) __attribute__((weak));
++#endif
++
++    static bool menu_was_open[4] = {};
++    static uint16_t held_from_menu[4] = {};
++
+     bool profiles::get_n64_input(int player_index, uint16_t* buttons_out, float* x_out, float* y_out) {
+         uint16_t cur_buttons = 0;
+         float cur_x = 0.0f;
+@@ -402,9 +414,32 @@ namespace recompinput {
+             check_buttons(profile_index_cont);
+             check_buttons(profile_index_kb);
+ 
++            // Buttons still held from a menu (e.g. A pressed on the menu bar's X to close it)
++            // don't reach the game until they're let go, so it doesn't see a fresh press.
++            if (player_index >= 0 && player_index < 4) {
++                if (menu_was_open[player_index]) {
++                    held_from_menu[player_index] = cur_buttons;
++                    menu_was_open[player_index] = false;
++                }
++                held_from_menu[player_index] &= cur_buttons;
++                cur_buttons &= ~held_from_menu[player_index];
++            }
++
+             check_joystick(profile_index_cont);
+             recompinput::apply_joystick_deadzone(cur_x, cur_y, &cur_x, &cur_y);
+             check_joystick(profile_index_kb);
++#ifdef __ANDROID__
++            if (player_index == 0 && bt_android_report_physical_n64_buttons != nullptr) {
++                bt_android_report_physical_n64_buttons(cur_buttons);
++            }
++            if (player_index == 0 && bt_android_touch_n64_buttons != nullptr) {
++                cur_buttons |= bt_android_touch_n64_buttons();
++            }
++#endif
++        }
++
++        else if (player_index >= 0 && player_index < 4) {
++            menu_was_open[player_index] = true;
+         }
+ 
+         *buttons_out = cur_buttons;
+diff --git a/recompui/include/recompui/config.h b/recompui/include/recompui/config.h
+index fd04cb3..1f3c7b1 100644
+--- a/recompui/include/recompui/config.h
++++ b/recompui/include/recompui/config.h
+@@ -2,6 +2,8 @@
+ #define _RECOMP_UI_CONFIG_H_
+ 
+ #include <vector>
++#include <functional>
++#include <memory>
+ 
+ #include "librecomp/config.hpp"
+ #include "elements/ui_modal.h"
+@@ -131,6 +133,30 @@ namespace recompui {
+         recomp::config::Config &create_sound_tab(const std::string &name = config::sound::tab_name);
+         void create_mods_tab(const std::string &name = config::mods::tab_name);
+ 
++        // A tab that lists options from any of the configs, in a chosen order, with section
++        // headings and buttons between them. The configs must not need confirmation; the
++        // configs named in save_config_ids are saved when the tab closes.
++        struct LayoutEntry {
++            enum class Kind { Header, Option, Button };
++            Kind kind = Kind::Header;
++            std::string text;        // Header / Button: the text shown
++            std::string config_id;   // Option: which config
++            std::string option_id;   // Option: which option
++            std::string description; // Button: shown when it's focused
++            std::function<void()> on_press; // Button
++        };
++        // Android: a whole-row button at the end of a config's own page (e.g. Video > Graphics
++        // Driver). Only Kind::Button entries.
++        void add_page_button(recomp::config::Config &config, LayoutEntry button);
++        const std::vector<LayoutEntry> &page_buttons(const recomp::config::Config *config);
++
++        void create_layout_tab(
++            const std::string &name,
++            const std::string &id,
++            std::vector<LayoutEntry> entries,
++            std::vector<std::string> save_config_ids
++        );
++
+         // Must be called after all tabs have been created.
+         // This loads all of the user's config files from disk.
+         void finalize();
+diff --git a/recompui/include/recompui/recompui.h b/recompui/include/recompui/recompui.h
+index 30c463b..2e52b40 100644
+--- a/recompui/include/recompui/recompui.h
++++ b/recompui/include/recompui/recompui.h
+@@ -65,6 +65,11 @@ namespace recompui {
+ 
+     void init_styling(const std::filesystem::path& rcss_file);
+     void init_prompt_context();
++#ifdef __ANDROID__
++    // The in-game menu bar (composites/ui_menu_bar.cpp).
++    void init_menu_bar_context();
++    bool open_menu_bar();
++#endif
+     void open_choice_prompt(
+         const std::string& header_text,
+         const std::string& content_text,
+@@ -95,6 +100,8 @@ namespace recompui {
+     void apply_color_hack();
+     void get_window_size(int& width, int& height);
+     void open_quit_game_prompt();
++    // Adds a third choice to the prompt just opened (Android: Main Menu on the quit prompt).
++    void set_prompt_extra_button(const std::string& label_text, std::function<void()> action, ButtonStyle variant);
+     bool get_cursor_visible();
+     void set_cursor_visible(bool visible);
+     void update_supported_options();
+diff --git a/recompui/src/base/ui_launcher.cpp b/recompui/src/base/ui_launcher.cpp
+index 6de7a94..7e5c496 100644
+--- a/recompui/src/base/ui_launcher.cpp
++++ b/recompui/src/base/ui_launcher.cpp
+@@ -407,12 +407,25 @@ namespace recompui {
+         }
+     }
+ 
++#ifdef __ANDROID__
++    // Android: restarts the app after a ROM is first supplied (see select_rom).
++    extern "C" void bt_android_rom_imported() __attribute__((weak));
++#endif
++
+     void GameOptionsMenu::select_rom(std::function<void(bool)> callback) {
+         recompui::file::open_file_dialog([this, callback](bool success, const std::filesystem::path& path) {
+             if (success) {
+                 recomp::RomValidationError rom_error = recomp::select_rom(path, this->game_id);
+                 switch (rom_error) {
+                     case recomp::RomValidationError::Good:
++#ifdef __ANDROID__
++                        // The first game started in the same run as supplying the ROM crashes
++                        // (game memory ends up corrupted; a fresh start is always fine), so
++                        // restart the app once the ROM is stored.
++                        if (bt_android_rom_imported != nullptr) {
++                            bt_android_rom_imported();
++                        }
++#endif
+                         callback(true);
+                         return;
+                     case recomp::RomValidationError::FailedToOpen:
+@@ -447,6 +460,10 @@ namespace recompui {
+         return option;
+     }
+ 
++#ifdef __ANDROID__
++    extern "C" bool bt_android_begin_launch() __attribute__((weak));
++#endif
++
+     GameOption *GameOptionsMenu::add_start_game_or_load_rom_option(const std::string& load_rom_title, const std::string& start_game_title) {
+         GameOption *option = add_option(rom_valid ? start_game_title : load_rom_title, nullptr);
+         option->set_as_primary_focus(true);
+@@ -460,6 +477,13 @@ namespace recompui {
+                 if (recomp::mods::game_mode_count(this->mod_game_id, false) > 0) {
+                     get_launcher_menu()->show_game_mode_menu(this->game_id, this->game_display_name, this->game_thumbnail);
+                 } else {
++#ifdef __ANDROID__
++                    // Android: the logo plays its leaving animation first, then the game starts
++                    // (main.cpp's launcher update).
++                    if (bt_android_begin_launch != nullptr && bt_android_begin_launch()) {
++                        return;
++                    }
++#endif
+                     recomp::start_game(this->game_id, {});
+                     recompui::hide_all_contexts();
+                 }
+diff --git a/recompui/src/base/ui_state.cpp b/recompui/src/base/ui_state.cpp
+index 277a421..a987bdf 100644
+--- a/recompui/src/base/ui_state.cpp
++++ b/recompui/src/base/ui_state.cpp
+@@ -5,6 +5,7 @@
+ #include <SDL2/SDL_video.h>
+ #endif
+ #include <chrono>
++#include <cmath>
+ 
+ #include "rt64_render_hooks.h"
+ 
+@@ -35,6 +36,13 @@
+ 
+ static std::atomic_bool cursor_enabled = true;
+ 
++#ifdef __ANDROID__
++extern "C" void bt_android_restart_to_launcher() __attribute__((weak));
++namespace recompui {
++    std::atomic<bool> android_text_input_open{ false };
++}
++#endif
++
+ void recompui::open_quit_game_prompt() {
+     recompui::open_choice_prompt(
+         "Are you sure you want to quit?",
+@@ -49,6 +57,12 @@ void recompui::open_quit_game_prompt() {
+         recompui::ButtonStyle::Tertiary,
+         true
+     );
++#ifdef __ANDROID__
++    // Main Menu: restarts the app to the launcher (DK64 Android). Only while playing.
++    if (bt_android_restart_to_launcher != nullptr && ultramodern::is_game_started()) {
++        recompui::set_prompt_extra_button("Main Menu", []() { bt_android_restart_to_launcher(); }, recompui::ButtonStyle::Secondary);
++    }
++#endif
+ }
+ 
+ static std::string primary_font = "";
+@@ -278,6 +292,9 @@ public:
+         recompui::init_styling(recompui::file::get_asset_path("recomp.rcss"));
+         recompui::init_launcher_menu();
+         recompui::init_prompt_context();
++#ifdef __ANDROID__
++        recompui::init_menu_bar_context();
++#endif
+         recompui::AssignPlayersModal::init();
+         recompui::config::init_modal();
+     }
+@@ -580,6 +597,31 @@ bool check_menu_button_pressed(int profile_index, recompinput::GameInput input,
+     return false;
+ }
+ 
++#ifdef __ANDROID__
++// Android: menu sounds (bongo taps) for controller navigation - implemented in the app.
++extern "C" void bt_android_ui_sound(int kind) __attribute__((weak));
++static void menu_sound_for_key(int sdl_key) {
++    if (bt_android_ui_sound == nullptr) {
++        return;
++    }
++    switch (sdl_key) {
++        case SDLK_UP: case SDLK_DOWN: case SDLK_LEFT: case SDLK_RIGHT: case SDLK_F16: case SDLK_F17:
++            bt_android_ui_sound(0);
++            break;
++        case SDLK_RETURN: case SDLK_f:
++            bt_android_ui_sound(1);
++            break;
++        case SDLK_F15:
++            bt_android_ui_sound(2);
++            break;
++        default:
++            break;
++    }
++}
++#else
++static void menu_sound_for_key(int) {}
++#endif
++
+ int cont_button_to_key(SDL_ControllerButtonEvent& button) {
+     int player1_profile = recompinput::profiles::get_input_profile_for_player(0, recompinput::InputDevice::Controller);
+ 
+@@ -694,6 +736,59 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+             }
+         }
+ 
++#ifdef __ANDROID__
++        // Touch: drag anywhere to scroll (like a phone), not only on the scroll bar. A press
++        // that moves more than a little up or down turns into a scroll, and is then not a
++        // tap. One that moves sideways first is left alone, so sliders can be dragged.
++        if (!all_input_is_disabled && recompui::is_context_capturing_mouse()) {
++            static bool touch_down = false, touch_dragging = false, touch_sideways = false;
++            static float touch_last_y = 0.0f, touch_start_x = 0.0f, touch_start_y = 0.0f;
++            int win_w = 0, win_h = 1080;
++            recompui::get_window_size(win_w, win_h);
++            const float dp = win_h > 0 ? std::min(float(win_h), float(win_w) * 9.0f / 16.0f) / 1080.0f : 1.0f;
++            if (cur_event.type == SDL_EventType::SDL_MOUSEBUTTONDOWN && cur_event.button.which == SDL_TOUCH_MOUSEID) {
++                touch_down = true;
++                touch_dragging = false;
++                touch_sideways = false;
++                touch_start_x = float(cur_event.button.x);
++                touch_start_y = touch_last_y = float(cur_event.button.y);
++            }
++            else if (cur_event.type == SDL_EventType::SDL_MOUSEMOTION && cur_event.motion.which == SDL_TOUCH_MOUSEID && touch_down) {
++                const float y = float(cur_event.motion.y);
++                if (!touch_dragging && !touch_sideways) {
++                    const float dx = float(cur_event.motion.x) - touch_start_x, dy = y - touch_start_y;
++                    if (dx * dx + dy * dy > (32.0f * dp) * (32.0f * dp)) {
++                        if (std::abs(dx) > std::abs(dy)) {
++                            touch_sideways = true;   // e.g. dragging a slider: not a scroll
++                        }
++                        else {
++                            touch_dragging = true;
++                            touch_last_y = y;
++                        }
++                    }
++                }
++                if (touch_dragging) {
++                    // RmlUi scrolls by "lines" of the element under the cursor.
++                    const float lines = (touch_last_y - y) / (90.0f * dp);
++                    touch_last_y = y;
++                    if (lines != 0.0f) {
++                        ui_state->context->ProcessMouseWheel(Rml::Vector2f(0.0f, lines), 0);
++                    }
++                    continue;
++                }
++            }
++            else if (cur_event.type == SDL_EventType::SDL_MOUSEBUTTONUP && cur_event.button.which == SDL_TOUCH_MOUSEID) {
++                touch_down = false;
++                if (touch_dragging) {
++                    touch_dragging = false;
++                    // Release away from everything so the drag doesn't count as a click.
++                    ui_state->context->ProcessMouseMove(-10000, -10000, 0);
++                    ui_state->context->ProcessMouseButtonUp(0, 0);
++                    continue;
++                }
++            }
++        }
++#endif
+         if (!all_input_is_disabled) {
+             bool is_mouse_input = false;
+             // Implement some additional behavior for specific events on top of what RmlUi normally does with them.
+@@ -731,6 +826,7 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+             case SDL_EventType::SDL_CONTROLLERBUTTONDOWN: {
+                 int sdl_key = cont_button_to_key(cur_event.cbutton);
+                 if (context_capturing_input && sdl_key) {
++                    menu_sound_for_key(sdl_key);
+                     ui_state->context->ProcessKeyDown(convert_sdl_to_rml(sdl_key), 0);
+                     latest_controller_key_pressed = sdl_key;
+                     next_repeat_time = clock::now() + start_repeat_delay;
+@@ -776,7 +872,8 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+                         non_mouse_interacted = true;
+                         int sdl_key = cont_axis_to_key(cur_event.caxis, axis_value);
+                         if (context_capturing_input && sdl_key) {
+-                            ui_state->context->ProcessKeyDown(convert_sdl_to_rml(sdl_key), 0);
++                            menu_sound_for_key(sdl_key);
++                    ui_state->context->ProcessKeyDown(convert_sdl_to_rml(sdl_key), 0);
+                             latest_controller_key_pressed = sdl_key;
+                             next_repeat_time = clock::now() + start_repeat_delay;
+                         }
+@@ -787,8 +884,11 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+                 else if (*await_stick_return && fabsf(axis_value) < 0.15f) {
+                     *await_stick_return = false;
+                     // Stop pressing the current key if the axis that was released was the one triggering key presses.
+-                    int sdl_key = cont_axis_to_key(cur_event.caxis, axis_value);
+-                    if (sdl_key == latest_controller_key_pressed) {
++                    // Both directions of the axis are checked: a stick coming back to the middle can
++                    // stop just past it (e.g. slightly down after up), which looked like the other
++                    // direction, so the key kept repeating and the menu scrolled on by itself.
++                    if (cont_axis_to_key(cur_event.caxis, 1.0f) == latest_controller_key_pressed
++                            || cont_axis_to_key(cur_event.caxis, -1.0f) == latest_controller_key_pressed) {
+                         latest_controller_key_pressed = SDLK_UNKNOWN;
+                     }
+                 }
+@@ -838,15 +938,32 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+             }
+ 
+             if (open_config) {
++#ifdef __ANDROID__
++                // The menu bar first; it opens the settings window.
++                if (!recompui::open_menu_bar()) {
++                    recompui::config::open();
++                }
++#else
+                 recompui::config::open();
++#endif
+             }
+         }
+     } // end dequeue event loop
+ 
+     // Handle controller key repeats.
++#ifdef __ANDROID__
++    // While the on-screen keyboard is up it can swallow the D-pad's release, which would
++    // leave the held direction repeating forever: no repeats while typing. (Our own flag:
++    // SDL_IsTextInputActive() is true on Android even with no keyboard up, which stopped
++    // every repeat, e.g. holding left / right on a slider.)
++    if (recompui::android_text_input_open) {
++        latest_controller_key_pressed = SDLK_UNKNOWN;
++    }
++#endif
+     if (latest_controller_key_pressed != SDLK_UNKNOWN) {
+         clock::time_point now = clock::now();
+         if (now >= next_repeat_time) {
++            menu_sound_for_key(latest_controller_key_pressed);
+             ui_state->context->ProcessKeyDown(convert_sdl_to_rml(latest_controller_key_pressed), 0);
+             next_repeat_time += repeat_rate;
+         }
+@@ -870,7 +987,14 @@ void draw_hook(plume::RenderCommandList* command_list, plume::RenderFramebuffer*
+         int height = swap_chain_framebuffer->getHeight();
+ 
+         // Scale the UI based on the window size with 1080 vertical resolution as the reference point.
++#ifdef __ANDROID__
++        // Bigger on a handheld's small screen (like the Dusklight port's menus).
++        // Near-square screens (a foldable opened up) size from the width instead, as if the
++        // screen were 16:9, so the menus fit across rather than running off the sides.
++        ui_state->context->SetDensityIndependentPixelRatio(std::min(float(height), float(width) * 9.0f / 16.0f) / 1080.0f * 1.35f);
++#else
+         ui_state->context->SetDensityIndependentPixelRatio((height) / 1080.0f);
++#endif
+ 
+         ui_state->render_interface.start(command_list, width, height);
+ 
+diff --git a/recompui/src/composites/ui_menu_bar.cpp b/recompui/src/composites/ui_menu_bar.cpp
+new file mode 100644
+index 0000000..62d8030
+--- /dev/null
++++ b/recompui/src/composites/ui_menu_bar.cpp
+@@ -0,0 +1,275 @@
++// Android: the in-game menu bar. The menu button opens a slim bar across the top of the
++// screen (in the bottom screen's DK style) instead of the full settings window; the bar opens
++// Settings or Mods in the settings window, or quits. Like the Dusklight port's.
++#ifdef __ANDROID__
++
++#include <algorithm>
++#include <chrono>
++#include <vector>
++#include "recompui.h"
++#include "recompui/config.h"
++#include "elements/ui_element.h"
++#include "elements/ui_label.h"
++
++namespace recompui {
++
++namespace {
++    const Color wood{122, 78, 38, 255};
++    const Color wood_edge{58, 30, 6, 255};
++    const Color tan{232, 213, 168, 255};
++    const Color cream{255, 244, 214, 255};
++    const Color banana{249, 214, 72, 255};
++
++    ContextId menu_bar_context{};
++    bool menu_bar_ready = false;
++
++    void close_menu_bar_animated();
++
++    class MenuBarItem;
++    std::vector<MenuBarItem *> menu_bar_items;   // in order, for L / R
++    void focus_neighbour(MenuBarItem *from, int step);
++
++    // One entry on the bar: chunky capitals, banana yellow in a rounded outline when focused.
++    class MenuBarItem : public Element {
++    private:
++        std::function<void()> on_press;
++        Style hover_style;
++        Style focus_style;
++    protected:
++        void process_event(const Event &e) override {
++            switch (e.type) {
++            case EventType::Click:
++                if (on_press) {
++                    on_press();
++                }
++                break;
++            case EventType::MenuAction: {
++                // B on the bar closes it (the root also listens; closing twice is harmless).
++                MenuAction action = std::get<EventMenuAction>(e.variant).action;
++                if (action == MenuAction::Back || action == MenuAction::Toggle) {
++                    close_menu_bar_animated();
++                } else if (action == MenuAction::TabLeft || action == MenuAction::TabRight) {
++                    // L / R step along the bar (wrapping round), like the settings tabs.
++                    focus_neighbour(this, action == MenuAction::TabLeft ? -1 : 1);
++                }
++                break;
++            }
++            case EventType::Hover:
++                set_style_enabled(hover_state, std::get<EventHover>(e.variant).active);
++                break;
++            case EventType::Focus:
++                set_style_enabled(focus_state, std::get<EventFocus>(e.variant).active);
++                break;
++            default:
++                break;
++            }
++        }
++        std::string_view get_type_name() override { return "MenuBarItem"; }
++    public:
++        MenuBarItem(ResourceId rid, Element *parent, const std::string &text, std::function<void()> press) :
++            Element(rid, parent, Events(EventType::Click, EventType::Hover, EventType::Focus, EventType::MenuAction), "button", false),
++            on_press(std::move(press))
++        {
++            set_cursor(Cursor::Pointer);
++            set_focusable(true);
++            set_tab_index_auto();
++            set_padding_top(12.0f);
++            set_padding_bottom(8.0f);
++            set_padding_left(22.0f);
++            set_padding_right(22.0f);
++            set_border_width(3.0f);
++            set_border_radius(16.0f);
++            // Every entry is a button (darker wood with a soft edge), not just the selected one.
++            set_border_color(Color{168, 128, 72, 140});
++            set_background_color(Color{62, 38, 16, 210});
++            set_color(tan);
++            hover_style.set_color(cream);
++            hover_style.set_background_color(Color{96, 62, 28, 230});
++            focus_style.set_color(banana);
++            focus_style.set_border_color(banana);
++            focus_style.set_background_color(Color{42, 20, 4, 240});
++            add_style(&hover_style, { hover_state });
++            add_style(&focus_style, { focus_state });
++
++            ContextId context = get_current_context();
++            Label *label = context.create_element<Label>(this, text, theme::Typography::Header3);
++            label->set_font_family("LatoLatin");
++            label->set_font_weight(400);
++            label->set_font_size(30.0f);
++            label->set_letter_spacing(1.0f);
++        }
++    };
++
++    // The bar's root: closes on Back / the menu button. The bar slides down from the top of
++    // the screen when it opens and back up when it closes.
++    constexpr float slide_ms = 180.0f;
++
++    class MenuBarRoot : public Element {
++    private:
++        enum class Anim { None, Opening, Closing };
++        Anim anim = Anim::None;
++        std::chrono::steady_clock::time_point anim_start;
++
++        // f: 0 = hidden above the screen, 1 = fully down.
++        void apply(float f) {
++            if (bar != nullptr) {
++                // Moved with "top" rather than a transform: with a transform, parts of the bar
++                // (e.g. behind QUIT) weren't redrawn until hovered.
++                float h = bar->get_client_height() / std::max(bar->get_dp_to_pixel_ratio(), 0.01f);
++                if (h <= 0.0f) {
++                    h = 80.0f;
++                }
++                bar->set_top(-(h + 8.0f) * (1.0f - f), Unit::Dp);
++            }
++            set_background_color(Color{0, 0, 0, static_cast<uint8_t>(90.0f * f)});
++        }
++    protected:
++        void process_event(const Event &e) override {
++            if (e.type == EventType::MenuAction) {
++                MenuAction action = std::get<EventMenuAction>(e.variant).action;
++                if (action == MenuAction::Back || action == MenuAction::Toggle) {
++                    slide_up();
++                }
++            } else if (e.type == EventType::Update) {
++                // Runs every frame (like the settings window's), so opening the bar never
++                // has to open this UI context from inside another one.
++                queue_update();
++                if (anim == Anim::None) {
++                    return;
++                }
++                float t = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - anim_start).count() / slide_ms;
++                if (t > 1.0f) {
++                    t = 1.0f;
++                }
++                if (anim == Anim::Opening) {
++                    apply(1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t));   // ease out
++                } else {
++                    apply(1.0f - t * t);                                   // ease in
++                }
++                if (t >= 1.0f) {
++                    const bool closing = anim == Anim::Closing;
++                    anim = Anim::None;
++                    if (closing) {
++                        recompui::hide_context(menu_bar_context);
++                    }
++                }
++            }
++        }
++        std::string_view get_type_name() override { return "MenuBarRoot"; }
++    public:
++        Element *bar = nullptr;
++
++        MenuBarRoot(ResourceId rid, Element *parent) :
++            Element(rid, parent, Events(EventType::MenuAction, EventType::Update), "div", false) {}
++
++        void slide_down() {
++            anim = Anim::Opening;
++            anim_start = std::chrono::steady_clock::now();
++            apply(0.0f);
++        }
++
++        void slide_up() {
++            if (anim == Anim::Closing) {
++                return;
++            }
++            anim = Anim::Closing;
++            anim_start = std::chrono::steady_clock::now();
++        }
++
++        // Straight away, e.g. when the settings window opens over it.
++        void hide_now() {
++            anim = Anim::None;
++            apply(1.0f);
++            recompui::hide_context(menu_bar_context);
++        }
++    };
++
++    MenuBarRoot *menu_bar_root = nullptr;
++
++    void focus_neighbour(MenuBarItem *from, int step) {
++        auto it = std::find(menu_bar_items.begin(), menu_bar_items.end(), from);
++        if (it == menu_bar_items.end() || menu_bar_items.empty()) {
++            return;
++        }
++        int n = static_cast<int>(menu_bar_items.size());
++        int i = static_cast<int>(it - menu_bar_items.begin());
++        menu_bar_items[((i + step) % n + n) % n]->focus();
++    }
++
++    void close_menu_bar_animated() {
++        if (menu_bar_root != nullptr) {
++            menu_bar_root->slide_up();
++        }
++    }
++
++    void open_settings_tab(const std::string &tab) {
++        menu_bar_root->hide_now();
++        recompui::config::set_tab(tab);
++        recompui::config::open();
++    }
++}
++
++void init_menu_bar_context() {
++    ContextId context = create_context();
++    context.open();
++    menu_bar_context = context;
++
++    MenuBarRoot *root = context.create_element<MenuBarRoot>(context.get_root_element());
++    root->set_position(Position::Absolute);
++    root->set_top(0);
++    root->set_left(0);
++    root->set_right(0);
++    root->set_bottom(0);
++    root->set_background_color(Color{0, 0, 0, 90});
++
++    Element *bar = context.create_element<Element>(root);
++    bar->set_position(Position::Absolute);
++    bar->set_top(0);
++    bar->set_left(0);
++    bar->set_right(0);
++    bar->set_display(Display::Flex);
++    bar->set_flex_direction(FlexDirection::Row);
++    bar->set_align_items(AlignItems::Center);
++    bar->set_gap(6.0f);
++    bar->set_padding_top(10.0f);
++    bar->set_padding_bottom(10.0f);
++    bar->set_padding_left(24.0f);
++    bar->set_padding_right(24.0f);
++    bar->set_background_color(wood);
++    bar->set_border_bottom_width(4.0f);
++    bar->set_border_bottom_color(wood_edge);
++    bar->set_as_navigation_container(NavigationType::Horizontal);
++    root->bar = bar;
++    menu_bar_root = root;
++
++    MenuBarItem *settings = context.create_element<MenuBarItem>(bar, "SETTINGS", []() { open_settings_tab(config::general::id); });
++    menu_bar_items.push_back(settings);
++    menu_bar_items.push_back(context.create_element<MenuBarItem>(bar, "MODS", []() { open_settings_tab(config::mods::id); }));
++    menu_bar_items.push_back(context.create_element<MenuBarItem>(bar, "QUIT", []() {
++        menu_bar_root->hide_now();
++        recompui::open_quit_game_prompt();
++    }));
++    Element *spacer = context.create_element<Element>(bar);
++    spacer->set_flex_grow(1.0f);
++    menu_bar_items.push_back(context.create_element<MenuBarItem>(bar, "X", []() { menu_bar_root->slide_up(); }));
++
++    root->queue_update();   // starts its every-frame update
++    context.set_autofocus_element(settings);
++    context.close();
++    menu_bar_ready = true;
++}
++
++bool open_menu_bar() {
++    if (!menu_bar_ready) {
++        return false;
++    }
++    if (!recompui::is_context_shown(menu_bar_context)) {
++        menu_bar_root->slide_down();
++        recompui::show_context(menu_bar_context, "");
++    }
++    return true;
++}
++
++} // namespace recompui
++
++#endif
+diff --git a/recompui/src/composites/ui_mod_menu.cpp b/recompui/src/composites/ui_mod_menu.cpp
+index 39a7abc..7d403fe 100644
+--- a/recompui/src/composites/ui_mod_menu.cpp
++++ b/recompui/src/composites/ui_mod_menu.cpp
+@@ -9,6 +9,7 @@
+ #include "config/ui_config_page_options_menu.h"
+ 
+ #include "librecomp/mods.hpp"
++#include "ultramodern/ultramodern.hpp"
+ 
+ #include <string>
+ 
+@@ -287,6 +288,39 @@ void ModMenu::refresh_mods(bool scan_mods) {
+     create_mod_list();
+ }
+ 
++void ModMenu::remove_selected_mod() {
++    if (active_mod_index < 0 || active_mod_index >= static_cast<int32_t>(mod_details.size())) {
++        recompui::open_info_prompt("Remove Mod", "Select a mod in the list first.", "OK", []() {});
++        return;
++    }
++    if (ultramodern::is_game_started()) {
++        recompui::open_info_prompt("Remove Mod", "Mods can be removed from the main menu, before the game starts.", "OK", []() {});
++        return;
++    }
++    const std::string mod_id = mod_details[active_mod_index].mod_id;
++    const std::string name = mod_details[active_mod_index].display_name;
++    recompui::open_choice_prompt(
++        "Remove " + name + "?",
++        "This deletes the mod from your mods folder. You can download it again from Find Mods.",
++        "Remove",
++        "Cancel",
++        [this, mod_id]() {
++            std::filesystem::path path = recomp::mods::get_mod_filename(mod_id);
++            recomp::mods::enable_mod(mod_id, false);
++            std::error_code ec;
++            if (!path.empty()) {
++                std::filesystem::remove_all(path, ec);
++            }
++            active_mod_index = -1;
++            refresh_mods(true);
++        },
++        []() {},
++        recompui::ButtonStyle::Danger,
++        recompui::ButtonStyle::Tertiary,
++        true
++    );
++}
++
+ void ModMenu::open_mods_folder() {
+     std::filesystem::path mods_directory = recomp::mods::get_mods_directory();
+ #if defined(WIN32)
+@@ -730,8 +764,15 @@ ModMenu::ModMenu(ResourceId rid, Element *parent) : Element(rid, parent) {
+             refresh_button = context.create_element<IconButton>(footer_container, "icons/Reset.svg", recompui::ButtonStyle::Secondary, recompui::IconButtonSize::XLarge);
+             refresh_button->add_pressed_callback([this](){ refresh_mods(true); });
+ 
++#ifdef __ANDROID__
++            // Android has no file manager to open the mods folder in, so this removes the
++            // selected mod instead.
++            mods_folder_button = context.create_element<Button>(footer_container, "Remove Mod", recompui::ButtonStyle::Warning);
++            mods_folder_button->add_pressed_callback([this](){ remove_selected_mod(); });
++#else
+             mods_folder_button = context.create_element<Button>(footer_container, "Open Mods Folder", recompui::ButtonStyle::Tertiary);
+             mods_folder_button->add_pressed_callback([this](){ open_mods_folder(); });
++#endif
+         } // footer_container
+     } // this
+     
+diff --git a/recompui/src/composites/ui_mod_menu.h b/recompui/src/composites/ui_mod_menu.h
+index 294c371..f9bee82 100644
+--- a/recompui/src/composites/ui_mod_menu.h
++++ b/recompui/src/composites/ui_mod_menu.h
+@@ -84,6 +84,7 @@ protected:
+ private:
+     void refresh_mods(bool scan_mods);
+     void open_mods_folder();
++    void remove_selected_mod();
+     void open_install_dialog();
+     void mod_toggled(bool enabled);
+     void mod_selected(uint32_t mod_index);
+diff --git a/recompui/src/composites/ui_prompt.cpp b/recompui/src/composites/ui_prompt.cpp
+index 56a0b70..fd57e2c 100644
+--- a/recompui/src/composites/ui_prompt.cpp
++++ b/recompui/src/composites/ui_prompt.cpp
+@@ -14,6 +14,8 @@ struct {
+     recompui::Element* prompt_controls;
+     recompui::Button* confirm_button;
+     recompui::Button* cancel_button;
++    recompui::Button* extra_button;   // Android: a third choice (Main Menu on the quit prompt)
++    std::function<void()> extra_action;
+     std::function<void()> confirm_action;
+     std::function<void()> cancel_action;
+     std::mutex mutex;
+@@ -31,6 +33,18 @@ void run_confirm_callback() {
+     recompui::hide_context(prompt_state.ui_context);
+ }
+ 
++void run_extra_callback() {
++    std::function<void()> extra_action;
++    {
++        std::lock_guard lock{ prompt_state.mutex };
++        extra_action = std::move(prompt_state.extra_action);
++    }
++    if (extra_action) {
++        extra_action();
++    }
++    recompui::hide_context(prompt_state.ui_context);
++}
++
+ void run_cancel_callback() {
+     std::function<void()> cancel_action;
+     {
+@@ -115,6 +129,11 @@ void recompui::init_prompt_context() {
+     prompt_state.confirm_button->set_min_width(185.0f, Unit::Dp);
+     prompt_state.confirm_button->add_pressed_callback(run_confirm_callback);
+ 
++    prompt_state.extra_button = context.create_element<Button>(prompt_state.prompt_controls, "", ButtonStyle::Secondary);
++    prompt_state.extra_button->set_min_width(185.0f, Unit::Dp);
++    prompt_state.extra_button->add_pressed_callback(run_extra_callback);
++    prompt_state.extra_button->set_display(Display::None);
++
+     prompt_state.cancel_button = context.create_element<Button>(prompt_state.prompt_controls, "", ButtonStyle::Danger);
+     prompt_state.cancel_button->set_min_width(185.0f, Unit::Dp);
+     prompt_state.cancel_button->add_pressed_callback(run_cancel_callback);
+@@ -166,6 +185,8 @@ void recompui::open_choice_prompt(
+     prompt_state.prompt_controls->set_display(Display::Flex);
+     prompt_state.confirm_button->set_display(Display::Flex);
+     prompt_state.cancel_button->set_display(Display::Flex);
++    prompt_state.extra_button->set_display(Display::None);
++    prompt_state.extra_action = nullptr;
+     prompt_state.confirm_button->set_text(confirm_label_text);
+     prompt_state.cancel_button->set_text(cancel_label_text);
+     prompt_state.confirm_action = confirm_action;
+@@ -202,6 +223,8 @@ void recompui::open_info_prompt(
+     prompt_state.prompt_controls->set_display(Display::Flex);
+     prompt_state.confirm_button->set_display(Display::None);
+     prompt_state.cancel_button->set_display(Display::Flex);
++    prompt_state.extra_button->set_display(Display::None);
++    prompt_state.extra_action = nullptr;
+     prompt_state.cancel_button->set_text(okay_label_text);
+     prompt_state.confirm_action = {};
+     prompt_state.cancel_action = okay_action;
+@@ -263,3 +286,18 @@ bool recompui::is_prompt_open() {
+ 
+ 	return recompui::is_context_shown(prompt_state.ui_context);
+ }
++
++// Adds a third button (between the other two) to the prompt just opened.
++void recompui::set_prompt_extra_button(const std::string& label_text, std::function<void()> action, ButtonStyle variant) {
++    std::lock_guard lock{ prompt_state.mutex };
++    ContextId prev_context = try_close_current_context();
++    prompt_state.ui_context.open();
++    prompt_state.extra_button->set_text(label_text);
++    prompt_state.extra_button->apply_button_style(variant);
++    prompt_state.extra_button->set_display(Display::Flex);
++    prompt_state.extra_action = std::move(action);
++    prompt_state.ui_context.close();
++    if (prev_context != ContextId::null()) {
++        prev_context.open();
++    }
++}
+diff --git a/recompui/src/config/ui_config.cpp b/recompui/src/config/ui_config.cpp
+index 6c84c05..9a90083 100644
+--- a/recompui/src/config/ui_config.cpp
++++ b/recompui/src/config/ui_config.cpp
+@@ -107,6 +107,54 @@ namespace recompui {
+         return new_config;
+     }
+ 
++    // By config id: the configs live in a vector, so pointers to them move as more are added.
++    static std::vector<std::pair<std::string, std::vector<config::LayoutEntry>>> page_button_registry;
++
++    void config::add_page_button(recomp::config::Config &config, LayoutEntry button) {
++        for (auto &[id, buttons] : page_button_registry) {
++            if (id == config.id) {
++                buttons.push_back(std::move(button));
++                return;
++            }
++        }
++        page_button_registry.push_back({ config.id, { std::move(button) } });
++    }
++
++    const std::vector<config::LayoutEntry> &config::page_buttons(const recomp::config::Config *config) {
++        static const std::vector<config::LayoutEntry> none;
++        if (config == nullptr) {
++            return none;
++        }
++        for (auto &[id, buttons] : page_button_registry) {
++            if (id == config->id) {
++                return buttons;
++            }
++        }
++        return none;
++    }
++
++    void config::create_layout_tab(
++        const std::string &name,
++        const std::string &id,
++        std::vector<LayoutEntry> entries,
++        std::vector<std::string> save_config_ids
++    ) {
++        auto layout = std::make_shared<std::vector<LayoutEntry>>(std::move(entries));
++        config::create_tab(
++            name,
++            id,
++            [layout](recompui::ContextId context, Element* parent) {
++                context.create_element<ConfigPageOptionsMenu>(parent, layout.get());
++            },
++            nullptr,
++            [save_config_ids](TabCloseContext) {
++                for (const auto &config_id : save_config_ids) {
++                    config::get_config(config_id).save_config();
++                }
++            }
++        );
++    }
++
+     void config::finalize() {
+         if (loaded_configs) {
+             throw std::runtime_error("Configurations have already been loaded.");
+@@ -121,7 +169,72 @@ namespace recompui {
+         loaded_configs = true;
+     }
+ 
++#ifdef __ANDROID__
++    // Android: the in-game menu bar splits the settings window into three groups. SETTINGS
++    // shows the general tabs, CONTROLS shows Controls and Dual Screen, and MODS shows the mod
++    // tabs. Opening any tab shows only the tabs of its group.
++    static int tab_group(const std::string &id) {
++        if (id == config::controls::id) {
++            return 1;
++        }
++        if (id == config::mods::id || id == config::mod_discovery::id || id == "technical") {
++            return 2;
++        }
++        return 0;
++    }
++
++    static int current_group = 0;
++
++    // Find Mods (downloading and installing) only before the game starts: installing a mod
++    // turns it on, and loading a mod into the running game crashed it.
++    static bool tab_unavailable(const PendingTab &tab) {
++        return tab.hidden || (tab.id == config::mod_discovery::id && ultramodern::is_game_started());
++    }
++
++    static void show_tab_group(const std::string &id) {
++        const int group = tab_group(id);
++        current_group = group;
++        for (auto &tab : pending_tabs) {
++            if (!tab_unavailable(tab) && tab_group(tab.id) == group) {
++                config_modal->set_tab_visible(tab.id, true);
++            }
++        }
++        // A hidden tab (e.g. General, whose options are on other tabs) opens the group's first.
++        std::string target = id;
++        for (auto &tab : pending_tabs) {
++            if (tab.id == id && tab_unavailable(tab)) {
++                target.clear();
++            }
++        }
++        if (target.empty()) {
++            for (auto &tab : pending_tabs) {
++                if (!tab_unavailable(tab) && tab_group(tab.id) == group) {
++                    target = tab.id;
++                    break;
++                }
++            }
++        }
++        config_modal->set_selected_tab(target);
++        for (auto &tab : pending_tabs) {
++            if (tab_unavailable(tab) || tab_group(tab.id) != group) {
++                config_modal->set_tab_visible(tab.id, false);
++            }
++        }
++    }
++#endif
++
+     void config::set_tab_visible(const std::string &id, bool is_visible) {
++#ifdef __ANDROID__
++        for (auto &tab : pending_tabs) {
++            if (tab.id == id) {
++                tab.hidden = !is_visible;
++            }
++        }
++        if (config_modal != nullptr) {
++            config_modal->set_tab_visible(id, is_visible && tab_group(id) == current_group);
++            return;
++        }
++#endif
+         if (config_modal == nullptr) {
+             for (auto &tab : pending_tabs) {
+                 if (tab.id == id) {
+@@ -153,8 +266,14 @@ namespace recompui {
+             }
+         }
+         config_modal->set_selected_tab(0);
++#ifdef __ANDROID__
++        show_tab_group(config::general::id);
++#endif
+         auto header_right = config_modal->get_header()->get_right();
+         auto quit_button = config_modal->modal_root_context.create_element<IconButton>(header_right, "icons/Quit.svg", ButtonStyle::Basic);
++#ifdef __ANDROID__
++        quit_button->set_display(Display::None);   // Quit is on the in-game menu bar instead
++#endif
+         quit_button->add_pressed_callback([]() {
+             if (ultramodern::is_game_started()) {
+                 recompui::open_quit_game_prompt();
+@@ -182,7 +301,11 @@ namespace recompui {
+             throw std::runtime_error("No tab with ID '" + id + "' has been added to the config modal.");
+         }
+ 
++#ifdef __ANDROID__
++        show_tab_group(id);
++#else
+         config_modal->set_selected_tab(id);
++#endif
+     }
+ 
+     void config::open() {
+@@ -197,6 +320,17 @@ namespace recompui {
+         if (config_modal == nullptr) {
+             throw std::runtime_error("Config modal has not been initialized.");
+         }
++#ifdef __ANDROID__
++        // The controller setup (opened from Input > Configure Inputs) goes back to Input.
++        if (current_group == 1 && config_modal->is_open_now()) {
++            for (auto &tab : pending_tabs) {
++                if (tab.id == "input") {
++                    show_tab_group("input");
++                    return false;
++                }
++            }
++        }
++#endif
+ 
+         return config_modal->close();
+     }
+diff --git a/recompui/src/config/ui_config_option.cpp b/recompui/src/config/ui_config_option.cpp
+index 86428c9..88e6c39 100644
+--- a/recompui/src/config/ui_config_option.cpp
++++ b/recompui/src/config/ui_config_option.cpp
+@@ -2,6 +2,140 @@
+ 
+ namespace recompui {
+ 
++#ifdef __ANDROID__
++// Colours of the bottom screen's DK look.
++// Rows are dark, see-through wood with a thin edge (calmer, like the Dusklight port's rows);
++// the focused row lights up with a banana-yellow edge.
++static const Color dk_wood{62, 38, 16, 205};
++static const Color dk_wood_light{96, 62, 28, 230};
++static const Color dk_wood_edge{168, 128, 72, 120};
++static const Color dk_banana{249, 214, 72, 255};
++static const Color dk_cream{255, 244, 214, 255};
++static const Color dk_tan{232, 213, 168, 255};
++
++void style_dk_option_row(Element *row) {
++    // Every row the same height (70dp with its padding) and 10dp apart.
++    row->set_display(Display::Flex);
++    row->set_flex_direction(FlexDirection::Row);
++    row->set_align_items(AlignItems::Center);
++    row->set_justify_content(JustifyContent::SpaceBetween);
++    row->set_width(100.0f, Unit::Percent);
++    row->set_min_height(54.0f);
++    row->set_margin_bottom(10.0f);
++    row->set_padding_top(8.0f);
++    row->set_padding_bottom(8.0f);
++    row->set_padding_left(28.0f);
++    row->set_padding_right(28.0f);
++    row->set_border_radius(24.0f);
++    row->set_border_width(2.0f);
++    row->set_border_color(dk_wood_edge);
++    row->set_background_color(dk_wood);
++    row->set_gap(16.0f);
++}
++
++ConfigEnumStepper::ConfigEnumStepper(ResourceId rid, Element *parent, const std::string &name_text) :
++    Element(rid, parent, Events(EventType::Click, EventType::Hover, EventType::Focus, EventType::Navigate, EventType::Enable), "button", false)
++{
++    style_dk_option_row(this);
++    set_cursor(Cursor::Pointer);
++    set_focusable(true);
++    set_tab_index_auto();
++    enable_focus();
++    set_nav_none(NavDirection::Left);
++    set_nav_none(NavDirection::Right);
++
++    hover_style.set_background_color(dk_wood_light);
++    focus_style.set_background_color(dk_wood_light);
++    focus_style.set_border_color(dk_banana);
++    disabled_style.set_opacity(0.45f);
++    disabled_style.set_cursor(Cursor::None);
++    add_style(&hover_style, { hover_state });
++    add_style(&focus_style, { focus_state });
++    add_style(&disabled_style, { disabled_state });
++
++    ContextId context = get_current_context();
++    Element *left = context.create_element<Element>(this, 0, "div", false);
++    left->set_display(Display::Flex);
++    left->set_flex_direction(FlexDirection::Column);
++    left->set_flex(1.0f, 1.0f);
++    name = context.create_element<Label>(left, name_text, theme::Typography::LabelMD);
++    name->set_text_transform(TextTransform::Uppercase);
++    name->set_font_weight(700);
++    name->set_color(dk_cream);
++    details = context.create_element<Label>(left, "", theme::Typography::LabelXS);
++    details->set_color(dk_tan);
++    details->set_display(Display::None);
++
++    value = context.create_element<Label>(this, "", theme::Typography::LabelMD);
++    value->set_font_weight(700);
++    value->set_color(dk_cream);
++    value->set_white_space(WhiteSpace::Nowrap);
++}
++
++// The value is plain text; the arrows (and banana yellow) only show on the focused row.
++void ConfigEnumStepper::set_value_text(const std::string &text) {
++    value_text = text;
++    show_value();
++}
++
++void ConfigEnumStepper::show_value() {
++    if (focused) {
++        value->set_text("\u2039  " + value_text + "  \u203A");
++        value->set_color(dk_banana);
++    } else {
++        value->set_text(value_text);
++        value->set_color(dk_cream);
++    }
++}
++
++void ConfigEnumStepper::set_details_text(const std::string &text) {
++    details->set_text(text);
++    details->set_display(text.empty() ? Display::None : Display::Block);
++}
++
++void ConfigEnumStepper::process_event(const Event &e) {
++    switch (e.type) {
++    case EventType::Click:
++        if (is_enabled() && step_callback) {
++            step_callback(1);
++        }
++        break;
++    case EventType::Hover:
++        set_style_enabled(hover_state, std::get<EventHover>(e.variant).active);
++        break;
++    case EventType::Focus: {
++        bool active = std::get<EventFocus>(e.variant).active;
++        set_style_enabled(focus_state, active);
++        focused = active;
++        show_value();
++        if (active) {
++            scroll_into_view();
++        }
++        if (focus_callback) {
++            focus_callback(active);
++        }
++        break;
++    }
++    case EventType::Navigate: {
++        NavDirection dir = std::get<EventNavigate>(e.variant).direction;
++        if (is_enabled() && step_callback) {
++            if (dir == NavDirection::Left) {
++                step_callback(-1);
++            } else if (dir == NavDirection::Right) {
++                step_callback(1);
++            }
++        }
++        break;
++    }
++    case EventType::Enable:
++        set_style_enabled(disabled_state, !std::get<EventEnable>(e.variant).active);
++        break;
++    default:
++        break;
++    }
++}
++#endif
++
+ constexpr float config_option_element_margin_vertical = 12.0f;
+ ConfigOptionElement::ConfigOptionElement(
+     ResourceId rid,
+@@ -44,6 +178,21 @@ ConfigOptionElement::ConfigOptionElement(
+         set_padding_top(0.0f);
+     }
+ 
++#ifdef __ANDROID__
++    // The row itself (or the enum stepper inside it) is the wooden pill, which sets the gap.
++    set_padding_top(0.0f);
++    set_padding_bottom(0.0f);
++    set_padding_left(0.0f);
++    set_padding_right(0.0f);
++    if (option.type != recomp::config::ConfigOptionType::Enum) {
++        style_dk_option_row(this);
++        name_label->set_margin_bottom(0.0f);
++        name_label->set_text_transform(TextTransform::Uppercase);
++        name_label->set_font_weight(700);
++        name_label->set_color(dk_cream);
++    }
++#endif
++
+     update_hidden();
+ }
+ 
+@@ -109,6 +258,22 @@ ConfigOptionEnum::ConfigOptionEnum(
+ ) : ConfigOptionElement(rid, parent, option_id, option_index, config, set_option_value, on_hover)
+ {
+     ContextId context = recompui::get_current_context();
++#ifdef __ANDROID__
++    {
++        name_label->set_display(Display::None);
++        stepper = context.create_element<ConfigEnumStepper>(this, config->get_option(option_index).name);
++        stepper->set_focus_callback([this](bool active) {
++            if (active) {
++                this->on_hover(this->option_id);
++            }
++        });
++        stepper->set_step_callback([this](int direction) { step(direction); });
++        update_value();
++        update_enum_details();
++        update_enum_disabled();
++        return;
++    }
++#endif
+     Element *wrapper = context.create_element<Element>(this, 0, "div", false);
+     wrapper->set_display(Display::Flex);
+     wrapper->set_flex_direction(FlexDirection::Row);
+@@ -146,11 +311,55 @@ ConfigOptionEnum::ConfigOptionEnum(
+     update_enum_disabled();
+ };
+ 
++#ifdef __ANDROID__
++void ConfigOptionEnum::step(int direction) {
++    if (get_disabled()) {
++        return;
++    }
++    auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(option_index);
++    const int count = int(enum_opt.options.size());
++    if (count == 0) {
++        return;
++    }
++    const uint32_t current = std::get<uint32_t>(get_value());
++    int index = 0;
++    for (int i = 0; i < count; i++) {
++        if (enum_opt.options[i].value == current) {
++            index = i;
++            break;
++        }
++    }
++    // The next choice that isn't disabled, wrapping round.
++    for (int tries = 0; tries < count; tries++) {
++        index = (index + direction + count) % count;
++        if (!config->get_enum_option_disabled(option_index, uint32_t(index))) {
++            set_option_value(option_id, enum_opt.options[index].value);
++            update_value();   // show the new value (nothing redraws the stepper otherwise)
++            update_enum_details();
++            return;
++        }
++    }
++}
++#endif
++
+ void ConfigOptionEnum::update_value() {
+     recomp::config::ConfigValueVariant value_variant = get_value();
+     uint32_t option_value = std::get<uint32_t>(value_variant);
+ 
+     auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(this->option_index);
++#ifdef __ANDROID__
++    if (stepper != nullptr) {
++        std::string text = "-";
++        for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
++            if (enum_opt.options[i].value == option_value) {
++                text = enum_opt.options[i].name;
++                break;
++            }
++        }
++        stepper->set_value_text(text);
++        return;
++    }
++#endif
+     for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
+         if (enum_opt.options[i].value == option_value) {
+             radio->set_index(i);
+@@ -167,6 +376,12 @@ void ConfigOptionEnum::update_disabled() {
+ 
+ void ConfigOptionEnum::update_enum_details() {
+     const std::string &enum_details = config->get_enum_option_details(option_index);
++#ifdef __ANDROID__
++    if (stepper != nullptr) {
++        stepper->set_details_text(enum_details);
++        return;
++    }
++#endif
+     if (enum_details.empty()) {
+         details_label->set_text("");
+     } else {
+@@ -176,6 +391,12 @@ void ConfigOptionEnum::update_enum_details() {
+ 
+ void ConfigOptionEnum::update_enum_disabled() {
+     bool all_disabled = get_disabled();
++#ifdef __ANDROID__
++    if (stepper != nullptr) {
++        stepper->set_enabled(!all_disabled);
++        return;
++    }
++#endif
+     auto &enum_opt = config->get_option_config<recomp::config::ConfigOptionEnum>(option_index);
+     for (uint32_t i = 0; i < enum_opt.options.size(); i++) {
+         bool enum_disabled = all_disabled || config->get_enum_option_disabled(option_index, i);
+@@ -199,8 +420,12 @@ ConfigOptionNumber::ConfigOptionNumber(
+     auto &num_opt = config->get_option_config<recomp::config::ConfigOptionNumber>(option_index);
+ 
+     slider = context.create_element<Slider>(this, num_opt.percent ? SliderType::Percent : SliderType::Double);
++#ifdef __ANDROID__
++    slider->set_width(48.0f, Unit::Percent);   // on the right of the row, beside the name
++#else
+     slider->set_width(100.0f, Unit::Percent);
+     slider->set_max_width(512.0f, Unit::Dp);
++#endif
+ 
+     slider->set_min_value(num_opt.min);
+     slider->set_max_value(num_opt.max);
+@@ -245,8 +470,12 @@ ConfigOptionString::ConfigOptionString(
+ 
+     ContextId context = recompui::get_current_context();
+     text_input = context.create_element<TextInput>(this);
++#ifdef __ANDROID__
++    text_input->set_width(55.0f, Unit::Percent);
++#else
+     text_input->set_width(100.0f, Unit::Percent);
+     text_input->set_max_width(100.0f, Unit::Percent);
++#endif
+     update_value();
+     text_input->add_text_changed_callback([this](const std::string &text){
+         this->set_option_value(this->option_id, text);
+diff --git a/recompui/src/config/ui_config_option.h b/recompui/src/config/ui_config_option.h
+index 0561657..06088b1 100644
+--- a/recompui/src/config/ui_config_option.h
++++ b/recompui/src/config/ui_config_option.h
+@@ -45,9 +45,45 @@ namespace recompui {
+         const std::string &get_option_id() { return option_id; }
+     };
+ 
++#ifdef __ANDROID__
++    // Android: a whole-row "stepper" for choice options, in the bottom screen's DK style (a
++    // wooden pill: the option's name on the left, its value in banana yellow on the right
++    // between arrows). Tap or A steps to the next value; D-pad left/right step either way.
++    class ConfigEnumStepper : public Element {
++    private:
++        Label *name = nullptr;
++        Label *value = nullptr;
++        Label *details = nullptr;
++        Style hover_style;
++        Style focus_style;
++        Style disabled_style;
++        std::function<void(int)> step_callback = nullptr;
++        std::function<void(bool)> focus_callback = nullptr;
++        std::string value_text;
++        bool focused = false;
++        void show_value();
++    protected:
++        void process_event(const Event &e) override;
++        std::string_view get_type_name() override { return "ConfigEnumStepper"; }
++    public:
++        ConfigEnumStepper(ResourceId rid, Element *parent, const std::string &name_text);
++        void set_value_text(const std::string &text);
++        void set_details_text(const std::string &text);
++        void set_step_callback(std::function<void(int)> callback) { step_callback = std::move(callback); }
++        void set_focus_callback(std::function<void(bool)> callback) { focus_callback = std::move(callback); }
++    };
++
++    // The wooden pill look shared by every option row on Android.
++    void style_dk_option_row(Element *row);
++#endif
++
+ class ConfigOptionEnum : public ConfigOptionElement {
+ protected:
+     Radio *radio = nullptr;
++#ifdef __ANDROID__
++    ConfigEnumStepper *stepper = nullptr;
++    void step(int direction);
++#endif
+     Label *details_label = nullptr;
+ 
+     std::string_view get_type_name() override { return "ConfigOptionEnum"; }
+diff --git a/recompui/src/config/ui_config_page_controls.cpp b/recompui/src/config/ui_config_page_controls.cpp
+index f379a6f..926d336 100644
+--- a/recompui/src/config/ui_config_page_controls.cpp
++++ b/recompui/src/config/ui_config_page_controls.cpp
+@@ -1,4 +1,5 @@
+ #include "ui_config_page_controls.h"
++#include <cstdlib>
+ #include "composites/ui_assign_players_modal.h"
+ #include "elements/ui_button.h"
+ #include "elements/ui_label.h"
+@@ -8,6 +9,7 @@
+ #include "elements/ui_select.h"
+ #include "recompinput/profiles.h"
+ #include "recompui/config.h"
++#include "config/ui_config_option.h"
+ 
+ namespace recompui {
+ 
+@@ -114,6 +116,18 @@ GameInputRow::GameInputRow(
+     }
+ 
+     scroll_buffer = context.create_element<ScrollBuffer>(this, 16.0f);
++
++#ifdef __ANDROID__
++    // The settings rows' DK look: dark wood with a thin edge, banana-yellow edge when active.
++    style_dk_option_row(this);
++    set_height(70.0f);
++    set_padding_right(14.0f);
++    active_style.set_background_color(Color{96, 62, 28, 230});
++    active_style.set_border_color(Color{249, 214, 72, 255});
++    label->set_text_transform(TextTransform::Uppercase);
++    label->set_font_weight(700);
++    label->set_color(Color{255, 244, 214, 255});
++#endif
+ }
+ 
+ GameInputRow::~GameInputRow() {
+@@ -204,6 +218,30 @@ void ConfigPageControls::create_game_input_contexts() {
+             recompinput::get_game_input_clearable(input)
+         };
+ 
++#ifdef __ANDROID__
++        // Android: grouped like the controller - Buttons, C Buttons, Stick, D-Pad, Menu.
++        {
++            using GI = recompinput::GameInput;
++            static const char *names[] = { "Buttons", "C Buttons", "Stick", "D-Pad", "Menu" };
++            int group;
++            if (recompinput::get_game_input_is_menu(input)) {
++                group = 4;
++            } else if (input == GI::C_UP || input == GI::C_DOWN || input == GI::C_LEFT || input == GI::C_RIGHT) {
++                group = 1;
++            } else if (input == GI::X_AXIS_NEG || input == GI::X_AXIS_POS || input == GI::Y_AXIS_NEG || input == GI::Y_AXIS_POS) {
++                group = 2;
++            } else if (input == GI::DPAD_UP || input == GI::DPAD_DOWN || input == GI::DPAD_LEFT || input == GI::DPAD_RIGHT) {
++                group = 3;
++            } else {
++                group = 0;
++            }
++            while (game_input_sections.other.size() < 5) {
++                game_input_sections.other.emplace_back(names[game_input_sections.other.size()]);
++            }
++            game_input_sections.other[group].contexts.push_back(input_ctx);
++            continue;
++        }
++#endif
+         if (recompinput::get_game_input_is_menu(input)) {
+             game_input_sections.menu.contexts.push_back(input_ctx);
+         } else {
+@@ -229,6 +267,9 @@ void ConfigPageControls::process_event(const Event &e) {
+             last_update_index = update_index;
+             render_all();
+         }
++#ifdef __ANDROID__
++        update_controller_picture();
++#endif
+         queue_update();
+         break;
+     default:
+@@ -357,6 +398,17 @@ void ConfigPageControls::render_body_mappings() {
+         body->get_right()->clear_children();
+         description_container = context.create_element<Element>(body->get_right(), 0, "p", true);
+         description_container->set_text("");
++#ifdef __ANDROID__
++        description_container->set_color(Color{232, 213, 168, 255});
++        description_container->set_font_size(22.0f);
++        description_container->set_line_height(30.0f);
++        description_container->set_padding(18.0f);
++        // Description on top, the controller picture centred below it.
++        body->get_right()->set_flex_direction(FlexDirection::Column);
++        body->get_right()->set_align_items(AlignItems::Center);
++        description_container->set_width(100.0f, Unit::Percent);
++        render_face_buttons(body->get_right());
++#endif
+     }
+ }
+ 
+@@ -460,6 +512,12 @@ void ConfigPageControls::on_edit_player_profile(int player_index) {
+     }
+ }
+ 
++#ifdef __ANDROID__
++// Implemented in the game (src/game/config.cpp, android/jni/gpu_driver.cpp).
++extern "C" int bt_android_control_preset() __attribute__((weak));
++extern "C" void bt_android_apply_control_preset(int modern) __attribute__((weak));
++#endif
++
+ void ConfigPageControls::render_footer() {
+     if (multiplayer_enabled && !multiplayer_view_mappings) {
+         hide_footer();
+@@ -473,7 +531,17 @@ void ConfigPageControls::render_footer() {
+     {
+         auto footer_left = footer->get_left();
+         footer_left->clear_children();
++#ifdef __ANDROID__
++        // Android: no keyboard mappings (always the controller's). Instead: the Classic and
++        // Modern presets (bindings, camera type and gyro together).
++        if (!multiplayer_enabled) {
++            single_player_show_keyboard_mappings = false;
++            // (Classic / Modern is the Layout row at the top of the list.)
++        }
++        if (false) {
++#else
+         if (!multiplayer_enabled) {
++#endif
+             keyboard_toggle = context.create_element<IconToggle>(footer_left, "icons/Cont.svg", "icons/Keyboard.svg", ToggleSize::Large);
+             keyboard_toggle->set_checked(single_player_show_keyboard_mappings);
+             keyboard_toggle->add_checked_callback([this](bool checked) {
+@@ -520,6 +588,58 @@ void ConfigPageControls::render_control_mappings() {
+ 
+         game_input_rows.clear();
+ 
++#ifdef __ANDROID__
++        // Device (what's connected, and its button layout) and Layout (Classic / Modern).
++        if (!multiplayer_enabled) {
++            Element *top = context.create_element<Element>(body_left_scroll, 0, "div", false);
++            top->set_display(Display::Block);
++            top->set_margin_top(8.0f);
++            top->set_margin_bottom(4.0f);
++            top->set_padding_left(8.0f);
++            top->set_padding_right(8.0f);
++
++            Element *device = context.create_element<Element>(top, 0, "div", false);
++            style_dk_option_row(device);
++            Label *device_name = context.create_element<Label>(device, "Device", theme::Typography::LabelMD);
++            device_name->set_text_transform(TextTransform::Uppercase);
++            device_name->set_font_weight(700);
++            device_name->set_color(Color{255, 244, 214, 255});
++            std::string controller = recompinput::connected_controller_name();
++            std::string layout;
++            switch (recompinput::get_face_button_style()) {
++            case recompinput::FaceButtonStyle::Nintendo: layout = "Nintendo layout"; break;
++            case recompinput::FaceButtonStyle::PlayStation: layout = "PlayStation layout"; break;
++            default: layout = "Xbox layout"; break;
++            }
++            Label *device_value = context.create_element<Label>(device,
++                controller.empty() ? std::string("No controller") : controller + "  \u00B7  " + layout,
++                theme::Typography::LabelMD);
++            device_value->set_font_weight(700);
++            device_value->set_color(Color{255, 244, 214, 255});
++
++            if (bt_android_control_preset != nullptr && bt_android_apply_control_preset != nullptr) {
++                ConfigEnumStepper *layout_row = context.create_element<ConfigEnumStepper>(top, "Layout");
++                auto preset_name = []() {
++                    const int preset = bt_android_control_preset();
++                    return std::string(preset == 1 ? "Modern" : preset == 0 ? "Classic" : "Custom");
++                };
++                layout_row->set_value_text(preset_name());
++                layout_row->set_step_callback([this, layout_row, preset_name](int) {
++                    bt_android_apply_control_preset(bt_android_control_preset() == 1 ? 0 : 1);
++                    layout_row->set_value_text(preset_name());
++                    this->update_control_mappings();
++                });
++                layout_row->set_focus_callback([this](bool active) {
++                    if (active && description_container != nullptr) {
++                        description_container->set_text(
++                            "Classic: the right stick works the C buttons, like the N64. "
++                            "Modern: the right stick turns the camera, with gyro aiming on.");
++                    }
++                });
++            }
++        }
++#endif
++
+         create_game_input_contexts();
+         set_current_profile_index();
+ 
+@@ -669,7 +789,204 @@ void ConfigPageControls::on_option_hover(recompinput::GameInput input_id) {
+             description_container->set_text("");
+         }
+     }
++#ifdef __ANDROID__
++    highlight_face_buttons(input_id);
++#endif
++}
++
++#ifdef __ANDROID__
++// Where each SDL face button sits on the controller (0 top, 1 left, 2 right, 3 bottom), and
++// the letter printed on it, for the connected controller's layout.
++static int face_position(SDL_GameControllerButton button, recompinput::FaceButtonStyle style) {
++    const bool nintendo = style == recompinput::FaceButtonStyle::Nintendo;
++    switch (button) {
++    case SDL_CONTROLLER_BUTTON_A: return nintendo ? 2 : 3;
++    case SDL_CONTROLLER_BUTTON_B: return nintendo ? 3 : 2;
++    case SDL_CONTROLLER_BUTTON_X: return nintendo ? 0 : 1;
++    case SDL_CONTROLLER_BUTTON_Y: return nintendo ? 1 : 0;
++    default: return -1;
++    }
++}
++
++// A picture of a whole controller (Xbox / Nintendo / PlayStation labels). Buttons light up
++// while they're pressed (filled banana yellow), and the buttons bound to the row you're on
++// get a banana outline.
++namespace {
++    const Color pad_body{46, 28, 12, 235};
++    const Color pad_edge{168, 128, 72, 255};
++    const Color part_idle{78, 50, 22, 255};
++    const Color part_edge{120, 86, 44, 255};
++    const Color part_text{232, 213, 168, 255};
++    const Color lit_fill{249, 214, 72, 255};
++    const Color lit_text{58, 30, 6, 255};
++
++    SDL_GameController *first_controller() {
++        for (int i = 0; i < SDL_NumJoysticks(); i++) {
++            if (SDL_IsGameController(i)) {
++                SDL_GameController *c = SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(i));
++                if (c != nullptr) {
++                    return c;
++                }
++            }
++        }
++        return nullptr;
++    }
++}
++
++void ConfigPageControls::render_face_buttons(Element *parent) {
++    recompui::ContextId context = get_current_context();
++    pad_parts.clear();
++    stick_dots[0] = stick_dots[1] = nullptr;
++
++    const recompinput::FaceButtonStyle style = recompinput::get_face_button_style();
++    const bool nin = style == recompinput::FaceButtonStyle::Nintendo;
++    const bool ps = style == recompinput::FaceButtonStyle::PlayStation;
++
++    Element *pad = context.create_element<Element>(parent, 0, "div", false);
++    pad->set_position(Position::Relative);
++    pad->set_width(460.0f);
++    pad->set_height(300.0f);
++    pad->set_margin_top(8.0f);
++    pad->set_flex_shrink(0.0f);
++    pad->set_margin_left_auto();
++    pad->set_margin_right_auto();
++
++    auto box = [&](Element *in, float x, float y, float w, float h, float radius) {
++        Element *e = context.create_element<Element>(in, 0, "div", false);
++        e->set_position(Position::Absolute);
++        e->set_left(x);
++        e->set_top(y);
++        e->set_width(w);
++        e->set_height(h);
++        e->set_border_radius(radius);
++        return e;
++    };
++    auto part = [&](float x, float y, float w, float h, float radius, const std::string &text, int type, int id, float font) {
++        Element *e = box(pad, x, y, w, h, radius);
++        e->set_border_width(3.0f);
++        e->set_display(Display::Flex);
++        e->set_align_items(AlignItems::Center);
++        e->set_justify_content(JustifyContent::Center);
++        Label *l = context.create_element<Label>(e, text, theme::Typography::LabelSM);
++        l->set_font_family(ps && type == 0 && id <= SDL_CONTROLLER_BUTTON_Y ? "LatoLatin" : "LatoLatin");
++        l->set_font_weight(400);
++        l->set_font_size(font);
++        l->set_padding_top(ps && type == 0 && id <= SDL_CONTROLLER_BUTTON_Y ? 0.0f : 4.0f);
++        pad_parts.push_back({ e, l, type, id, false, -1 });
++        return e;
++    };
++
++    // Triggers and shoulders above the body.
++    part(40.0f, 0.0f, 100.0f, 30.0f, 12.0f, ps ? "L2" : nin ? "ZL" : "LT", 1, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 18.0f);
++    part(320.0f, 0.0f, 100.0f, 30.0f, 12.0f, ps ? "R2" : nin ? "ZR" : "RT", 1, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 18.0f);
++    part(30.0f, 36.0f, 120.0f, 30.0f, 14.0f, ps ? "L1" : nin ? "L" : "LB", 0, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, 18.0f);
++    part(310.0f, 36.0f, 120.0f, 30.0f, 14.0f, ps ? "R1" : nin ? "R" : "RB", 0, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 18.0f);
++
++    // The body.
++    Element *body_el = box(pad, 0.0f, 72.0f, 460.0f, 228.0f, 90.0f);
++    body_el->set_background_color(pad_body);
++    body_el->set_border_width(3.0f);
++    body_el->set_border_color(pad_edge);
++
++    // Left stick (top left), d-pad (below), right stick (bottom right), face buttons (top right).
++    for (int side = 0; side < 2; side++) {
++        const float x = side == 0 ? 62.0f : 262.0f, y = side == 0 ? 98.0f : 196.0f;
++        Element *ring = part(x, y, 80.0f, 80.0f, 40.0f, "", 2, side, 16.0f);
++        Element *dot = box(ring, 20.0f, 20.0f, 34.0f, 34.0f, 17.0f);
++        dot->set_background_color(part_edge);
++        stick_dots[side] = dot;
++        (void)ring;
++    }
++    part(152.0f, 196.0f, 30.0f, 30.0f, 6.0f, "", 0, SDL_CONTROLLER_BUTTON_DPAD_UP, 14.0f);
++    part(152.0f, 256.0f, 30.0f, 30.0f, 6.0f, "", 0, SDL_CONTROLLER_BUTTON_DPAD_DOWN, 14.0f);
++    part(122.0f, 226.0f, 30.0f, 30.0f, 6.0f, "", 0, SDL_CONTROLLER_BUTTON_DPAD_LEFT, 14.0f);
++    part(182.0f, 226.0f, 30.0f, 30.0f, 6.0f, "", 0, SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 14.0f);
++
++    const SDL_GameControllerButton faces[4] = { SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_X, SDL_CONTROLLER_BUTTON_Y };
++    const char *letters[4] = { "A", "B", "X", "Y" };
++    const char *shapes[4] = { "✕", "○", "□", "△" };
++    const float fx[4] = { 345.0f, 300.0f, 390.0f, 345.0f };   // top, left, right, bottom
++    const float fy[4] = { 92.0f, 132.0f, 132.0f, 172.0f };
++    for (int i = 0; i < 4; i++) {
++        const int p = face_position(faces[i], style);
++        part(fx[p], fy[p], 44.0f, 44.0f, 22.0f, ps ? shapes[i] : letters[i], 0, faces[i], ps ? 22.0f : 24.0f);
++    }
++    part(176.0f, 118.0f, 44.0f, 24.0f, 12.0f, nin ? "−" : "", 0, SDL_CONTROLLER_BUTTON_BACK, 18.0f);
++    part(240.0f, 118.0f, 44.0f, 24.0f, 12.0f, nin ? "+" : "", 0, SDL_CONTROLLER_BUTTON_START, 18.0f);
++
++    Label *caption = context.create_element<Label>(parent, "Press a button to see it light up", theme::Typography::LabelMD);
++    caption->set_display(Display::Block);
++    caption->set_text_align(TextAlign::Center);
++    caption->set_margin_top(14.0f);
++    caption->set_font_weight(700);
++    caption->set_color(Color{232, 213, 168, 200});
++    highlight_face_buttons(recompinput::GameInput::COUNT);
++}
++
++void ConfigPageControls::highlight_face_buttons(recompinput::GameInput input_id) {
++    for (auto &p : pad_parts) {
++        p.bound = false;
++    }
++    if (input_id == recompinput::GameInput::COUNT || selected_profile_index < 0) {
++        return;
++    }
++    for (int j = 0; j < recompinput::num_bindings_per_input; j++) {
++        recompinput::InputField field = recompinput::profiles::get_input_binding(selected_profile_index, input_id, j);
++        for (auto &p : pad_parts) {
++            if (field.input_type == recompinput::InputType::ControllerDigital && p.type == 0 && p.id == field.input_id) {
++                p.bound = true;
++            } else if (field.input_type == recompinput::InputType::ControllerAnalog) {
++                const int axis = std::abs(field.input_id) - 1;
++                if (p.type == 1 && p.id == axis) {
++                    p.bound = true;
++                } else if (p.type == 2 && p.id == (axis <= SDL_CONTROLLER_AXIS_LEFTY ? 0 : 1) && axis <= SDL_CONTROLLER_AXIS_RIGHTY) {
++                    p.bound = true;
++                }
++            }
++        }
++    }
++}
++
++// Every frame: which parts are pressed, and where the sticks are.
++void ConfigPageControls::update_controller_picture() {
++    if (pad_parts.empty()) {
++        return;
++    }
++    SDL_GameController *c = first_controller();
++    for (auto &p : pad_parts) {
++        bool pressed = false;
++        if (c != nullptr) {
++            if (p.type == 0) {
++                pressed = SDL_GameControllerGetButton(c, static_cast<SDL_GameControllerButton>(p.id)) != 0;
++            } else if (p.type == 1) {
++                pressed = SDL_GameControllerGetAxis(c, static_cast<SDL_GameControllerAxis>(p.id)) > 12000;
++            } else {
++                const SDL_GameControllerAxis ax = p.id == 0 ? SDL_CONTROLLER_AXIS_LEFTX : SDL_CONTROLLER_AXIS_RIGHTX;
++                const SDL_GameControllerAxis ay = p.id == 0 ? SDL_CONTROLLER_AXIS_LEFTY : SDL_CONTROLLER_AXIS_RIGHTY;
++                const float x = SDL_GameControllerGetAxis(c, ax) / 32768.0f;
++                const float y = SDL_GameControllerGetAxis(c, ay) / 32768.0f;
++                pressed = SDL_GameControllerGetButton(c, p.id == 0 ? SDL_CONTROLLER_BUTTON_LEFTSTICK : SDL_CONTROLLER_BUTTON_RIGHTSTICK) != 0
++                    || (x * x + y * y) > 0.25f;
++                if (stick_dots[p.id] != nullptr) {
++                    stick_dots[p.id]->set_left(20.0f + x * 18.0f);
++                    stick_dots[p.id]->set_top(20.0f + y * 18.0f);
++                }
++            }
++        }
++        const int state = (pressed ? 2 : 0) | (p.bound ? 1 : 0);
++        if (state == p.last_state) {
++            continue;
++        }
++        p.last_state = state;
++        p.el->set_background_color(pressed ? lit_fill : part_idle);
++        p.el->set_border_color(p.bound ? lit_fill : part_edge);
++        p.label->set_color(pressed ? lit_text : (p.bound ? lit_fill : part_text));
++        if (p.type == 2 && stick_dots[p.id] != nullptr) {
++            stick_dots[p.id]->set_background_color(pressed ? lit_text : part_edge);
++        }
++    }
+ }
++#endif
+ 
+ 
+ } // namespace recompui
+diff --git a/recompui/src/config/ui_config_page_controls.h b/recompui/src/config/ui_config_page_controls.h
+index dd8ff24..7ba89cd 100644
+--- a/recompui/src/config/ui_config_page_controls.h
++++ b/recompui/src/config/ui_config_page_controls.h
+@@ -82,6 +82,15 @@ public:
+             section_label->set_margin_left(GameInputRow::left_padding);
+             section_label->set_margin_bottom(8.0f);
+             section_label->set_color(theme::color::PrimaryL);
++#ifdef __ANDROID__
++            section_label->set_font_family("LatoLatin");
++            section_label->set_font_weight(400);
++            section_label->set_font_size(24.0f);
++            section_label->set_letter_spacing(1.0f);
++            section_label->set_text_transform(TextTransform::Uppercase);
++            section_label->set_color(Color{232, 213, 168, 170});
++            section_label->set_margin_top(18.0f);
++#endif
+         }
+     }
+ };
+@@ -152,6 +161,22 @@ protected:
+     std::vector<GameInputRow*> game_input_rows;
+     IconToggle *keyboard_toggle;
+     Element *description_container = nullptr;
++#ifdef __ANDROID__
++    // The face-button picture on the right: top, left, right, bottom.
++    struct PadPart {
++        Element *el;
++        Label *label;
++        int type;        // 0 button (SDL button), 1 trigger (SDL axis), 2 stick (0 left, 1 right)
++        int id;
++        bool bound;
++        int last_state;
++    };
++    std::vector<PadPart> pad_parts;
++    Element *stick_dots[2] = {};
++    void render_face_buttons(Element *parent);
++    void highlight_face_buttons(recompinput::GameInput input_id);
++    void update_controller_picture();
++#endif
+     on_player_bind_callback on_player_bind;
+     Element *nav_up_element = nullptr;
+     Element *first_nav_element = nullptr;
+diff --git a/recompui/src/config/ui_config_page_options_menu.cpp b/recompui/src/config/ui_config_page_options_menu.cpp
+index 6ba64e2..5871977 100644
+--- a/recompui/src/config/ui_config_page_options_menu.cpp
++++ b/recompui/src/config/ui_config_page_options_menu.cpp
+@@ -1,4 +1,5 @@
+ #include "ui_config_page_options_menu.h"
++#include <algorithm>
+ 
+ 
+ namespace recompui {
+@@ -20,6 +21,12 @@ ConfigPageOptionsMenu::ConfigPageOptionsMenu(
+     description_container->set_typography(theme::Typography::Body);
+     description_container->set_line_height(28.0f);
+     description_container->set_padding(8.0f);
++#ifdef __ANDROID__
++    description_container->set_color(Color{232, 213, 168, 255});
++    description_container->set_font_size(22.0f);
++    description_container->set_line_height(30.0f);
++    description_container->set_padding(18.0f);
++#endif
+     set_description_text("");
+ 
+     if (config->requires_confirmation) {
+@@ -28,6 +35,41 @@ ConfigPageOptionsMenu::ConfigPageOptionsMenu(
+     }
+ }
+ 
++static recomp::config::Config *first_layout_config(const std::vector<recompui::config::LayoutEntry> *layout) {
++    for (const auto &entry : *layout) {
++        if (entry.kind == recompui::config::LayoutEntry::Kind::Option) {
++            return &recompui::config::get_config(entry.config_id);
++        }
++    }
++    return &recompui::config::get_general_config();
++}
++
++ConfigPageOptionsMenu::ConfigPageOptionsMenu(
++    ResourceId rid,
++    Element *parent,
++    const std::vector<recompui::config::LayoutEntry> *layout
++) : ConfigPage(rid, parent, Events(EventType::Hover, EventType::Update, EventType::MenuAction)),
++    config(first_layout_config(layout)),
++    is_internal(true),
++    layout(layout)
++{
++    ContextId context = recompui::get_current_context();
++    set_as_navigation_container(NavigationType::Vertical);
++
++    render_layout_options();
++    description_container = context.create_element<Element>(body->get_right(), 0, "p", true);
++    description_container->set_typography(theme::Typography::Body);
++    description_container->set_line_height(28.0f);
++    description_container->set_padding(8.0f);
++#ifdef __ANDROID__
++    description_container->set_color(Color{232, 213, 168, 255});
++    description_container->set_font_size(22.0f);
++    description_container->set_line_height(30.0f);
++    description_container->set_padding(18.0f);
++#endif
++    set_description_text("");
++}
++
+ void ConfigPageOptionsMenu::set_description_text(const std::string &text) {
+     if (description_container) {
+         if (is_internal) {
+@@ -38,6 +80,15 @@ void ConfigPageOptionsMenu::set_description_text(const std::string &text) {
+     }
+ }
+ 
++ConfigOptionElement* ConfigPageOptionsMenu::get_element_from_option_id(recomp::config::Config *cfg, const std::string &option_id) {
++    for (size_t i = 0; i < config_option_elements.size(); i++) {
++        if (element_configs[i] == cfg && config_option_elements[i]->get_option_id() == option_id) {
++            return config_option_elements[i];
++        }
++    }
++    return nullptr;
++}
++
+ ConfigOptionElement* ConfigPageOptionsMenu::get_element_from_option_id(const std::string &option_id) {
+     for (auto *element : config_option_elements) {
+         if (element->get_option_id() == option_id) {
+@@ -51,13 +102,17 @@ void ConfigPageOptionsMenu::perform_option_render_updates() {
+     using ConfigOptionUpdateType = recomp::config::ConfigOptionUpdateType;
+     queue_update();
+ 
++    std::vector<recomp::config::Config*> configs = used_configs;
++    if (configs.empty()) {
++        configs.push_back(config);
++    }
++    for (recomp::config::Config *config : configs) {
+     auto options_updates = config->get_config_option_updates();
+-    bool has_updates = !options_updates.empty();
+     for (auto &option_update : options_updates) {
+         size_t option_index = option_update.option_index;
+         auto schema = config->get_config_schema();
+         std::string &option_id = schema.options[option_index].id;
+-        ConfigOptionElement* element = get_element_from_option_id(option_id);
++        ConfigOptionElement* element = get_element_from_option_id(config, option_id);
+         if (element == nullptr) {
+             printf("Failed to update conf option: '%s'\n", option_id.c_str());
+             continue;
+@@ -87,7 +142,8 @@ void ConfigPageOptionsMenu::perform_option_render_updates() {
+                     break;
+                 }
+                 case ConfigOptionUpdateType::Description: {
+-                    if (description_container && description_option_id == option_id) {
++                    if (description_container && description_option_id == option_id
++                            && (description_config == nullptr || description_config == config)) {
+                         set_description_text(config->get_option(option_index).description);
+                     }
+                     break;
+@@ -97,6 +153,7 @@ void ConfigPageOptionsMenu::perform_option_render_updates() {
+     }
+ 
+     config->clear_config_option_updates();
++    }
+ }
+ 
+ void ConfigPageOptionsMenu::process_event(const Event &e) {
+@@ -174,6 +231,7 @@ void ConfigPageOptionsMenu::render_config_options() {
+         body_left_scroll->set_as_navigation_container(NavigationType::Vertical);
+ 
+         config_option_elements.clear();
++        element_configs.clear();
+         bound_on_option_hover = [this](const std::string &option_id) {
+             this->on_option_hover(option_id);
+         };
+@@ -236,15 +294,203 @@ void ConfigPageOptionsMenu::render_config_options() {
+             element->update_disabled();
+             element->update_hidden();
+             config_option_elements.push_back(element);
++            element_configs.push_back(config);
+         }
++        add_page_buttons(body_left_scroll);
+     }
+ }
+ 
+ void ConfigPageOptionsMenu::on_option_hover(const std::string &option_id) {
+     if (description_container) {
+         description_option_id = option_id;
++        description_config = config;
+         set_description_text(config->get_option(option_id).description);
+     }
+ }
+ 
++namespace {
++    // A whole-row button on a layout page (e.g. "Configure Inputs  ›").
++    class LayoutButtonRow : public Element {
++    private:
++        std::function<void()> on_press;
++        std::function<void()> on_focus;
++        Style hover_style;
++        Style focus_style;
++    protected:
++        void process_event(const Event &e) override {
++            switch (e.type) {
++            case EventType::Click:
++                if (on_press) {
++                    on_press();
++                }
++                break;
++            case EventType::Hover:
++                set_style_enabled(hover_state, std::get<EventHover>(e.variant).active);
++                if (std::get<EventHover>(e.variant).active && on_focus) {
++                    on_focus();
++                }
++                break;
++            case EventType::Focus:
++                set_style_enabled(focus_state, std::get<EventFocus>(e.variant).active);
++                if (std::get<EventFocus>(e.variant).active) {
++                    scroll_into_view();
++                    if (on_focus) {
++                        on_focus();
++                    }
++                }
++                break;
++            default:
++                break;
++            }
++        }
++        std::string_view get_type_name() override { return "LayoutButtonRow"; }
++    public:
++        LayoutButtonRow(ResourceId rid, Element *parent, const std::string &text,
++                std::function<void()> press, std::function<void()> focus) :
++            Element(rid, parent, Events(EventType::Click, EventType::Hover, EventType::Focus), "button", false),
++            on_press(std::move(press)), on_focus(std::move(focus))
++        {
++#ifdef __ANDROID__
++            style_dk_option_row(this);
++            hover_style.set_background_color(Color{96, 62, 28, 230});
++            focus_style.set_background_color(Color{96, 62, 28, 230});
++            focus_style.set_border_color(Color{249, 214, 72, 255});
++#else
++            set_padding(16.0f);
++#endif
++            set_cursor(Cursor::Pointer);
++            set_focusable(true);
++            set_tab_index_auto();
++            add_style(&hover_style, { hover_state });
++            add_style(&focus_style, { focus_state });
++            ContextId context = get_current_context();
++            Label *name = context.create_element<Label>(this, text, theme::Typography::LabelMD);
++            name->set_text_transform(TextTransform::Uppercase);
++            name->set_font_weight(700);
++            name->set_color(Color{255, 244, 214, 255});
++            Label *arrow = context.create_element<Label>(this, "\u203A", theme::Typography::LabelMD);
++            arrow->set_font_weight(700);
++            arrow->set_color(Color{249, 214, 72, 255});
++        }
++    };
++}
++
++void ConfigPageOptionsMenu::add_page_buttons(Element *parent) {
++    ContextId context = recompui::get_current_context();
++    for (const auto &entry : recompui::config::page_buttons(config)) {
++        const std::string description = entry.description;
++        context.create_element<LayoutButtonRow>(parent, entry.text, entry.on_press, [this, description]() {
++            description_option_id.clear();
++            description_config = nullptr;
++            set_description_text(description);
++        });
++    }
++}
++
++void ConfigPageOptionsMenu::render_layout_options() {
++    ContextId context = recompui::get_current_context();
++    Element *body_left = get_body()->get_left();
++    body_left->clear_children();
++    body_left->set_padding(0.0f);
++    body_left->set_display(Display::Block);
++    body_left->set_position(Position::Relative);
++    body_left->set_height(100.0f, Unit::Percent);
++
++    auto scroll = context.create_element<Element>(body_left, 0, "div", false);
++    scroll->set_display(Display::Block);
++    scroll->set_width(100.0f, Unit::Percent);
++    scroll->set_min_height(100.0f, Unit::Percent);
++    scroll->set_max_height(100.0f, Unit::Percent);
++    scroll->set_padding(16.0f);
++    scroll->set_overflow_y(Overflow::Auto);
++    scroll->set_as_navigation_container(NavigationType::Vertical);
++
++    config_option_elements.clear();
++    element_configs.clear();
++    used_configs.clear();
++
++    bool first_header = true;
++    for (const auto &entry : *layout) {
++        switch (entry.kind) {
++        case recompui::config::LayoutEntry::Kind::Header: {
++            Label *header = context.create_element<Label>(scroll, entry.text, theme::Typography::Header3);
++            header->set_text_transform(TextTransform::Uppercase);
++#ifdef __ANDROID__
++            header->set_font_family("LatoLatin");
++            header->set_font_weight(400);
++            header->set_font_size(24.0f);
++            header->set_letter_spacing(1.0f);
++            header->set_color(Color{232, 213, 168, 170});
++#endif
++            header->set_display(Display::Block);
++            header->set_margin_top(first_header ? 4.0f : 22.0f);
++            header->set_margin_bottom(10.0f);
++            header->set_padding_left(10.0f);
++            first_header = false;
++            break;
++        }
++        case recompui::config::LayoutEntry::Kind::Button: {
++            const std::string description = entry.description;
++            context.create_element<LayoutButtonRow>(scroll, entry.text, entry.on_press, [this, description]() {
++                description_option_id.clear();
++                description_config = nullptr;
++                set_description_text(description);
++            });
++            break;
++        }
++        case recompui::config::LayoutEntry::Kind::Option: {
++            recomp::config::Config *cfg = &recompui::config::get_config(entry.config_id);
++            if (!cfg->has_option(entry.option_id)) {
++                break;
++            }
++            const auto &schema = cfg->get_config_schema();
++            size_t index = 0;
++            while (index < schema.options.size() && schema.options[index].id != entry.option_id) {
++                index++;
++            }
++            if (index >= schema.options.size()) {
++                break;
++            }
++            if (std::find(used_configs.begin(), used_configs.end(), cfg) == used_configs.end()) {
++                used_configs.push_back(cfg);
++            }
++            set_option_value_t set_value = [cfg](const std::string &option_id, recomp::config::ConfigValueVariant value) {
++                cfg->set_option_value(option_id, value);
++            };
++            on_option_hover_t hover = [this, cfg](const std::string &option_id) {
++                if (description_container) {
++                    description_option_id = option_id;
++                    description_config = cfg;
++                    set_description_text(cfg->get_option(option_id).description);
++                }
++            };
++            ConfigOptionElement *element = nullptr;
++            switch (schema.options[index].type) {
++            case recomp::config::ConfigOptionType::Enum:
++                element = context.create_element<ConfigOptionEnum>(scroll, entry.option_id, index, cfg, set_value, hover);
++                break;
++            case recomp::config::ConfigOptionType::Number:
++                element = context.create_element<ConfigOptionNumber>(scroll, entry.option_id, index, cfg, set_value, hover);
++                break;
++            case recomp::config::ConfigOptionType::String:
++                element = context.create_element<ConfigOptionString>(scroll, entry.option_id, index, cfg, set_value, hover);
++                break;
++            case recomp::config::ConfigOptionType::Bool:
++                element = context.create_element<ConfigOptionBool>(scroll, entry.option_id, index, cfg, set_value, hover);
++                break;
++            default:
++                break;
++            }
++            if (element != nullptr) {
++                element->update_disabled();
++                element->update_hidden();
++                config_option_elements.push_back(element);
++                element_configs.push_back(cfg);
++            }
++            break;
++        }
++        }
++    }
++}
++
+ } // namespace recompui
+diff --git a/recompui/src/config/ui_config_page_options_menu.h b/recompui/src/config/ui_config_page_options_menu.h
+index 49e05db..2176dd8 100644
+--- a/recompui/src/config/ui_config_page_options_menu.h
++++ b/recompui/src/config/ui_config_page_options_menu.h
+@@ -6,6 +6,7 @@
+ #include "elements/ui_button.h"
+ #include "librecomp/config.hpp"
+ #include "librecomp/mods.hpp"
++#include "recompui/config.h"
+ 
+ namespace recompui {
+     class ConfigPageOptionsMenu : public ConfigPage {
+@@ -14,6 +15,12 @@ namespace recompui {
+         bool is_internal = false;
+ 
+         std::vector<ConfigOptionElement*> config_option_elements;
++        // Which config each element belongs to (a layout page mixes configs).
++        std::vector<recomp::config::Config*> element_configs;
++        std::vector<recomp::config::Config*> used_configs;
++        const std::vector<recompui::config::LayoutEntry> *layout = nullptr;
++        recomp::config::Config *description_config = nullptr;
++        std::vector<std::function<void()>> button_descriptions;
+         Element *description_container = nullptr;
+         std::string description_option_id = "";
+         Button *apply_button = nullptr;
+@@ -25,10 +32,13 @@ namespace recompui {
+         set_option_value_t bound_set_option_value;
+ 
+         void render_config_options();
++        void add_page_buttons(Element *parent);   // Android: buttons added to a config page (config::add_page_button)
++        void render_layout_options();
+         void render_confirmation_footer();
+         void on_option_hover(const std::string &option_id);
+         void on_set_option_value(const std::string &option_id, recomp::config::ConfigValueVariant value);
+         ConfigOptionElement* get_element_from_option_id(const std::string &option_id);
++        ConfigOptionElement* get_element_from_option_id(recomp::config::Config *cfg, const std::string &option_id);
+         void perform_option_render_updates();
+         void set_description_text(const std::string &text);
+     public:
+@@ -38,6 +48,12 @@ namespace recompui {
+             recomp::config::Config *config,
+             bool is_internal = false
+         );
++        // A page laid out from a list of entries (config::create_layout_tab).
++        ConfigPageOptionsMenu(
++            ResourceId rid,
++            Element *parent,
++            const std::vector<recompui::config::LayoutEntry> *layout
++        );
+         virtual ~ConfigPageOptionsMenu() = default;
+     };
+ } // namespace recompui
+diff --git a/recompui/src/config/ui_config_tab_general.cpp b/recompui/src/config/ui_config_tab_general.cpp
+index 296ce0e..a6df4df 100644
+--- a/recompui/src/config/ui_config_tab_general.cpp
++++ b/recompui/src/config/ui_config_tab_general.cpp
+@@ -75,9 +75,19 @@ namespace config {
+         return get_general_config_bool_value(general::options::debug_mode);
+     }
+ 
++#ifdef __ANDROID__
++    void bt_android_add_experience_option(recomp::config::Config &config) __attribute__((weak));
++#endif
++
+     recomp::config::Config &create_general_tab(const GeneralTabOptions& options, const std::string &name) {
+         created_general_config = true;
+         recomp::config::Config &config = recompui::config::create_config_tab(name, general::id, false);
++#ifdef __ANDROID__
++        // Android: the game's Experience preset first (implemented in src/game/config.cpp).
++        if (bt_android_add_experience_option != nullptr) {
++            bt_android_add_experience_option(config);
++        }
++#endif
+ 
+         config.add_bool_option(
+             general::options::debug_mode,
+@@ -137,6 +147,9 @@ namespace config {
+             "<b>This setting does not affect keyboard input.</b>",
+             background_input_options,
+             BackgroundInputMode::On
++#ifdef __ANDROID__
++            , true   // hidden: there's no window to lose focus to on Android
++#endif
+         );
+ 
+         return config;
+diff --git a/recompui/src/config/ui_config_tab_graphics.cpp b/recompui/src/config/ui_config_tab_graphics.cpp
+index 4fdf81f..e50e989 100644
+--- a/recompui/src/config/ui_config_tab_graphics.cpp
++++ b/recompui/src/config/ui_config_tab_graphics.cpp
+@@ -77,11 +77,19 @@ namespace recompui {
+             // {ultramodern::renderer::Antialiasing::MSAA8X, "MSAA8X"},
+         };
+ 
++#ifdef __ANDROID__
++        // Android: just the game's own 30, or 60 (Manual at 60; see apply_graphics_config).
++        static EnumOptionVector refresh_rate_options = {
++            {ultramodern::renderer::RefreshRate::Original, "Original", "30 FPS"},
++            {ultramodern::renderer::RefreshRate::Manual, "Manual", "60 FPS"},
++        };
++#else
+         static EnumOptionVector refresh_rate_options = {
+             {ultramodern::renderer::RefreshRate::Original, "Original"},
+             {ultramodern::renderer::RefreshRate::Display, "Display"},
+             {ultramodern::renderer::RefreshRate::Manual, "Manual"},
+         };
++#endif
+ 
+         static EnumOptionVector hpfb_options = {
+             {ultramodern::renderer::HighPrecisionFramebuffer::Auto, "Auto"},
+@@ -152,6 +160,15 @@ namespace recompui {
+         }
+ 
+         static std::string get_framerate_text(uint32_t refresh_rate) {
++#ifdef __ANDROID__
++            (void)refresh_rate;
++            return
++                "Sets the game's output framerate. This option does not affect gameplay."
++                "<br />"
++                "<br />"
++                "<recomp-color primary>30 FPS</recomp-color> is the game's own rate. <recomp-color primary>60 FPS</recomp-color> adds a smoothed frame between each of the game's frames, "
++                "which doubles the graphics work, so busy areas may slow down.";
++#endif
+             return
+                 "Sets the game's output framerate. This option does not affect gameplay."
+                 "<br />"
+@@ -174,6 +191,14 @@ namespace recompui {
+             new_config.rr_option = get_graphics_enum_value<ultramodern::renderer::RefreshRate>(graphics::options::rr_option);
+             new_config.hpfb_option = get_graphics_enum_value<ultramodern::renderer::HighPrecisionFramebuffer>(graphics::options::hpfb_option);
+             new_config.rr_manual_value = get_graphics_number_value<int>(graphics::options::rr_manual_value);
++#ifdef __ANDROID__
++            // Only 30 or 60 on Android: anything else (an older "Display" setting) is 30.
++            if (new_config.rr_option == ultramodern::renderer::RefreshRate::Manual) {
++                new_config.rr_manual_value = 60;
++            } else {
++                new_config.rr_option = ultramodern::renderer::RefreshRate::Original;
++            }
++#endif
+ 
+             new_config.ds_option = get_graphics_enum_value<int>(graphics::options::ds_option);
+ 
+@@ -220,7 +245,14 @@ namespace recompui {
+         recomp::config::Config &create_graphics_tab(const std::string &name) {
+             created_graphics_config = true;
+ 
++#ifdef __ANDROID__
++            // Android: no Apply step. With it, leaving the tab (B, or the menu closing) could
++            // drop the changes, and players found Framerate / Draw Distance back as before
++            // after a restart. The tab saves (and applies) when it closes, like the others.
++            recomp::config::Config &config = recompui::config::create_config_tab(name, graphics::id, false);
++#else
+             recomp::config::Config &config = recompui::config::create_config_tab(name, graphics::id, true);
++#endif
+             config.set_save_callback(apply_graphics_config);
+             config.set_load_callback(apply_graphics_config);
+ 
+@@ -297,6 +329,9 @@ namespace recompui {
+                 "Sets whether the game should display <recomp-color primary>Windowed</recomp-color> or <recomp-color primary>Fullscreen</recomp-color>. You can also use <recomp-color primary>F11</recomp-color> or <recomp-color primary>Alt + Enter</recomp-color> to toggle this option.",
+                 window_mode_options,
+                 wm_default()
++#ifdef __ANDROID__
++                , true   // hidden: Android is always full screen
++#endif
+             );
+ 
+             config.add_enum_option(
+@@ -304,7 +339,15 @@ namespace recompui {
+                 "Framerate",
+                 get_framerate_text(60),
+                 refresh_rate_options,
++#ifdef __ANDROID__
++                // Android: Original (the game's own 30) by default. Every frame above that is an
++                // extra full render of the scene (RT64 draws each interpolated frame from scratch,
++                // CPU then GPU), so 60 doubles the renderer's work and 120 quadruples it; on a
++                // handheld that's what costs busy scenes their 30 FPS.
++                ultramodern::renderer::RefreshRate::Original
++#else
+                 ultramodern::renderer::RefreshRate::Display
++#endif
+             );
+ 
+             config.add_number_option(
+@@ -314,12 +357,23 @@ namespace recompui {
+                 20.0, 240.0, 1.0, 0, false, 60.0
+             );
+             {
++#ifdef __ANDROID__
++                // No slider on Android: 60 FPS is always exactly 60.
++                config.add_option_hidden_dependency(
++                    graphics::options::rr_manual_value,
++                    graphics::options::rr_option,
++                    ultramodern::renderer::RefreshRate::Original,
++                    ultramodern::renderer::RefreshRate::Display,
++                    ultramodern::renderer::RefreshRate::Manual
++                );
++#else
+                 config.add_option_hidden_dependency(
+                     graphics::options::rr_manual_value,
+                     graphics::options::rr_option,
+                     ultramodern::renderer::RefreshRate::Original,
+                     ultramodern::renderer::RefreshRate::Display
+                 );
++#endif
+             }
+ 
+             config.add_enum_option(
+@@ -330,7 +384,12 @@ namespace recompui {
+                 "<br />"
+                 "<recomp-color primary>Note: This option won't be available if your GPU does not support programmable MSAA sample positions, as it is currently required to avoid rendering glitches.</recomp-color>",
+                 antialiasing_options,
++#ifdef __ANDROID__
++                // Off by default on Android: much more costly on mobile GPUs than on desktop.
++                ultramodern::renderer::Antialiasing::None
++#else
+                 ultramodern::renderer::Antialiasing::MSAA2X
++#endif
+             );
+ 
+             config.add_enum_option(
+diff --git a/recompui/src/elements/ui_binding_button.cpp b/recompui/src/elements/ui_binding_button.cpp
+index caa1020..355460f 100644
+--- a/recompui/src/elements/ui_binding_button.cpp
++++ b/recompui/src/elements/ui_binding_button.cpp
+@@ -30,6 +30,19 @@ namespace recompui {
+         disabled_style.set_opacity(0.5f);
+         disabled_style.set_cursor(Cursor::None);
+ 
++#ifdef __ANDROID__
++        // DK look: dark wooden chips; the selected one gets a banana-yellow edge.
++        set_border_color(Color{168, 128, 72, 110});
++        set_background_color(Color{42, 20, 4, 200});
++        set_color(Color{255, 244, 214, 255});
++        set_border_radius(18.0f);
++        hover_style.set_border_color(Color{232, 213, 168, 200});
++        hover_style.set_background_color(Color{70, 42, 18, 230});
++        hover_style.set_color(Color{255, 244, 214, 255});
++        focus_style.set_border_color(Color{249, 214, 72, 255});
++        focus_style.set_background_color(Color{70, 42, 18, 240});
++        focus_style.set_color(Color{249, 214, 72, 255});
++#endif
+         add_style(&hover_style, hover_state);
+         add_style(&focus_style, focus_state);
+         add_style(&disabled_style, disabled_state);
+@@ -202,7 +215,11 @@ namespace recompui {
+                     recording_circle->set_scale_2D(scale, scale);
+                 }
+ 
++#ifdef __ANDROID__
++                if (false) {
++#else
+                 if (is_style_enabled(focus_state)) {
++#endif
+                     recompui::Color pulse_color = recompui::get_pulse_color(750);
+                     focus_style.set_color(pulse_color);
+                     focus_style.set_border_color(pulse_color);
+diff --git a/recompui/src/elements/ui_button.cpp b/recompui/src/elements/ui_button.cpp
+index cf2a311..777aa29 100644
+--- a/recompui/src/elements/ui_button.cpp
++++ b/recompui/src/elements/ui_button.cpp
+@@ -112,6 +112,13 @@ namespace recompui {
+             break;
+         case EventType::Focus:
+             set_style_enabled(focus_state, std::get<EventFocus>(e.variant).active);
++#ifdef __ANDROID__
++            // Moving onto a button with a controller scrolls it into view (e.g. the Download
++            // buttons down the Find Mods list).
++            if (std::get<EventFocus>(e.variant).active) {
++                scroll_into_view();
++            }
++#endif
+             break;
+         case EventType::Update:
+             break;
+diff --git a/recompui/src/elements/ui_document.cpp b/recompui/src/elements/ui_document.cpp
+index a60c585..c5f67ab 100644
+--- a/recompui/src/elements/ui_document.cpp
++++ b/recompui/src/elements/ui_document.cpp
+@@ -215,6 +215,11 @@ namespace recompui {
+                 // This could be added.
+                 Element *next_el = try_get_element_at_index(cur_element_index + nav_dir_value, nav_parent->nav_children);
+                 if (next_el != nullptr) {
++                    // A single element in the grid (e.g. a row that isn't itself a grid row) has no
++                    // children to pick from: go to it directly (indexing it crashed).
++                    if (next_el->nav_children.empty()) {
++                        return next_el;
++                    }
+                     int safe_index = std::clamp(retained_grid_index, 0, static_cast<int>(next_el->nav_children.size()) - 1);
+                     return next_el->nav_children[safe_index];
+                 }
+diff --git a/recompui/src/elements/ui_modal.cpp b/recompui/src/elements/ui_modal.cpp
+index b057f46..010102f 100644
+--- a/recompui/src/elements/ui_modal.cpp
++++ b/recompui/src/elements/ui_modal.cpp
+@@ -2,6 +2,7 @@
+ #include "ui_element.h"
+ #include "ui_document.h"
+ #include "recompinput/recompinput.h"
++#include "recompui/config.h"
+ #include "recompinput/profiles.h"
+ 
+ namespace recompui {
+@@ -35,7 +36,11 @@ public:
+     }
+ };
+ 
++#ifdef __ANDROID__
++constexpr float modal_page_padding = 26.0f;   // the window nearly fills the screen
++#else
+ constexpr float modal_page_padding = 64.0f;
++#endif
+ constexpr float modal_page_base_height = 1080.0f;
+ constexpr float modal_height = modal_page_base_height - (modal_page_padding * 2.0f);
+ constexpr float modal_width = modal_page_base_height * 16.0f / 9.0f;
+@@ -88,6 +93,12 @@ Modal::Modal(
+     modal_element->set_as_navigation_container(NavigationType::Vertical);
+     modal_element->set_nav_wrapping(true);
+ 
++#ifdef __ANDROID__
++    // DK look: a gold frame round the jungle-green glass panel.
++    modal_element->set_border_width(3.0f);
++    modal_element->set_border_color(Color{206, 162, 70, 255});
++    modal_element->set_border_radius(26.0f);
++#endif
+     header = context.create_element<ConfigHeaderFooter>(modal_element, true);
+     header->set_padding_top(0.0f);
+     header->set_padding_bottom(0.0f);
+@@ -95,6 +106,16 @@ Modal::Modal(
+     header->set_padding_right(8.0f);
+     header->set_border_top_left_radius(theme::border::radius_lg);
+     header->set_border_top_right_radius(theme::border::radius_lg);
++#ifdef __ANDROID__
++    // The tab bar is a wooden plank, like the bottom screen's panels.
++    header->set_background_color(Color{122, 78, 38, 255});
++    header->set_border_bottom_width(2.0f);
++    header->set_border_bottom_color(Color{206, 162, 70, 255});
++    header->set_border_top_left_radius(22.0f);
++    header->set_border_top_right_radius(22.0f);
++    header->set_padding_left(14.0f);
++    header->set_padding_right(14.0f);
++#endif
+ 
+     body = context.create_element<Element>(modal_element);
+     body->set_display(Display::Flex);
+@@ -120,8 +141,27 @@ void Modal::open() {
+ 
+     is_open = true;
+     set_display(Display::Block);
++#ifdef __ANDROID__
++    grow_anim = true;
++    grow_start = std::chrono::steady_clock::now();
++    apply_grow(0.0f);
++    // No queue_update() here: this can be called with another UI context open (e.g. from a
++    // launcher button), and the modal's update already runs every frame.
++#endif
+ }
+ 
++#ifdef __ANDROID__
++constexpr float grow_ms = 200.0f;
++
++// t: 0 (just opened) to 1 (full size). Eased out, from 60% size and see-through.
++void Modal::apply_grow(float t) {
++    const float e = 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t);
++    const float scale = 0.6f + 0.4f * e;
++    modal_element->set_scale_2D(scale, scale);
++    modal_element->set_opacity(e);
++}
++#endif
++
+ void TabbedModal::open() {
+     Modal::open();
+ 
+@@ -178,6 +218,17 @@ static std::pair<recompinput::InputDevice, int> get_last_input_info() {
+ void Modal::process_event(const Event &e) {
+     switch (e.type) {
+         case EventType::Update: {
++#ifdef __ANDROID__
++            if (grow_anim) {
++                float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - grow_start).count();
++                if (ms >= grow_ms) {
++                    grow_anim = false;
++                    apply_grow(1.0f);
++                } else {
++                    apply_grow(ms / grow_ms);
++                }
++            }
++#endif
+             if (is_open) {
+                 bool update_action_labels = false;
+                 auto [current_device, current_profile] = get_last_input_info();
+@@ -223,6 +274,9 @@ void Modal::render_menu_actions() {
+     ContextId context = get_current_context();
+     if (menu_actions_wrapper == nullptr) {
+         menu_actions_wrapper = context.create_element<Element>(modal_overlay);
++#ifdef __ANDROID__
++        menu_actions_wrapper->set_display(Display::None);   // no button-hint footer (cleaner)
++#endif
+         menu_actions_wrapper->set_position(Position::Absolute);
+         menu_actions_wrapper->set_bottom(0);
+         menu_actions_wrapper->set_margin_left_auto();
+@@ -319,6 +373,18 @@ TabbedModal::TabbedModal(
+ ) : Modal(rid, parent, modal_root_context, modal_type)
+ {
+     set_menu_action_callback(MenuAction::Back, [this]() {
++#ifdef __ANDROID__
++        // Back from inside a page goes to the categories (tabs); Back on a category leaves
++        // the menu (from the controller setup, back to Input).
++        if (this->tabs != nullptr && this->tabs->has_focused_tab()) {
++            if (this == recompui::config::get_config_modal()) {
++                recompui::config::close();
++            } else {
++                this->close();
++            }
++            return;
++        }
++#endif
+         if (this->tabs != nullptr) {
+             this->tabs->focus_on_active_tab();
+         }
+diff --git a/recompui/src/elements/ui_modal.h b/recompui/src/elements/ui_modal.h
+index d065a14..f713162 100644
+--- a/recompui/src/elements/ui_modal.h
++++ b/recompui/src/elements/ui_modal.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <chrono>
+ #include "recompui/recompui.h"
+ #include "elements/ui_element.h"
+ #include "elements/ui_document.h"
+@@ -71,6 +72,12 @@ namespace recompui {
+         std::function<void()> on_close_callback;
+         std::unordered_map<MenuAction, MenuActionCallback> menu_action_callbacks;
+ 
++#ifdef __ANDROID__
++        // Android: the window grows out from the middle of the screen when it opens.
++        bool grow_anim = false;
++        std::chrono::steady_clock::time_point grow_start;
++        void apply_grow(float t);
++#endif
+         recompinput::InputDevice last_input_device = recompinput::InputDevice::COUNT;
+         int last_input_profile = -1;
+ 
+diff --git a/recompui/src/elements/ui_radio.cpp b/recompui/src/elements/ui_radio.cpp
+index 7e5c18d..7501064 100644
+--- a/recompui/src/elements/ui_radio.cpp
++++ b/recompui/src/elements/ui_radio.cpp
+@@ -16,8 +16,16 @@ namespace recompui {
+         set_border_color(theme::color::Text, 0);
+         set_border_bottom_width(theme::border::width);
+         set_color(theme::color::TextInactive);
++#if defined(__ANDROID__)
++        // Taller (and a little wider) to tap with a finger.
++        set_padding_top(16.0f);
++        set_padding_bottom(16.0f - theme::border::width);
++        set_padding_left(6.0f);
++        set_padding_right(6.0f);
++#else
+         set_padding_top(8.0f);
+         set_padding_bottom(8.0f - theme::border::width);
++#endif
+         set_text_transform(TextTransform::Uppercase);
+         set_height_auto();
+         set_opacity(1.0f);
+diff --git a/recompui/src/elements/ui_slider.cpp b/recompui/src/elements/ui_slider.cpp
+index 7a50da4..1102e0b 100644
+--- a/recompui/src/elements/ui_slider.cpp
++++ b/recompui/src/elements/ui_slider.cpp
+@@ -155,6 +155,13 @@ namespace recompui {
+ 
+         slider_element = context.create_element<Clickable>(this, true);
+         slider_element->set_flex(1.0f, 0.0f);
++#if defined(__ANDROID__)
++        // A taller touch area around the thin bar, so a finger can grab it anywhere near.
++        slider_element->set_padding_top(18.0f);
++        slider_element->set_padding_bottom(18.0f);
++        slider_element->set_margin_top(-18.0f);
++        slider_element->set_margin_bottom(-18.0f);
++#endif
+         slider_element->add_pressed_callback([this](float x, float y){ bar_pressed(x, y); focus(); });
+         slider_element->add_dragged_callback([this](float x, float y, recompui::DragPhase phase){ bar_dragged(x, y, phase); focus(); });
+ 
+@@ -169,11 +176,20 @@ namespace recompui {
+             
+             circle_element = context.create_element<Clickable>(bar_element, true);
+             circle_element->set_position(Position::Relative);
++#if defined(__ANDROID__)
++            // A bigger knob for fingers.
++            circle_element->set_width(26.0f);
++            circle_element->set_height(26.0f);
++            circle_element->set_margin_top(-12.0f);
++            circle_element->set_margin_right(-13.0f);
++            circle_element->set_margin_left(-13.0f);
++#else
+             circle_element->set_width(16.0f);
+             circle_element->set_height(16.0f);
+             circle_element->set_margin_top(-7.0f);
+             circle_element->set_margin_right(-8.0f);
+             circle_element->set_margin_left(-8.0f);
++#endif
+             circle_element->set_background_color(theme::color::TextDim);
+             circle_element->set_border_radius(theme::border::radius_sm);
+             circle_element->add_pressed_callback([this](float, float){ focus(); });
+diff --git a/recompui/src/elements/ui_tab_set.cpp b/recompui/src/elements/ui_tab_set.cpp
+index 2c5dc52..3d04f98 100644
+--- a/recompui/src/elements/ui_tab_set.cpp
++++ b/recompui/src/elements/ui_tab_set.cpp
+@@ -43,6 +43,31 @@ Tab::Tab(ResourceId rid, Element *parent, int tab_index, std::string_view text,
+     indicator->set_right(0.0f);
+     indicator->set_background_color(theme::color::Transparent);
+ 
++#ifdef __ANDROID__
++    // The bottom screen's DK look, laid out like the Dusklight port's tabs: big chunky
++    // capitals spread across the wooden bar, tan when idle; the open tab is a darker inset
++    // with a banana-yellow bar under it.
++    {
++        const Color tan{232, 213, 168, 255}, banana{249, 214, 72, 255}, cream{255, 244, 214, 255};
++        label->set_font_family("LatoLatin");
++        label->set_font_weight(400);
++        label->set_font_size(28.0f);
++        label->set_letter_spacing(1.0f);
++        label->set_text_transform(TextTransform::Uppercase);
++        set_margin(0.0f);
++        set_padding_top(26.0f);
++        set_padding_bottom(20.0f);
++        set_padding_left(32.0f);
++        set_padding_right(32.0f);
++        set_color(tan);
++        hover_style.set_color(cream);
++        checked_style.set_color(banana);
++        checked_style.set_background_color(Color{42, 20, 4, 110});
++        pulsing_style.set_color(cream);
++        indicator->set_height(5.0f);
++        indicator->set_bottom(0.0f);
++    }
++#endif
+     add_style(&hover_style, { hover_state });
+     add_style(&checked_style, { checked_state });
+     add_style(&pulsing_style, { focus_state });
+@@ -73,7 +98,15 @@ void Tab::process_event(const Event &e) {
+     case EventType::Enable: {
+         bool active = std::get<EventEnable>(e.variant).active;
+         set_style_enabled(disabled_state, !active);
++#ifdef __ANDROID__
++        if (active && is_selected) {
++            indicator->set_background_color(Color{249, 214, 72, 255});
++        } else {
++            indicator->set_background_color(theme::color::Transparent);
++        }
++#else
+         indicator->set_background_color(active ? theme::color::BorderSolid : theme::color::Transparent);
++#endif
+         break;
+     }
+     case EventType::Focus:
+@@ -82,6 +115,12 @@ void Tab::process_event(const Event &e) {
+             set_style_enabled(focus_state, active);
+             if (active) {
+                 queue_update();
++#ifdef __ANDROID__
++                // Moving onto a tab (d-pad, shoulder buttons) opens it; no press needed.
++                if (!is_selected && visible) {
++                    on_select_tab(tab_index);
++                }
++#endif
+             }
+         }
+         break;
+@@ -90,7 +129,11 @@ void Tab::process_event(const Event &e) {
+             recompui::Color pulse_color = recompui::get_pulse_color(750);
+             pulsing_style.set_color(pulse_color);
+             if (is_selected) {
++#ifdef __ANDROID__
++                indicator->set_background_color(Color{249, 214, 72, 255});
++#else
+                 indicator->set_background_color(pulse_color);
++#endif
+             } else {
+                 indicator->set_background_color(theme::color::Transparent);
+             }
+@@ -107,7 +150,15 @@ void Tab::set_selected(bool enable) {
+     is_selected = enable;
+     set_as_primary_focus(enable);
+     set_style_enabled(checked_state, enable);
++#ifdef __ANDROID__
++    if (enable) {
++        indicator->set_background_color(Color{249, 214, 72, 255});
++    } else {
++        indicator->set_background_color(theme::color::Transparent);
++    }
++#else
+     indicator->set_background_color(enable ? theme::color::BorderSolid : theme::color::Transparent);
++#endif
+ }
+ 
+ TabSet::TabSet(ResourceId rid, Element *parent) :
+diff --git a/recompui/src/elements/ui_tab_set.h b/recompui/src/elements/ui_tab_set.h
+index b8d3783..d136839 100644
+--- a/recompui/src/elements/ui_tab_set.h
++++ b/recompui/src/elements/ui_tab_set.h
+@@ -32,6 +32,7 @@ namespace recompui {
+         void set_selected(bool selected);
+         void set_visible(bool is_visible);
+         bool get_visible() { return visible; }
++        bool is_focused() { return is_style_enabled(focus_state); }
+     };
+ 
+     class TabSet : public Element {
+@@ -47,6 +48,15 @@ namespace recompui {
+         int add_tab(std::string_view text);
+         void set_active_tab(int tab_index, bool report_change = true);
+         void focus_on_active_tab();
++        // Whether one of the tabs (the menu categories) has the focus.
++        bool has_focused_tab() {
++            for (Tab *tab : tabs) {
++                if (tab->is_focused()) {
++                    return true;
++                }
++            }
++            return false;
++        }
+         Element *get_active_tab_element() const { return active_tab >= 0 && active_tab < static_cast<int>(tabs.size()) ? tabs[active_tab] : nullptr; };
+         int get_active_tab() const { return active_tab; }
+         void set_tab_visible(int tab_index, bool is_visible);
+diff --git a/recompui/src/elements/ui_text_input.cpp b/recompui/src/elements/ui_text_input.cpp
+index 42c74e7..01279d8 100644
+--- a/recompui/src/elements/ui_text_input.cpp
++++ b/recompui/src/elements/ui_text_input.cpp
+@@ -1,6 +1,17 @@
+ #include "ui_text_input.h"
+ 
+ #include <cassert>
++#ifdef __ANDROID__
++#include <SDL.h>
++#endif
++
++#ifdef __ANDROID__
++#include <atomic>
++namespace recompui {
++    // Set while a text box has the on-screen keyboard up (ui_state.cpp).
++    extern std::atomic<bool> android_text_input_open;
++}
++#endif
+ 
+ namespace recompui {
+ 
+@@ -22,14 +33,36 @@ namespace recompui {
+                 focus_callback(event.active);
+             }
+             set_style_enabled(focus_state, event.active);
++#ifdef __ANDROID__
++            // Put the on-screen keyboard away when leaving the box. It isn't brought up just
++            // by moving onto the box with a controller (the keyboard then takes the D-pad);
++            // tapping the box, or pressing A on it, opens it.
++            if (!event.active) {
++                SDL_StopTextInput();
++                android_text_input_open = false;
++            }
++#endif
++            break;
++        }
++#ifdef __ANDROID__
++        case EventType::Click: {
++            SDL_StartTextInput();
++            android_text_input_open = true;
+             break;
+         }
++#endif
+         default:
+             break;
+         }
+     }
+     
+-    TextInput::TextInput(ResourceId rid, Element *parent, bool text_visible) : Element(rid, parent, Events(EventType::Text, EventType::Focus), "input") {
++    TextInput::TextInput(ResourceId rid, Element *parent, bool text_visible) : Element(rid, parent,
++#ifdef __ANDROID__
++        Events(EventType::Text, EventType::Focus, EventType::Click),
++#else
++        Events(EventType::Text, EventType::Focus),
++#endif
++        "input") {
+         if (!text_visible) {
+             set_attribute("type", "password");
+         }
+diff --git a/recompui/src/renderer/rt64_render_context.cpp b/recompui/src/renderer/rt64_render_context.cpp
+index a7954c7..dec1073 100644
+--- a/recompui/src/renderer/rt64_render_context.cpp
++++ b/recompui/src/renderer/rt64_render_context.cpp
+@@ -3,6 +3,40 @@
+ #include <variant>
+ #include <algorithm>
+ 
++#if defined(__ANDROID__)
++#include <SDL.h>
++#include <SDL_syswm.h>
++#include <android/native_window.h>
++
++namespace plume {
++    // Defined in plume_vulkan.cpp (Android patch): lets swap chains follow surface changes.
++    extern ANativeWindow *(*AndroidWindowProvider)();
++}
++
++// Defined by the game's Android glue (android/jni/game_state.cpp), if present: gives the
++// second-screen UI read-only access to RDRAM.
++extern "C" void bt_android_set_rdram(uint8_t* rdram) __attribute__((weak));
++
++namespace {
++    SDL_Window *android_game_window = nullptr;
++
++    // The ANativeWindow currently backing the game window. SDL replaces it when Android
++    // recreates the surface (e.g. after the ROM file picker), and clears it while the app
++    // has no surface.
++    ANativeWindow *android_current_native_window() {
++        if (android_game_window == nullptr) {
++            return nullptr;
++        }
++        SDL_SysWMinfo wm_info;
++        SDL_VERSION(&wm_info.version);
++        if (!SDL_GetWindowWMInfo(android_game_window, &wm_info)) {
++            return nullptr;
++        }
++        return wm_info.info.android.window;
++    }
++}
++#endif
++
+ #include "hle/rt64_application.h"
+ #include "rt64_render_hooks.h"
+ #include "overloaded.h"
+@@ -225,7 +259,22 @@ renderer::RT64Context::RT64Context(uint8_t* rdram, ultramodern::renderer::Window
+     RT64::Application::Core appCore{};
+ #if defined(_WIN32)
+     appCore.window = window_handle.window;
+-#elif defined(__linux__) || defined(__ANDROID__)
++#elif defined(__ANDROID__)
++    // ultramodern hands us an SDL_Window*, but RT64/plume want the ANativeWindow* behind it.
++    {
++        SDL_SysWMinfo wm_info;
++        SDL_VERSION(&wm_info.version);
++        SDL_GetWindowWMInfo(window_handle, &wm_info);
++        appCore.window = wm_info.info.android.window;
++
++        android_game_window = window_handle;
++        plume::AndroidWindowProvider = android_current_native_window;
++
++        if (bt_android_set_rdram != nullptr) {
++            bt_android_set_rdram(rdram);
++        }
++    }
++#elif defined(__linux__)
+     appCore.window = window_handle;
+ #elif defined(__APPLE__)
+     appCore.window.window = window_handle.window;
+diff --git a/recompui/src/renderer/ui_renderer.cpp b/recompui/src/renderer/ui_renderer.cpp
+index 556df18..30cbf36 100644
+--- a/recompui/src/renderer/ui_renderer.cpp
++++ b/recompui/src/renderer/ui_renderer.cpp
+@@ -109,7 +109,12 @@ class RmlRenderInterface_RT64_impl : public Rml::RenderInterfaceCompatibility {
+     static constexpr uint32_t initial_index_buffer_size = 1024 * sizeof(int);
+     static constexpr plume::RenderFormat RmlTextureFormat = plume::RenderFormat::R8G8B8A8_UNORM;
+     static constexpr plume::RenderFormat RmlTextureFormatBgra = plume::RenderFormat::B8G8R8A8_UNORM;
++#if defined(__ANDROID__)
++    // Must match RT64's swap chain format, which is RGBA8 on Android (see rt64_application.cpp).
++    static constexpr plume::RenderFormat SwapChainFormat = plume::RenderFormat::R8G8B8A8_UNORM;
++#else
+     static constexpr plume::RenderFormat SwapChainFormat = plume::RenderFormat::B8G8R8A8_UNORM;
++#endif
+     static constexpr uint32_t RmlTextureFormatBytesPerPixel = RenderFormatSize(RmlTextureFormat);
+     static_assert(RenderFormatSize(RmlTextureFormatBgra) == RmlTextureFormatBytesPerPixel);
+     plume::RenderInterface* interface_;
+diff --git a/recompui/src/util/file.cpp b/recompui/src/util/file.cpp
+index 7ee84ed..f8d0cf9 100644
+--- a/recompui/src/util/file.cpp
++++ b/recompui/src/util/file.cpp
+@@ -119,6 +119,11 @@ namespace recompui {
+         return file::apple::get_bundle_resource_directory();
+ #elif defined(__linux__) && defined(RECOMP_FLATPAK)
+         return "/app/bin";
++#elif defined(__ANDROID__)
++        // SDL on Android opens *relative* paths from inside the APK, so files next to the
++        // program (e.g. recompcontrollerdb.txt) need an absolute path. The Android entry
++        // point sets the working directory to the extracted program files.
++        return std::filesystem::current_path();
+ #else
+         return "";
+ #endif

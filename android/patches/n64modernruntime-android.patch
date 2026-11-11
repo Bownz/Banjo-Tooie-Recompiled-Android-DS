@@ -1,0 +1,142 @@
+diff --git a/librecomp/src/mods.cpp b/librecomp/src/mods.cpp
+index 0f7de83..7541a3c 100644
+--- a/librecomp/src/mods.cpp
++++ b/librecomp/src/mods.cpp
+@@ -169,6 +169,11 @@ void protect(void* target_func, uint64_t old_flags) {
+ #  include <unistd.h>
+ #  include <dlfcn.h>
+ #  include <sys/mman.h>
++#  include <unistd.h>
++#  include <cerrno>
++#  include <cstdio>
++#  include <cstring>
++#  include <vector>
+ 
+ class recomp::mods::DynamicLibrary {
+ public:
+@@ -227,6 +232,47 @@ private:
+     uint32_t api_version;
+ };
+ 
++#if defined(__ANDROID__)
++// Android: the patched function's code is in libmain.so, mapped from the APK. Newer Android
++// (seen on Android 17) doesn't let an app make such a page executable again after writing
++// to it, so the old mprotect RW -> RX left it non-executable and the game crashed the next
++// time it ran code on that page. Instead each page the patch touches is swapped for an
++// anonymous copy of itself (which apps may make executable, as JITs do), then patched.
++// A patch is at most 16 bytes; this covers the pages of the first 32 bytes.
++static constexpr size_t patch_span = 32;
++
++void unprotect(void* target_func, uint64_t* old_flags) {
++    const size_t page_size = (size_t)getpagesize();
++    const uintptr_t first = ((uintptr_t)target_func / page_size) * page_size;
++    const uintptr_t last = (((uintptr_t)target_func + patch_span - 1) / page_size) * page_size;
++    std::vector<uint8_t> copy(page_size);
++    for (uintptr_t page = first; page <= last; page += page_size) {
++        memcpy(copy.data(), (void*)page, page_size);
++        void* mapped = mmap((void*)page, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
++        if (mapped == MAP_FAILED) {
++            fprintf(stderr, "Mod patch: couldn't remap code page %p (errno %d)\n", (void*)page, errno);
++            mprotect((void*)page, page_size, PROT_READ | PROT_WRITE);
++            continue;
++        }
++        memcpy((void*)page, copy.data(), page_size);
++    }
++    *old_flags = 0;
++}
++
++void protect(void* target_func, uint64_t old_flags) {
++    (void)old_flags;
++    const size_t page_size = (size_t)getpagesize();
++    const uintptr_t first = ((uintptr_t)target_func / page_size) * page_size;
++    const uintptr_t last = (((uintptr_t)target_func + patch_span - 1) / page_size) * page_size;
++    for (uintptr_t page = first; page <= last; page += page_size) {
++        if (mprotect((void*)page, page_size, PROT_READ | PROT_EXEC) != 0) {
++            fprintf(stderr, "Mod patch: couldn't make code page %p executable (errno %d)\n", (void*)page, errno);
++        }
++    }
++    // ARM: make the new instructions visible to instruction fetch.
++    __builtin___clear_cache((char*)target_func, (char*)target_func + patch_span);
++}
++#else
+ void unprotect(void* target_func, uint64_t* old_flags) {
+     // Align the address to a page boundary.
+     uintptr_t page_start = (uintptr_t)target_func;
+@@ -248,6 +294,7 @@ void protect(void* target_func, uint64_t old_flags) {
+     (void)result;
+ }
+ #endif
++#endif
+ 
+ namespace modpaths {
+     constexpr std::string_view default_mod_extension = "nrm";
+diff --git a/ultramodern/src/mesgqueue.cpp b/ultramodern/src/mesgqueue.cpp
+index 9944a02..2e282ea 100644
+--- a/ultramodern/src/mesgqueue.cpp
++++ b/ultramodern/src/mesgqueue.cpp
+@@ -1,4 +1,6 @@
++#include <atomic>
+ #include <bitset>
++#include <cstdio>
+ #include <thread>
+ 
+ #include "blockingconcurrentqueue.h"
+@@ -90,6 +92,19 @@ s32 MQ_IS_FULL(OSMesgQueue* mq) {
+ }
+ 
+ bool do_send(RDRAM_ARG PTR(OSMesgQueue) mq_, OSMesg msg, bool jam, bool block) {
++#if defined(__ANDROID__)
++    // A message for a queue that isn't a KSEG0/KSEG1 address (e.g. 0x00000008, a field of a
++    // null pointer) would make the host read outside RDRAM and crash, which once happened in
++    // the EEPROM thread while a save was loading. Drop it instead (counted as delivered, so
++    // it isn't requeued forever) and log it.
++    if (static_cast<uint32_t>(mq_) < 0x80000000u || static_cast<uint32_t>(mq_) >= 0xC0000000u) {
++        static std::atomic<int> logged{ 0 };
++        if (logged.fetch_add(1) < 8) {
++            fprintf(stderr, "[Message Queue] Dropped a message (0x%08X) sent to an invalid queue address 0x%08X\n", static_cast<uint32_t>(msg), static_cast<uint32_t>(mq_));
++        }
++        return true;
++    }
++#endif
+     OSMesgQueue* mq = TO_PTR(OSMesgQueue, mq_);
+     if (!block) {
+         // If non-blocking, fail if the queue is full.
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 6e3ed18..6eed542 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -110,6 +110,26 @@ void ultramodern::set_native_thread_name(const std::string& name) {
+     prctl(PR_SET_NAME, name.c_str());
+ }
+ 
++#if defined(__ANDROID__)
++#include <sys/resource.h>
++#include <unistd.h>
++
++// Android: per-thread "nice" values (apps may raise their own threads' priority this way).
++// The VI thread paces the whole game and the game threads build each frame, so they run
++// ahead of background work such as RT64's shader compilation.
++void ultramodern::set_native_thread_priority(ThreadPriority pri) {
++    int nice = 0;
++    switch (pri) {
++        case ThreadPriority::Low: nice = 5; break;
++        case ThreadPriority::Normal: nice = 0; break;
++        case ThreadPriority::High: nice = -4; break;
++        case ThreadPriority::VeryHigh: nice = -8; break;
++        case ThreadPriority::Critical: nice = -10; break;
++        default: break;
++    }
++    setpriority(PRIO_PROCESS, gettid(), nice);
++}
++#else
+ void ultramodern::set_native_thread_priority(ThreadPriority pri) {
+     // TODO linux thread priority
+     // printf("set_native_thread_priority unimplemented\n");
+@@ -137,6 +157,7 @@ void ultramodern::set_native_thread_priority(ThreadPriority pri) {
+     //         break;
+     // }
+ }
++#endif
+ #elif defined(__APPLE__)
+ void ultramodern::set_native_thread_name(const std::string& name) {
+     if (name.length() > 15) {

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Banjo-Tooie: Recompiled</string>
+
+    <!-- First-launch storage choice (StorageAccess) -->
+    <string name="storage_title">Where should Banjo-Tooie keep its files?</string>
+    <string name="storage_message">Saves, settings, mods and your ROM can go in a shared \"%1$s\" folder on your device storage. You can reach it from a file manager or a PC to add mods, and it stays if you uninstall. This needs permission to access your files.\n\nOr keep everything in the app\'s own storage. No permission needed, but it\'s removed if you uninstall.</string>
+    <string name="storage_shared">Shared folder</string>
+    <string name="storage_app">App storage</string>
+    <string name="storage_settings_hint">Turn on \"Allow access to manage all files\" for Banjo-Tooie, then come back.</string>
+    <string name="rom_restart">ROM loaded! Restarting to finish setting up…</string>
+    <string name="storage_bad_folder">That folder can\'t be used. Pick a folder on the device\'s storage or SD card.</string>
+    <string name="storage_denied">No file access granted. Using app storage instead.</string>
+    <string name="storage_denied_change">No file access granted, so the files stay where they are.</string>
+</resources>

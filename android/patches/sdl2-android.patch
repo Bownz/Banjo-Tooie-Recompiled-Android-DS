@@ -1,0 +1,126 @@
+diff --git a/src/audio/aaudio/SDL_aaudio.c b/src/audio/aaudio/SDL_aaudio.c
+index 93bcaf3..63c8a5b 100644
+--- a/src/audio/aaudio/SDL_aaudio.c
++++ b/src/audio/aaudio/SDL_aaudio.c
+@@ -116,6 +116,12 @@ static int aaudio_OpenDevice(_THIS, const char *devname)
+     }
+ 
+     ctx.AAudioStreamBuilder_setErrorCallback(ctx.builder, aaudio_errorCallback, private);
++    /* DK64 Android port: ask for the low-latency (fast mixer / MMAP) path and say this is game
++       audio. Without it Android may route the stream to the "deep buffer" output meant for
++       music playback, which drains in large bursts and starves a push-style queue. */
++    ctx.AAudioStreamBuilder_setPerformanceMode(ctx.builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
++    ctx.AAudioStreamBuilder_setUsage(ctx.builder, AAUDIO_USAGE_GAME);
++    ctx.AAudioStreamBuilder_setContentType(ctx.builder, AAUDIO_CONTENT_TYPE_MUSIC);
+ 
+     LOGI("AAudio Try to open %u hz %u bit chan %u %s samples %u",
+          this->spec.freq, SDL_AUDIO_BITSIZE(this->spec.format),
+@@ -156,6 +162,21 @@ static int aaudio_OpenDevice(_THIS, const char *devname)
+ 
+     private->frame_size = this->spec.channels * (SDL_AUDIO_BITSIZE(this->spec.format) / 8);
+ 
++    if (!iscapture) {
++        /* DK64 Android port: room for two mixed chunks, so a short scheduling delay of the
++           audio thread doesn't underrun the low-latency buffer. */
++        int32_t capacity = ctx.AAudioStream_getBufferCapacityInFrames(private->stream);
++        int32_t wanted = 2 * (int32_t)this->spec.samples;
++        if (capacity > 0 && wanted > capacity) {
++            wanted = capacity;
++        }
++        int32_t actual = ctx.AAudioStream_setBufferSizeInFrames(private->stream, wanted);
++        SDL_Log("AAudio: perf mode %d, burst %d frames, buffer %d of %d frames, %d Hz",
++                (int)ctx.AAudioStream_getPerformanceMode(private->stream),
++                (int)ctx.AAudioStream_getFramesPerBurst(private->stream),
++                (int)actual, (int)capacity, (int)this->spec.freq);
++    }
++
+     res = ctx.AAudioStream_requestStart(private->stream);
+     if (res != AAUDIO_OK) {
+         LOGI("SDL Failed AAudioStream_requestStart %d iscapture:%d", res, iscapture);
+@@ -238,6 +259,9 @@ static int RebuildAAudioStream(SDL_AudioDevice *device)
+     }
+ 
+     ctx.AAudioStreamBuilder_setErrorCallback(ctx.builder, aaudio_errorCallback, hidden);
++    ctx.AAudioStreamBuilder_setPerformanceMode(ctx.builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
++    ctx.AAudioStreamBuilder_setUsage(ctx.builder, AAUDIO_USAGE_GAME);
++    ctx.AAudioStreamBuilder_setContentType(ctx.builder, AAUDIO_CONTENT_TYPE_MUSIC);
+ 
+     LOGI("AAudio Try to reopen %u hz %u bit chan %u %s samples %u",
+          device->spec.freq, SDL_AUDIO_BITSIZE(device->spec.format),
+@@ -300,15 +324,28 @@ static void aaudio_PlayDevice(_THIS)
+ {
+     struct SDL_PrivateAudioData *private = this->hidden;
+     aaudio_result_t res;
+-    int64_t timeoutNanoseconds = 1 * 1000 * 1000; /* 8 ms */
+-    res = ctx.AAudioStream_write(private->stream, private->mixbuf, private->mixlen / private->frame_size, timeoutNanoseconds);
+-    if (res < 0) {
+-        LOGI("%s : %s", __func__, ctx.AAudio_convertResultToText(res));
+-        if (RecoverAAudioDevice(this) < 0) {
+-            return;  /* oh well, we went down hard. */
++    /* DK64 Android port: write the whole buffer. Upstream writes once with a 1 ms timeout and
++       drops whatever didn't fit, which makes audio choppy whenever the device buffer is
++       momentarily full. Block (bounded) until every frame is accepted instead; the wait is
++       what paces the audio thread. */
++    const int32_t total_frames = private->mixlen / private->frame_size;
++    const int64_t timeoutNanoseconds = 100 * 1000 * 1000; /* 100 ms per attempt */
++    int32_t written = 0;
++    int attempts = 0;
++    while (written < total_frames && attempts < 4) {
++        res = ctx.AAudioStream_write(private->stream, private->mixbuf + written * private->frame_size,
++                                     total_frames - written, timeoutNanoseconds);
++        if (res < 0) {
++            LOGI("%s : %s", __func__, ctx.AAudio_convertResultToText(res));
++            if (RecoverAAudioDevice(this) < 0) {
++                return;  /* oh well, we went down hard. */
++            }
++            return;
+         }
+-    } else {
+-        LOGI("SDL AAudio play: %d frames, wanted:%d frames", (int)res, private->mixlen / private->frame_size);
++        if (res == 0) {
++            attempts++; /* Timed out without progress (stream paused or stalled). */
++        }
++        written += res;
+     }
+ 
+ #if 0
+diff --git a/src/audio/aaudio/SDL_aaudiofuncs.h b/src/audio/aaudio/SDL_aaudiofuncs.h
+index c2fff18..2f02ba6 100644
+--- a/src/audio/aaudio/SDL_aaudiofuncs.h
++++ b/src/audio/aaudio/SDL_aaudiofuncs.h
+@@ -32,9 +32,9 @@ SDL_PROC(void, AAudioStreamBuilder_setFormat, (AAudioStreamBuilder * builder, aa
+ SDL_PROC_UNUSED(void, AAudioStreamBuilder_setSharingMode, (AAudioStreamBuilder * builder, aaudio_sharing_mode_t sharingMode))
+ SDL_PROC(void, AAudioStreamBuilder_setDirection, (AAudioStreamBuilder * builder, aaudio_direction_t direction))
+ SDL_PROC_UNUSED(void, AAudioStreamBuilder_setBufferCapacityInFrames, (AAudioStreamBuilder * builder, int32_t numFrames))
+-SDL_PROC_UNUSED(void, AAudioStreamBuilder_setPerformanceMode, (AAudioStreamBuilder * builder, aaudio_performance_mode_t mode))
+-SDL_PROC_UNUSED(void, AAudioStreamBuilder_setUsage, (AAudioStreamBuilder * builder, aaudio_usage_t usage))                                         /* API 28 */
+-SDL_PROC_UNUSED(void, AAudioStreamBuilder_setContentType, (AAudioStreamBuilder * builder, aaudio_content_type_t contentType))                      /* API 28 */
++SDL_PROC(void, AAudioStreamBuilder_setPerformanceMode, (AAudioStreamBuilder * builder, aaudio_performance_mode_t mode))
++SDL_PROC(void, AAudioStreamBuilder_setUsage, (AAudioStreamBuilder * builder, aaudio_usage_t usage))                                         /* API 28 */
++SDL_PROC(void, AAudioStreamBuilder_setContentType, (AAudioStreamBuilder * builder, aaudio_content_type_t contentType))                      /* API 28 */
+ SDL_PROC_UNUSED(void, AAudioStreamBuilder_setInputPreset, (AAudioStreamBuilder * builder, aaudio_input_preset_t inputPreset))                      /* API 28 */
+ SDL_PROC_UNUSED(void, AAudioStreamBuilder_setAllowedCapturePolicy, (AAudioStreamBuilder * builder, aaudio_allowed_capture_policy_t capturePolicy)) /* API 29 */
+ SDL_PROC_UNUSED(void, AAudioStreamBuilder_setSessionId, (AAudioStreamBuilder * builder, aaudio_session_id_t sessionId))                            /* API 28 */
+@@ -54,10 +54,10 @@ SDL_PROC(aaudio_stream_state_t, AAudioStream_getState, (AAudioStream * stream))
+ SDL_PROC_UNUSED(aaudio_result_t, AAudioStream_waitForStateChange, (AAudioStream * stream, aaudio_stream_state_t inputState, aaudio_stream_state_t *nextState, int64_t timeoutNanoseconds))
+ SDL_PROC(aaudio_result_t, AAudioStream_read, (AAudioStream * stream, void *buffer, int32_t numFrames, int64_t timeoutNanoseconds))
+ SDL_PROC(aaudio_result_t, AAudioStream_write, (AAudioStream * stream, const void *buffer, int32_t numFrames, int64_t timeoutNanoseconds))
+-SDL_PROC_UNUSED(aaudio_result_t, AAudioStream_setBufferSizeInFrames, (AAudioStream * stream, int32_t numFrames))
++SDL_PROC(aaudio_result_t, AAudioStream_setBufferSizeInFrames, (AAudioStream * stream, int32_t numFrames))
+ SDL_PROC_UNUSED(int32_t, AAudioStream_getBufferSizeInFrames, (AAudioStream * stream))
+-SDL_PROC_UNUSED(int32_t, AAudioStream_getFramesPerBurst, (AAudioStream * stream))
+-SDL_PROC_UNUSED(int32_t, AAudioStream_getBufferCapacityInFrames, (AAudioStream * stream))
++SDL_PROC(int32_t, AAudioStream_getFramesPerBurst, (AAudioStream * stream))
++SDL_PROC(int32_t, AAudioStream_getBufferCapacityInFrames, (AAudioStream * stream))
+ SDL_PROC_UNUSED(int32_t, AAudioStream_getFramesPerDataCallback, (AAudioStream * stream))
+ SDL_PROC(int32_t, AAudioStream_getXRunCount, (AAudioStream * stream))
+ SDL_PROC(int32_t, AAudioStream_getSampleRate, (AAudioStream * stream))
+@@ -66,7 +66,7 @@ SDL_PROC_UNUSED(int32_t, AAudioStream_getSamplesPerFrame, (AAudioStream * stream
+ SDL_PROC_UNUSED(int32_t, AAudioStream_getDeviceId, (AAudioStream * stream))
+ SDL_PROC(aaudio_format_t, AAudioStream_getFormat, (AAudioStream * stream))
+ SDL_PROC_UNUSED(aaudio_sharing_mode_t, AAudioStream_getSharingMode, (AAudioStream * stream))
+-SDL_PROC_UNUSED(aaudio_performance_mode_t, AAudioStream_getPerformanceMode, (AAudioStream * stream))
++SDL_PROC(aaudio_performance_mode_t, AAudioStream_getPerformanceMode, (AAudioStream * stream))
+ SDL_PROC_UNUSED(aaudio_direction_t, AAudioStream_getDirection, (AAudioStream * stream))
+ SDL_PROC_UNUSED(int64_t, AAudioStream_getFramesWritten, (AAudioStream * stream))
+ SDL_PROC_UNUSED(int64_t, AAudioStream_getFramesRead, (AAudioStream * stream))

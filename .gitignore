@@ -34,3 +34,13 @@ __pycache__/
 builddir/
 repo/
 *.flatpak
+
+# Android build (see BUILDING-ANDROID.md)
+.gradle/
+local.properties
+app/build/
+app/.cxx/
+android/third_party/
+*.apk
+*.jks
+*.keystore

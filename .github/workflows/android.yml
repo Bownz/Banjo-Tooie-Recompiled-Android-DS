@@ -1,0 +1,180 @@
+name: android
+
+# Builds the Android APK (arm64-v8a).
+#
+# No ROM is needed: the recompiled game code is committed (RecompiledFuncs/, rsp/), and the
+# player picks their own ROM on the device.
+#
+# For a stable release signature, so each APK installs as an update and keeps the player's
+# saves, set these repository secrets:
+#   ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD (ANDROID_KEY_ALIAS defaults to "dk64",
+#   the alias of the keystore shared with the DK64 port; ANDROID_KEY_PASSWORD defaults to the
+#   keystore password)
+# Without them the APK is signed with a throwaway debug key. See BUILDING-ANDROID.md.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ android-port ]
+    paths-ignore: [ '**.md' ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: 30.0.16248370
+  CMAKE_VERSION: 4.1.2
+
+jobs:
+  build-android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Free disk space
+        # The NDK and the recompiled game need more room than the runner leaves free.
+        # Leaves the Android SDK in place.
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Fetch dependencies
+        # The runtime submodules only. lib/N64Recomp is the (optional) recompiler, not needed
+        # to build the game, since its output is committed.
+        run: |
+          git submodule update --init --recursive --depth 1 --jobs 4 \
+            lib/N64ModernRuntime lib/rt64 lib/RecompFrontend
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        # Also validates gradle-wrapper.jar against Gradle's published checksums.
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install NDK and CMake
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}" "cmake;${CMAKE_VERSION}"
+
+      - name: Cache downloads
+        # SDL2, FreeType and libadrenotools sources (app/build.gradle downloads them once).
+        uses: actions/cache@v4
+        with:
+          path: build/android-downloads
+          key: android-downloads-${{ hashFiles('app/build.gradle') }}
+          restore-keys: android-downloads-
+
+      - name: Cache compiler output
+        # ccache keeps compiled objects between runs, so a build only recompiles what changed
+        # (app/build.gradle passes ccache as the compiler launcher when CCACHE_DIR is set).
+        # Restored from the newest earlier run; saved under this commit.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-arm64-ndk${{ env.NDK_VERSION }}-${{ github.sha }}
+          restore-keys: ccache-arm64-ndk${{ env.NDK_VERSION }}-
+
+      - name: Configure ccache
+        run: |
+          {
+            echo "CCACHE_DIR=$HOME/.cache/ccache"
+            echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+            echo "CCACHE_MAXSIZE=4G"
+            echo "CCACHE_COMPRESS=1"
+            echo "CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.cache/ccache"
+          ccache --zero-stats > /dev/null
+
+      - name: Set up release signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || 'dk64' }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning title=Debug-signed APK::No ANDROID_KEYSTORE_BASE64 secret. The APK is signed with a throwaway key, so it can't be installed over a previous build without uninstalling first."
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          {
+            echo "BT_KEYSTORE_FILE=$RUNNER_TEMP/release.keystore"
+            echo "BT_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "BT_KEY_ALIAS=$KEY_ALIAS"
+            echo "BT_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+          # The certificate the APK should carry, for the check after the build.
+          keytool -exportcert -rfc -keystore "$RUNNER_TEMP/release.keystore" -storepass "$KEYSTORE_PASSWORD" \
+            -alias "$KEY_ALIAS" > "$RUNNER_TEMP/release-cert.pem"
+
+      - name: Build APK
+        run: |
+          set -o pipefail
+          if ./gradlew assembleRelease --stacktrace 2>&1 | tee "$RUNNER_TEMP/gradle.log"; then
+            exit 0
+          fi
+          # Surface the actual errors as annotations (shown on the run page, and readable
+          # through the API without downloading the full log).
+          annotate() {
+            local title="$1" text="$2"
+            [ -n "$text" ] || return 0
+            text="${text//'%'/'%25'}"; text="${text//$'\r'/}"; text="${text//$'\n'/'%0A'}"
+            echo "::error title=${title}::${text}"
+          }
+          annotate "Gradle: what went wrong" "$(sed -n '/^\* What went wrong:/,/^\* Try:/p' "$RUNNER_TEMP/gradle.log" | head -n 60)"
+          annotate "First compiler/CMake errors" "$(grep -n -m 25 -E 'error:|CMake Error|FAILED:|fatal error|undefined (symbol|reference)' "$RUNNER_TEMP/gradle.log")"
+          annotate "Log tail" "$(tail -n 40 "$RUNNER_TEMP/gradle.log")"
+          exit 1
+
+      - name: Compiler cache stats
+        if: always()
+        run: ccache --show-stats || true
+
+      - name: Check the signature
+        # The APK must carry the release certificate, or it won't install over earlier builds.
+        run: |
+          apk=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
+          apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
+          "$apksigner" verify --print-certs "$apk" | tee "$RUNNER_TEMP/apk-certs.txt"
+          apk_sha=$(sed -n 's/.*certificate SHA-256 digest: //p' "$RUNNER_TEMP/apk-certs.txt" | head -n 1)
+          echo "APK certificate SHA-256: $apk_sha"
+          echo "::notice title=APK certificate SHA-256::$apk_sha"
+          if [ -f "$RUNNER_TEMP/release-cert.pem" ]; then
+            want=$(openssl x509 -in "$RUNNER_TEMP/release-cert.pem" -outform der | sha256sum | cut -d' ' -f1)
+            if [ "$apk_sha" != "$want" ]; then
+              echo "::error title=Wrong signature::The APK's certificate ($apk_sha) is not the release key's ($want)."
+              exit 1
+            fi
+            echo "Signed with the release key."
+          fi
+
+      - name: Name the APK
+        run: |
+          version=$(sed -n "s/^def appVersion = '\(.*\)'/\1/p" app/build.gradle)
+          mkdir -p dist
+          cp app/build/outputs/apk/release/*.apk "dist/BanjoTooieRecompiled-Android-v${version}-$(git rev-parse --short=7 HEAD).apk"
+          ls -l dist
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BanjoTooieRecompiled-Android-arm64-v8a
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 30
