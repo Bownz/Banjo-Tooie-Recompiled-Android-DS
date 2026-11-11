@@ -46,6 +46,8 @@ import java.util.concurrent.CountDownLatch;
  *  - A blocking document picker that the native nfd replacement calls over JNI.
  *  - Touch controls ({@link TouchControllerView}) as an overlay when there's no physical
  *    gamepad (or always / never, per Input > Touch > Touch Controls).
+ *  - The bottom screen ({@link BottomScreenView}) on a second display, if there is one (e.g.
+ *    the AYN Thor's lower screen), through {@link SecondScreenPresentation}.
  *  - The graphics driver choice ({@link GpuDrivers}), crash detection and log sharing
  *    ({@link Diagnostics}).
  *  - Game-friendly window behaviour: immersive fullscreen, screen kept on, drawing into
@@ -66,6 +68,8 @@ public class BTActivity extends SDLActivity
     private DisplayManager displayManager;
     private InputManager inputManager;
     private TouchControllerView overlay;
+    private SecondScreenPresentation presentation;
+    private boolean started;
 
     private final Object pickLock = new Object();
     private CountDownLatch pickLatch;
@@ -115,6 +119,21 @@ public class BTActivity extends SDLActivity
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        started = true;
+        updateTouchControls();
+    }
+
+    @Override
+    protected void onStop() {
+        // A Presentation is a window of this activity: it must go when the activity stops.
+        started = false;
+        dismissPresentation();
+        super.onStop();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         storage.onResume();
@@ -134,6 +153,9 @@ public class BTActivity extends SDLActivity
         if (overlay != null) {
             overlay.releaseAll();
         }
+        if (presentation != null && presentation.getBottomScreen() != null) {
+            presentation.getBottomScreen().cancel();
+        }
         displayManager.unregisterDisplayListener(this);
         inputManager.unregisterInputDeviceListener(this);
         Diagnostics.markLeaving(this);
@@ -144,6 +166,7 @@ public class BTActivity extends SDLActivity
     @Override
     protected void onDestroy() {
         Diagnostics.markLeaving(this);
+        dismissPresentation();
         TouchInput.shutdown();
         super.onDestroy();
     }
@@ -347,13 +370,74 @@ public class BTActivity extends SDLActivity
         return getSharedPreferences(PREFS_TOUCH, MODE_PRIVATE).getInt("touch_controls", 0);
     }
 
-    /** Shows the on-screen controller when it's wanted. */
+    /** Shows the on-screen controller when it's wanted, and the bottom screen if there's one. */
     private void updateTouchControls() {
         if (overlay == null) {
             return;
         }
         int mode = touchControlsPref();
         overlay.setActive(mode == 1 || (mode == 0 && !hasPhysicalGamepad()));
+
+        Display second = started && bottomScreenEnabled() ? findSecondDisplay() : null;
+        if (second == null || (presentation != null && presentation.getDisplay().getDisplayId() != second.getDisplayId())) {
+            dismissPresentation();
+        }
+        if (second != null && presentation == null) {
+            showPresentation(second);
+        }
+    }
+
+    // ------------------------------------------------------------------------------
+    // Bottom screen (a second display)
+    // ------------------------------------------------------------------------------
+
+    /** Input > Dual Screen > Bottom Screen (kept here too, so it applies from the start). */
+    private boolean bottomScreenEnabled() {
+        return getSharedPreferences(PREFS_TOUCH, MODE_PRIVATE).getBoolean("bottom_screen", true);
+    }
+
+    /** From the game's settings (any thread): "1" on, "0" off. */
+    @SuppressWarnings("unused")
+    public String setBottomScreen(String on) {
+        getSharedPreferences(PREFS_TOUCH, MODE_PRIVATE).edit().putBoolean("bottom_screen", "1".equals(on)).apply();
+        runOnUiThread(this::updateTouchControls);
+        return null;
+    }
+
+    /** A display other than ours that can host a presentation, if any. */
+    @SuppressWarnings("deprecation")
+    private Display findSecondDisplay() {
+        Display ours = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ? getDisplay() : getWindowManager().getDefaultDisplay();
+        for (Display display : displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)) {
+            if ((ours == null || display.getDisplayId() != ours.getDisplayId()) && display.isValid()) {
+                return display;
+            }
+        }
+        return null;
+    }
+
+    private void showPresentation(Display display) {
+        try {
+            presentation = new SecondScreenPresentation(this, display);
+            presentation.setOnDismissListener(d -> {
+                if (presentation == d) {
+                    presentation = null;
+                }
+            });
+            presentation.show();
+            Log.i(TAG, "Bottom screen on display " + display.getDisplayId() + " (" + display.getName() + ")");
+        } catch (WindowManager.InvalidDisplayException e) {
+            Log.w(TAG, "Second display went away", e);
+            presentation = null;
+        }
+    }
+
+    private void dismissPresentation() {
+        if (presentation != null) {
+            SecondScreenPresentation old = presentation;
+            presentation = null;
+            old.dismiss();
+        }
     }
 
     /** From the game's settings (any thread): "" reads the mode, "0"-"2" sets it. */
@@ -400,8 +484,8 @@ public class BTActivity extends SDLActivity
     @Override public void onInputDeviceRemoved(int deviceId) { updateTouchControls(); }
     @Override public void onInputDeviceChanged(int deviceId) { updateTouchControls(); }
 
-    @Override public void onDisplayAdded(int displayId) { }
-    @Override public void onDisplayRemoved(int displayId) { }
+    @Override public void onDisplayAdded(int displayId) { updateTouchControls(); }
+    @Override public void onDisplayRemoved(int displayId) { updateTouchControls(); }
     @Override public void onDisplayChanged(int displayId) {
         // Folding or unfolding moves the window to a different screen with its own modes.
         Display d = getWindow().getDecorView().getDisplay();

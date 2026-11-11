@@ -189,3 +189,8 @@ extern "C" void bt_android_set_touch_controls_mode(int mode) {
 extern "C" void bt_android_edit_touch_layout() {
     call_activity("editTouchLayout", "");
 }
+
+// Input > Dual Screen > Bottom Screen: shows or hides the second-screen view.
+extern "C" void bt_android_set_bottom_screen(int enabled) {
+    call_activity("setBottomScreen", enabled ? "1" : "0");
+}

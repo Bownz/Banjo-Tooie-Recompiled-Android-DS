@@ -33,6 +33,7 @@
 
 extern "C" void bt_android_set_touch_controls_mode(int mode);   // android/jni/touch_controller.cpp
 extern "C" void bt_android_edit_touch_layout();                  // android/jni/touch_controller.cpp
+extern "C" void bt_android_set_bottom_screen(int enabled);        // android/jni/touch_controller.cpp
 
 namespace {
     using EnumOptionVector = const std::vector<recomp::config::ConfigOptionEnumOption>;
@@ -43,6 +44,8 @@ namespace {
     std::atomic<bool> drag_camera{ true };
     std::atomic<int> drag_camera_speed{ 3 };
     std::atomic<int> touch_feedback{ 2 };   // 0 off, 1 light, 2 medium, 3 strong
+    std::atomic<bool> bottom_buttons{ true };
+    std::atomic<bool> cutscene_dim{ true };
 
     std::filesystem::path config_file(const char* name) {
         return recomp::get_config_path() / name;
@@ -130,6 +133,48 @@ namespace {
         config.add_option_change_callback("android_touch_feedback",
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
                 touch_feedback.store(static_cast<int>(std::get<uint32_t>(cur)));
+                save_touch_config(context);
+            });
+
+        // Dual Screen (a second display, such as the AYN Thor's lower screen).
+        config.add_enum_option(
+            "android_bottom_screen",
+            "Bottom Screen",
+            "On a device with a second screen (like the AYN Thor), show the character, collectibles and "
+            "one-tap move buttons there.",
+            on_off,
+            1u
+        );
+        config.add_option_change_callback("android_bottom_screen",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
+                if (context != recomp::config::OptionChangeContext::Temporary) {
+                    bt_android_set_bottom_screen(std::get<uint32_t>(cur) == 1u ? 1 : 0);
+                }
+                save_touch_config(context);
+            });
+        config.add_enum_option(
+            "android_bottom_buttons",
+            "Bottom Screen Buttons",
+            "A column of buttons on the bottom screen for moves that need button combinations: eggs, "
+            "Talon Trot, Wonderwing, Flap Flip, Beak Barge, Beak Bust and first person.",
+            on_off,
+            1u
+        );
+        config.add_option_change_callback("android_bottom_buttons",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
+                bottom_buttons.store(std::get<uint32_t>(cur) == 1u);
+                save_touch_config(context);
+            });
+        config.add_enum_option(
+            "android_cutscene_dim",
+            "Dim During Cutscenes",
+            "The bottom screen dims while a cutscene plays, and comes back when it ends.",
+            on_off,
+            1u
+        );
+        config.add_option_change_callback("android_cutscene_dim",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
+                cutscene_dim.store(std::get<uint32_t>(cur) == 1u);
                 save_touch_config(context);
             });
     }
@@ -393,6 +438,10 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
         option(t, "android_drag_camera"),
         option(t, "android_drag_camera_speed"),
         option(t, "android_touch_feedback"),
+        header("Dual Screen"),
+        option(t, "android_bottom_screen"),
+        option(t, "android_bottom_buttons"),
+        option(t, "android_cutscene_dim"),
     }, { g, t });
 
     recompui::config::create_sound_tab("Audio");
@@ -496,4 +545,10 @@ Java_io_github_bownz_btrecomp_TouchInput_nativeDragSpeed(JNIEnv*, jclass) {
 extern "C" JNIEXPORT jint JNICALL
 Java_io_github_bownz_btrecomp_TouchInput_nativeTouchFeedback(JNIEnv*, jclass) {
     return touch_feedback.load();
+}
+
+// Bottom Screen Buttons / Dim During Cutscenes (BottomScreenView polls these).
+extern "C" JNIEXPORT jint JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeBottomSettings(JNIEnv*, jclass) {
+    return (bottom_buttons.load() ? 1 : 0) | (cutscene_dim.load() ? 2 : 0);
 }
