@@ -112,14 +112,6 @@ nfdresult_t NFD_OpenDialogU8(nfdu8char_t** outPath, const nfdu8filteritem_t* fil
     return NFD_OpenDialogN(outPath, filterList, filterCount, defaultPath);
 }
 
-nfdresult_t NFD_OpenDialogN_With_Impl(nfdversion_t, nfdnchar_t** outPath, const nfdopendialognargs_t* args) {
-    return NFD_OpenDialogN(outPath, args->filterList, args->filterCount, args->defaultPath);
-}
-
-nfdresult_t NFD_OpenDialogU8_With_Impl(nfdversion_t version, nfdu8char_t** outPath, const nfdopendialogu8args_t* args) {
-    return NFD_OpenDialogN_With_Impl(version, outPath, args);
-}
-
 // ---- Multiple files --------------------------------------------------------------
 
 nfdresult_t NFD_OpenDialogMultipleN(const nfdpathset_t** outPaths, const nfdnfilteritem_t*, nfdfiltersize_t, const nfdnchar_t*) {
@@ -149,14 +141,6 @@ nfdresult_t NFD_OpenDialogMultipleU8(const nfdpathset_t** outPaths, const nfdu8f
     return NFD_OpenDialogMultipleN(outPaths, filterList, filterCount, defaultPath);
 }
 
-nfdresult_t NFD_OpenDialogMultipleN_With_Impl(nfdversion_t, const nfdpathset_t** outPaths, const nfdopendialognargs_t* args) {
-    return NFD_OpenDialogMultipleN(outPaths, args->filterList, args->filterCount, args->defaultPath);
-}
-
-nfdresult_t NFD_OpenDialogMultipleU8_With_Impl(nfdversion_t version, const nfdpathset_t** outPaths, const nfdopendialogu8args_t* args) {
-    return NFD_OpenDialogMultipleN_With_Impl(version, outPaths, args);
-}
-
 // ---- Not supported on Android ----------------------------------------------------
 // The system picker returns document URIs, not directories or writable paths, so
 // these report an error. Users can reach the app folder directly instead
@@ -169,25 +153,12 @@ nfdresult_t NFD_SaveDialogN(nfdnchar_t**, const nfdnfilteritem_t*, nfdfiltersize
 nfdresult_t NFD_SaveDialogU8(nfdu8char_t** outPath, const nfdu8filteritem_t* filterList, nfdfiltersize_t filterCount, const nfdu8char_t* defaultPath, const nfdu8char_t* defaultName) {
     return NFD_SaveDialogN(outPath, filterList, filterCount, defaultPath, defaultName);
 }
-nfdresult_t NFD_SaveDialogN_With_Impl(nfdversion_t, nfdnchar_t** outPath, const nfdsavedialognargs_t* args) {
-    return NFD_SaveDialogN(outPath, args->filterList, args->filterCount, args->defaultPath, args->defaultName);
-}
-nfdresult_t NFD_SaveDialogU8_With_Impl(nfdversion_t version, nfdu8char_t** outPath, const nfdsavedialogu8args_t* args) {
-    return NFD_SaveDialogN_With_Impl(version, outPath, args);
-}
-
 nfdresult_t NFD_PickFolderN(nfdnchar_t**, const nfdnchar_t*) {
     set_error("Folder dialogs are not supported on Android");
     return NFD_ERROR;
 }
 nfdresult_t NFD_PickFolderU8(nfdu8char_t** outPath, const nfdu8char_t* defaultPath) {
     return NFD_PickFolderN(outPath, defaultPath);
-}
-nfdresult_t NFD_PickFolderN_With_Impl(nfdversion_t, nfdnchar_t** outPath, const nfdpickfoldernargs_t* args) {
-    return NFD_PickFolderN(outPath, args->defaultPath);
-}
-nfdresult_t NFD_PickFolderU8_With_Impl(nfdversion_t version, nfdu8char_t** outPath, const nfdpickfolderu8args_t* args) {
-    return NFD_PickFolderN_With_Impl(version, outPath, args);
 }
 nfdresult_t NFD_PickFolderMultipleN(const nfdpathset_t**, const nfdnchar_t*) {
     set_error("Folder dialogs are not supported on Android");
@@ -196,13 +167,6 @@ nfdresult_t NFD_PickFolderMultipleN(const nfdpathset_t**, const nfdnchar_t*) {
 nfdresult_t NFD_PickFolderMultipleU8(const nfdpathset_t** outPaths, const nfdu8char_t* defaultPath) {
     return NFD_PickFolderMultipleN(outPaths, defaultPath);
 }
-nfdresult_t NFD_PickFolderMultipleN_With_Impl(nfdversion_t, const nfdpathset_t** outPaths, const nfdpickfoldernargs_t* args) {
-    return NFD_PickFolderMultipleN(outPaths, args->defaultPath);
-}
-nfdresult_t NFD_PickFolderMultipleU8_With_Impl(nfdversion_t version, const nfdpathset_t** outPaths, const nfdpickfolderu8args_t* args) {
-    return NFD_PickFolderMultipleN_With_Impl(version, outPaths, args);
-}
-
 // ---- Path sets -------------------------------------------------------------------
 
 nfdresult_t NFD_PathSet_GetCount(const nfdpathset_t* pathSet, nfdpathsetsize_t* count) {

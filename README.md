@@ -19,6 +19,7 @@ widescreen, high refresh rates, and an in-game settings menu.
 ## Table of Contents
 
 * [Status](#status)
+* [Android](#android)
 * [System Requirements](#system-requirements)
 * [Dependencies](#dependencies)
 * [Building](#building)
@@ -41,6 +42,13 @@ build is newer — see [Known Limitations](#known-limitations).
 
 The one known visual limitation is described under
 [Known Limitations](#known-limitations).
+
+## Android
+
+An Android port (arm64, Android 9+, Vulkan 1.1) is being built on the `android-port`
+branch, with dual-screen support for handhelds like the AYN Thor. It runs the same
+recompiled code; the player picks their own ROM on the device. Building it needs no ROM:
+see [BUILDING-ANDROID.md](BUILDING-ANDROID.md).
 
 ## System Requirements
 
