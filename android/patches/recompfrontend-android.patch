@@ -1166,7 +1166,7 @@ index 6c84c05..9a90083 100644
 +        if (id == config::controls::id) {
 +            return 1;
 +        }
-+        if (id == config::mods::id || id == config::mod_discovery::id || id == "technical") {
++        if (id == config::mods::id || id == std::string("mod_discovery") || id == "technical") {
 +            return 2;
 +        }
 +        return 0;
@@ -1177,7 +1177,7 @@ index 6c84c05..9a90083 100644
 +    // Find Mods (downloading and installing) only before the game starts: installing a mod
 +    // turns it on, and loading a mod into the running game crashed it.
 +    static bool tab_unavailable(const PendingTab &tab) {
-+        return tab.hidden || (tab.id == config::mod_discovery::id && ultramodern::is_game_started());
++        return tab.hidden || (tab.id == std::string("mod_discovery") && ultramodern::is_game_started());
 +    }
 +
 +    static void show_tab_group(const std::string &id) {
