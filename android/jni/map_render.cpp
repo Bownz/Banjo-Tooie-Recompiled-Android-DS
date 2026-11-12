@@ -34,8 +34,8 @@ namespace {
     constexpr uint32_t kCollisionPtr = 0x801285B0u;   // collision list
     constexpr uint32_t kModelPtr = 0x801285BCu;       // map model (header magic 0x0B)
     constexpr uint32_t kTextureBlockPtr = 0x801285D4u;  // assembled textures, when referenced by id
-    // The area's second model: its see-through layer (water: Spiral Mountain's moat, river and
-    // pool). Pointer next to the map model's in another table; its assembled textures.
+    // The area's second model: its see-through layer (Spiral Mountain: the water; Jinjo Village:
+    // grey mist/scenery). Pointer next to the map model's in another table; its assembled textures.
     constexpr uint32_t kSecondModelPtr = 0x8012B458u;
     constexpr uint32_t kSecondTextureBlockPtr = 0x80128788u;
     constexpr uint32_t kSegment3 = 0x8011A650u;       // shared render-mode sub-lists
@@ -57,6 +57,7 @@ namespace {
     struct Texture {
         int w = 0, h = 0;
         std::vector<Rgba> px;
+        bool bluish = false;   // average colour clearly blue: water
     };
 
     Rgba from5551(uint16_t v) {
@@ -292,6 +293,10 @@ namespace {
                             Texture t;
                             if (image == 0 || !decode(ram, image, info.fmt, info.siz, info.w, info.h, tlut, tlutIA, t)) {
                                 t = Texture{};
+                            } else {
+                                double r = 0, g = 0, b = 0;
+                                for (const Rgba& c : t.px) { r += c.r; g += c.g; b += c.b; }
+                                t.bluish = b > r * 1.25 && b > g * 1.1;
                             }
                             cached = textures.emplace(key, std::move(t)).first;
                         }
@@ -315,7 +320,7 @@ namespace {
                         if (!ok) continue;
                         tri.tex = current;
                         tri.tile = tile;
-                        tri.water = water;
+                        tri.water = water;   // checked against the texture and height later
                         tris.push_back(tri);
                     }
                     break;
@@ -454,7 +459,22 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
     std::map<std::tuple<uint32_t, int, int, int, int, uint32_t, bool>, Texture> textures;
     std::vector<Floor> floors;
     if (!collect(ram, kModelPtr, kTextureBlockPtr, false, tris, textures) || !collectFloors(ram, floors)) return false;
-    collect(ram, kSecondModelPtr, kSecondTextureBlockPtr, true, tris, textures);   // water, when the area has it
+    // The second (see-through) model: only its water is drawn: bluish textures at about the
+    // ground's height. In Spiral Mountain that's the moat, river and pool; Jinjo Village's is
+    // grey mist/scenery from far below the island to far above it (not drawn).
+    {
+        std::vector<Tri> second;
+        if (collect(ram, kSecondModelPtr, kSecondTextureBlockPtr, true, second, textures)) {
+            std::vector<float> fy;
+            for (const Floor& f : floors) fy.push_back((f.p[0][1] + f.p[1][1] + f.p[2][1]) / 3.0f);
+            std::sort(fy.begin(), fy.end());
+            const float low = fy[fy.size() / 100] - 300.0f, high = fy[fy.size() / 2] + 1500.0f;
+            for (const Tri& t : second) {
+                const float y = (t.v[0].y + t.v[1].y + t.v[2].y) / 3.0f;
+                if (t.tex != nullptr && t.tex->bluish && y >= low && y <= high) tris.push_back(t);
+            }
+        }
+    }
 
     // Fit the walkable floors (with a margin) into at most maxSize pixels.
     float minX = 1e9f, maxX = -1e9f, minZ = 1e9f, maxZ = -1e9f;
