@@ -34,6 +34,10 @@ namespace {
     constexpr uint32_t kCollisionPtr = 0x801285B0u;   // collision list
     constexpr uint32_t kModelPtr = 0x801285BCu;       // map model (header magic 0x0B)
     constexpr uint32_t kTextureBlockPtr = 0x801285D4u;  // assembled textures, when referenced by id
+    // The area's second model: its see-through layer (water: Spiral Mountain's moat, river and
+    // pool). Pointer next to the map model's in another table; its assembled textures.
+    constexpr uint32_t kSecondModelPtr = 0x8012B458u;
+    constexpr uint32_t kSecondTextureBlockPtr = 0x80128788u;
     constexpr uint32_t kSegment3 = 0x8011A650u;       // shared render-mode sub-lists
     constexpr uint32_t kInvisible = 0x01000000u;      // collision flag: the boundary shell
 
@@ -134,6 +138,7 @@ namespace {
     struct Tri {
         Vertex v[3];
         const Texture* tex;
+        bool water;
         Tile tile;
     };
 
@@ -155,16 +160,20 @@ namespace {
 
     // Walks the map model's display list (F3DEX2) and collects the triangles with their
     // texture state. Textures are decoded once each (kept in `textures`).
-    bool collect(const Ram& ram, std::vector<Tri>& tris, std::map<std::tuple<uint32_t, int, int, int, int, uint32_t, bool>, Texture>& textures) {
-        const uint32_t base = ram.u32(kModelPtr);
+    bool collect(const Ram& ram, uint32_t modelPtr, uint32_t blockPtr, bool water, std::vector<Tri>& tris,
+                 std::map<std::tuple<uint32_t, int, int, int, int, uint32_t, bool>, Texture>& textures) {
+        const uint32_t base = ram.u32(modelPtr);
         if (!ram.ok(base, 0x60) || ram.u32(base) != 0x0Bu) {
             return false;
         }
         const uint32_t gfx = base + ram.u32(base + 0x0C);
         const uint32_t vtxList = base + ram.u32(base + 0x10);
         const uint32_t ownTextures = base + (ram.u32(base + 0x08) >> 16);
-        const uint32_t assembled = ram.u32(kTextureBlockPtr);
-        const uint32_t texList = (assembled >= 0x80000000u && assembled < 0x80800000u) ? assembled : ownTextures;
+        // Textures referenced by id live in an assembled copy of the texture list (same header).
+        const uint32_t assembled = ram.u32(blockPtr);
+        const bool useAssembled = ram.ok(assembled, 8) && ram.ok(ownTextures, 8) &&
+            ram.u32(assembled) == ram.u32(ownTextures) && ram.u32(assembled + 4) == ram.u32(ownTextures + 4);
+        const uint32_t texList = useAssembled ? assembled : ownTextures;
         if (!ram.ok(gfx, 8) || !ram.ok(vtxList, 0x18) || !ram.ok(texList, 8)) {
             return false;
         }
@@ -306,6 +315,7 @@ namespace {
                         if (!ok) continue;
                         tri.tex = current;
                         tri.tile = tile;
+                        tri.water = water;
                         tris.push_back(tri);
                     }
                     break;
@@ -443,7 +453,8 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
     std::vector<Tri> tris;
     std::map<std::tuple<uint32_t, int, int, int, int, uint32_t, bool>, Texture> textures;
     std::vector<Floor> floors;
-    if (!collect(ram, tris, textures) || !collectFloors(ram, floors)) return false;
+    if (!collect(ram, kModelPtr, kTextureBlockPtr, false, tris, textures) || !collectFloors(ram, floors)) return false;
+    collect(ram, kSecondModelPtr, kSecondTextureBlockPtr, true, tris, textures);   // water, when the area has it
 
     // Fit the walkable floors (with a margin) into at most maxSize pixels.
     float minX = 1e9f, maxX = -1e9f, minZ = 1e9f, maxZ = -1e9f;
@@ -460,7 +471,7 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
 
     // 1. The model from above, textured.
     std::vector<float> R(N, 0), G(N, 0), B(N, 0), top(N, -1e9f);
-    std::vector<uint8_t> drawn(N, 0);
+    std::vector<uint8_t> drawn(N, 0), water(N, 0);
     constexpr float lx = -0.47f, ly = 0.71f, lz = -0.52f;
     for (const Tri& t : tris) {
         float X[3], Z[3];
@@ -490,6 +501,7 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
             top[i] = y;
             R[i] = r * sr * light; G[i] = g * sg * light; B[i] = b * sb * light;
             drawn[i] = 1;
+            water[i] = t.water ? 1 : 0;
         });
     }
 
@@ -602,6 +614,7 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
     for (size_t i = 0; i < N; i++) nearAny[i] = drawn[i] | walk[i];
     nearAny = morph(nearAny, W, H, 8 * px, true);
     const std::vector<uint8_t> inner = morph(walk, W, H, px, false);
+    const std::vector<uint8_t> waterInner = morph(water, W, H, px, false);
 
     // 4. Compose.
     out.assign(N, 0);
@@ -609,7 +622,15 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
     constexpr float bgR = 18, bgG = 13, bgB = 26;
     for (size_t i = 0; i < N; i++) {
         float r, g, b;
-        if (walk[i]) {
+        if (water[i]) {
+            // Water: its own texture pulled towards a clear blue, no warm tint, a light shoreline.
+            r = sR[i] * 0.5f + 60 * 0.5f;
+            g = sG[i] * 0.5f + 135 * 0.5f;
+            b = sB[i] * 0.5f + 225 * 0.5f;
+            if (!waterInner[i]) {
+                r = r * 0.3f + 205 * 0.7f; g = g * 0.3f + 238 * 0.7f; b = b * 0.3f + 255 * 0.7f;
+            }
+        } else if (walk[i]) {
             const float k = std::clamp((ground[i] - lo) / std::max(1.0f, hi - lo), 0.0f, 1.0f);
             float f = 1.08f - 0.55f * k;
             // Ground well above the area's main level (outer hills) is dimmer still.
