@@ -21,8 +21,10 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <tuple>
 #include <vector>
 
@@ -130,6 +132,7 @@ namespace {
 
     struct Tile {
         int fmt = 0, siz = 0, cms = 0, cmt = 0, ms = 0, mt = 0, ss = 0, st = 0;
+        int w = 0, h = 0;   // tile size (G_SETTILESIZE), for clamping
     };
 
     struct Vertex {
@@ -142,10 +145,65 @@ namespace {
         const Texture* tex;
         bool water;
         Tile tile;
+        int group = -1;   // a selector child of the model's geometry layout, else -1
     };
 
-    int wrapCoord(float c, int size, int cm, int mask) {
+    // The model's geometry layout (BK format): a tree of nodes { u32 cmd, u32 next sibling
+    // offset, ... } whose draw nodes (cmd 3: u16 first command) each start a segment of the
+    // display list that runs to the next end marker (checked: all 366 draw nodes in Spiral
+    // Mountain start right after one). Selector nodes (cmd 0x0C: u16 child count, u16 selector id, u32 child
+    // offsets) hold alternative versions that the game switches while playing, e.g. Spiral
+    // Mountain's moat area with the bridge whole (selector 1) or broken (selector 2). Labels
+    // each display-list command with the selector child it's under (-1: always drawn).
+    void layoutGroups(const Ram& ram, uint32_t base, uint32_t gfx, uint32_t commands, std::vector<int>& group) {
+        group.assign(commands, -1);
+        const uint32_t geo = ram.u32(base + 0x04);
+        if (geo == 0 || !ram.ok(base + geo, 8)) return;
+        int nextGroup = 0;
+        int budget = 20000;
+        auto walk = [&](auto&& self, uint32_t node, int label, int depth) -> void {
+            while (node != 0 && budget-- > 0 && depth < 32 && ram.ok(node, 0x18)) {
+                const uint32_t cmd = ram.u32(node), next = ram.u32(node + 4);
+                if (cmd > 0x20) return;   // not a node: stop
+                switch (cmd) {
+                    case 0x03: {
+                        for (uint32_t i = ram.u16(node + 8); i < commands && (ram.u32(gfx + 8 + 8 * i) >> 24) != 0xDF; i++) group[i] = label;
+                        break;
+                    }
+                    case 0x0C: {
+                        const int children = ram.u16(node + 8);
+                        for (int c = 0; c < children && c < 16; c++) {
+                            const uint32_t offset = ram.u32(node + 12 + 4u * c);
+                            if (offset >= 0x10 && offset < 0x100000) self(self, node + offset, nextGroup++, depth + 1);
+                        }
+                        break;
+                    }
+                    case 0x0D: {   // bounding box / draw distance: child at the given offset
+                        const uint32_t child = ram.u16(node + 0x14);
+                        if (child >= 0x18) self(self, node + child, label, depth + 1);
+                        break;
+                    }
+                    case 0x01: {   // sort: two children (offsets at 0x22 and 0x24)
+                        const uint32_t a = ram.u16(node + 0x22), b = ram.u32(node + 0x24);
+                        if (a >= 0x10 && a < 0x100000) self(self, node + a, label, depth + 1);
+                        if (b >= 0x10 && b < 0x100000) self(self, node + b, label, depth + 1);
+                        break;
+                    }
+                    default: break;
+                }
+                if (next == 0) break;
+                node += next;
+            }
+        };
+        walk(walk, base + geo, -1, 0);
+    }
+
+    // N64 texture addressing: clamp (cm bit 2, or no mask) to the tile's size first, then
+    // wrap or mirror (bit 1) by the mask. Jinjo Village's path overlay clamps across its width
+    // (coordinates 0-127 on a 64-texel tile); wrapping it drew every path twice.
+    int wrapCoord(float c, int size, int cm, int mask, int tileSize) {
         long v = static_cast<long>(std::floor(c));
+        if (((cm & 2) || mask == 0) && tileSize > 0) v = std::clamp<long>(v, 0, tileSize - 1);
         if (mask) {
             const long period = std::min<long>(1L << mask, size);
             if (cm & 1) {
@@ -192,26 +250,45 @@ namespace {
         // display list can be stale for mipmapped textures).
         struct Info { int w, h, fmt, siz; };
         std::map<uint32_t, Info> sizes;
+        // Lists whose entries are texture ids (Isle o' Hags, 12 Nov) rather than offsets: the
+        // textures are packed in list order, a mipmapped one (type bit 0x8000) followed by its
+        // smaller levels (half its size again). Checked: the packed total matches the list's
+        // header exactly (Jinjo Village 0x33FC0); the offsets read as ids put the 32x32 path
+        // texture at a 64x64 entry's place, so paths were drawn twice across.
+        bool packed = ram.u32(texList + 8) != 0;
+        {
+            uint32_t total = 0;
+            for (int k = 0; k < texCount; k++) {
+                const uint32_t word = ram.u32(texList + 12 + 8u * k);
+                const int type = (word >> 16) & 0xFF, w = (word >> 8) & 0xFF, h = word & 0xFF;
+                const int bits = type == 0x01 ? 4 : type == 0x02 ? 8 : type == 0x04 ? 16 : type == 0x08 ? 32 : type == 0x10 ? 8 : 0;
+                const uint32_t pixels = uint32_t(w * h * bits / 8);
+                total += (type == 0x01 ? 0x20u : type == 0x02 ? 0x200u : 0u) + pixels + ((word & 0x80000000u) ? pixels / 2 : 0u);
+            }
+            if (packed && total != ram.u32(texList)) packed = false;
+        }
+        uint32_t packedAt = 0;
         for (int k = 0; k < texCount; k++) {
             const uint32_t entry = texList + 8 + 8u * k;
             const uint32_t offset = ram.u32(entry);
             const uint32_t word = ram.u32(entry + 4);
             const int type = (word >> 16) & 0x7FFF;
             const int w = (word >> 8) & 0xFF, h = word & 0xFF;
-            int fmt = -1, siz = 0;
+            int fmt = -1, siz = 0, bits = 0;
+            uint32_t palette = 0;
             switch (type & 0xFF) {
-                case 0x01: fmt = 2; siz = 0; break;   // CI4
-                case 0x02: fmt = 2; siz = 1; break;   // CI8
-                case 0x04: fmt = 0; siz = 2; break;   // RGBA16
-                case 0x08: fmt = 0; siz = 3; break;   // RGBA32
-                case 0x10: fmt = 3; siz = 1; break;   // IA8
+                case 0x01: fmt = 2; siz = 0; bits = 4; palette = 0x20; break;    // CI4
+                case 0x02: fmt = 2; siz = 1; bits = 8; palette = 0x200; break;   // CI8
+                case 0x04: fmt = 0; siz = 2; bits = 16; break;   // RGBA16
+                case 0x08: fmt = 0; siz = 3; bits = 32; break;   // RGBA32
+                case 0x10: fmt = 3; siz = 1; bits = 8; break;    // IA8
                 default: break;
             }
-            const uint32_t at = texData + offset;
+            const uint32_t at = texData + (packed ? packedAt : offset);
+            const uint32_t pixels = uint32_t(w * h * bits / 8);
+            packedAt += palette + pixels + ((word & 0x80000000u) ? pixels / 2 : 0u);
             const Info info{ w, h, fmt, siz };
-            sizes[at] = info;
-            sizes[at + 0x20] = info;    // after a CI4 palette
-            sizes[at + 0x200] = info;   // after a CI8 palette
+            sizes.try_emplace(at + palette, info);   // the texels (after a palette)
         }
 
         auto segment = [&](uint32_t a) -> uint32_t {
@@ -220,6 +297,11 @@ namespace {
             if (s == 2) return texData + o;
             return 0;
         };
+
+        std::vector<int> groups;
+        layoutGroups(ram, base, gfx, commands, groups);
+        int currentGroup = -1;
+        const int groupBase = water ? 1000 : 0;   // keeps the two models' groups apart
 
         std::array<Vertex, 64> vbuf{};
         uint32_t timg = 0, tlut = 0, image = 0;
@@ -246,7 +328,7 @@ namespace {
                 case 0xF5:
                     if (((w1 >> 24) & 7) == 0) {
                         tile = { int((w0 >> 21) & 7), int((w0 >> 19) & 3), int((w1 >> 8) & 3), int((w1 >> 18) & 3),
-                                 int((w1 >> 4) & 15), int((w1 >> 14) & 15), int(w1 & 15), int((w1 >> 10) & 15) };
+                                 int((w1 >> 4) & 15), int((w1 >> 14) & 15), int(w1 & 15), int((w1 >> 10) & 15), tw, th };
                         dirty = true;
                     }
                     break;
@@ -256,6 +338,7 @@ namespace {
                         ult = (w0 & 0xFFF) / 4.0f;
                         tw = int(((w1 >> 12) & 0xFFF) / 4.0f - uls) + 1;
                         th = int((w1 & 0xFFF) / 4.0f - ult) + 1;
+                        tile.w = tw; tile.h = th;
                         dirty = true;
                     }
                     break;
@@ -321,6 +404,7 @@ namespace {
                         if (!ok) continue;
                         tri.tex = current;
                         tri.tile = tile;
+                        tri.group = currentGroup;
                         tri.water = water;   // checked against the texture and height later
                         tris.push_back(tri);
                     }
@@ -331,6 +415,7 @@ namespace {
         };
 
         for (uint32_t i = 0; i < commands; i++) {
+            currentGroup = groups[i] < 0 ? -1 : groupBase + groups[i];
             const uint32_t a = gfx + 8 + 8 * i;
             const uint32_t w0 = ram.u32(a), w1 = ram.u32(a + 4);
             if ((w0 >> 24) == 0xDE && (w1 >> 24) == 3) {
@@ -460,6 +545,50 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
     std::map<std::tuple<uint32_t, int, int, int, int, uint32_t, bool>, Texture> textures;
     std::vector<Floor> floors;
     if (!collect(ram, kModelPtr, kTextureBlockPtr, false, tris, textures) || !collectFloors(ram, floors)) return false;
+    // Alternative versions in the model (selector children): keep the ones the level's
+    // collision agrees with. A version's ground that has no collision floor at its height
+    // under it isn't there right now (Spiral Mountain's whole bridge, when it's broken).
+    {
+        std::map<int, std::pair<float, float>> score;   // group -> matched area, total area
+        for (const Tri& t : tris) {
+            if (t.group < 0) continue;
+            const float ax = t.v[1].x - t.v[0].x, ay = t.v[1].y - t.v[0].y, az = t.v[1].z - t.v[0].z;
+            const float bx = t.v[2].x - t.v[0].x, by = t.v[2].y - t.v[0].y, bz = t.v[2].z - t.v[0].z;
+            const float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+            const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (len <= 0 || ny / len < 0.6f) continue;
+            const float area = len / 2;
+            const float cx = (t.v[0].x + t.v[1].x + t.v[2].x) / 3, cy = (t.v[0].y + t.v[1].y + t.v[2].y) / 3, cz = (t.v[0].z + t.v[1].z + t.v[2].z) / 3;
+            bool matched = false;
+            for (const Floor& f : floors) {
+                const float* a = f.p[0]; const float* b = f.p[1]; const float* c = f.p[2];
+                if (cx < std::min({ a[0], b[0], c[0] }) || cx > std::max({ a[0], b[0], c[0] }) ||
+                    cz < std::min({ a[2], b[2], c[2] }) || cz > std::max({ a[2], b[2], c[2] })) continue;
+                const float d = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+                if (std::fabs(d) < 1e-6f) continue;
+                const float l0 = ((b[2] - c[2]) * (cx - c[0]) + (c[0] - b[0]) * (cz - c[2])) / d;
+                const float l1 = ((c[2] - a[2]) * (cx - c[0]) + (a[0] - c[0]) * (cz - c[2])) / d;
+                const float l2 = 1.0f - l0 - l1;
+                if (l0 < -0.01f || l1 < -0.01f || l2 < -0.01f) continue;
+                if (std::fabs(l0 * a[1] + l1 * b[1] + l2 * c[1] - cy) < 40.0f) { matched = true; break; }
+            }
+            auto& sc = score[t.group];
+            sc.second += area;
+            if (matched) sc.first += area;
+        }
+        std::set<int> drop;
+        for (const auto& [g, sc] : score) {
+            const bool keep = sc.second <= 0 || sc.first >= 0.5f * sc.second;
+#ifdef BT_MAP_TEST
+            std::fprintf(stderr, "group %d: %.0f of %.0f matched -> %s\n", g, sc.first, sc.second, keep ? "kept" : "left out");
+#endif
+            if (!keep) drop.insert(g);
+        }
+        if (!drop.empty()) {
+            tris.erase(std::remove_if(tris.begin(), tris.end(), [&](const Tri& t) { return drop.count(t.group) != 0; }), tris.end());
+        }
+    }
+
     // A floor layer (Banjo under another floor): leave out everything entirely above capY.
     if (capY < 1e8f) {
         tris.erase(std::remove_if(tris.begin(), tris.end(), [&](const Tri& t) {
@@ -520,8 +649,8 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
             if (t.tex != nullptr) {
                 const float s = l0 * t.v[0].s + l1 * t.v[1].s + l2 * t.v[2].s;
                 const float tt = l0 * t.v[0].t + l1 * t.v[1].t + l2 * t.v[2].t;
-                const int si = wrapCoord(s, t.tex->w, t.tile.cms, t.tile.ms);
-                const int ti = wrapCoord(tt, t.tex->h, t.tile.cmt, t.tile.mt);
+                const int si = wrapCoord(s, t.tex->w, t.tile.cms, t.tile.ms, std::min(t.tile.w, t.tex->w));
+                const int ti = wrapCoord(tt, t.tex->h, t.tile.cmt, t.tile.mt, std::min(t.tile.h, t.tex->h));
                 const Rgba& c = t.tex->px[size_t(ti) * t.tex->w + si];
                 if (c.a <= 32) return;
                 r = c.r; g = c.g; b = c.b;
@@ -674,7 +803,11 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
             if (main[i] && sizes[size_t(label[i])] < biggest / 25) main[i] = 0;
     }
     const std::vector<uint8_t> inner = morph(main, W, H, px, false);
-    const std::vector<uint8_t> waterInner = morph(water, W, H, px, false);
+    // The outline goes only where the play area meets empty space (the map's edge), not
+    // along water or raised scenery inside it (Spiral Mountain's lair roof).
+    std::vector<uint8_t> nearEmpty(N);
+    for (size_t i = 0; i < N; i++) nearEmpty[i] = !(main[i] || water[i] || drawn[i] || walk[i]);
+    nearEmpty = morph(nearEmpty, W, H, 2 * px, true);
 
     // Definition: the surface height everywhere something is drawn; dark lines at the foot of
     // every height jump (rocks, houses, ledges, steps), a light edge on top of it, and soft
@@ -734,13 +867,11 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
     for (size_t i = 0; i < N; i++) {
         float r, g, b;
         if (water[i]) {
-            // Water: its own texture pulled towards a clear blue, no warm tint, a light shoreline.
+            // Water: its own texture pulled towards a clear blue, no warm tint. (No shoreline:
+            // the ground's own edge shading shows it; the user preferred it without, 12 Nov.)
             r = sR[i] * 0.5f + 60 * 0.5f;
             g = sG[i] * 0.5f + 135 * 0.5f;
             b = sB[i] * 0.5f + 225 * 0.5f;
-            if (!waterInner[i]) {
-                r = r * 0.3f + 205 * 0.7f; g = g * 0.3f + 238 * 0.7f; b = b * 0.3f + 255 * 0.7f;
-            }
         } else if (main[i]) {
             const float k = std::clamp((ground[i] - lo) / std::max(1.0f, hi - lo), 0.0f, 1.0f);
             float f = 1.08f - 0.55f * k;
@@ -752,7 +883,7 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
             r = (grey + (r - grey) * saturation) * f * footShade[i];
             g = (grey + (g - grey) * saturation) * f * footShade[i];
             b = (grey + (b - grey) * saturation) * f * footShade[i];
-            if (!inner[i]) {   // the outline
+            if (!inner[i] && nearEmpty[i]) {   // the outline: only where the map ends
                 r = r * 0.1f + 255 * 0.9f; g = g * 0.1f + 236 * 0.9f; b = b * 0.1f + 190 * 0.9f;
             }
         } else if ((drawn[i] || walk[i]) && fade[i] > 0.02f) {
@@ -784,21 +915,37 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
 
 // Whether some walkable floor lies directly above (x, z), more than 200 units over y: Banjo is
 // under another floor (a lower storey), so the map should show his layer.
+// Whether Banjo (at x, y, z) is under another storey: a floor between 200 and 1500 units
+// above him there and all around him (at least 7 of 9 points 400 units apart, the middle
+// one included). The upper limit leaves out cliffs far above (Spiral Mountain's rock over
+// the lair entrance is about 2,800 up); needing the area around him leaves out arches,
+// bridges and ledges he walks under (the island's spiral path under its top).
 bool bt_floor_above(const uint8_t* rdram, float x, float y, float z) {
     const Ram ram{ rdram };
     std::vector<Floor> floors;
     if (!collectFloors(ram, floors)) return false;
-    for (const Floor& f : floors) {
-        const float* a = f.p[0]; const float* b = f.p[1]; const float* c = f.p[2];
-        const float d = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
-        if (std::fabs(d) < 1e-6f) continue;
-        const float l0 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / d;
-        const float l1 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / d;
-        const float l2 = 1.0f - l0 - l1;
-        if (l0 < 0 || l1 < 0 || l2 < 0) continue;
-        if (l0 * a[1] + l1 * b[1] + l2 * c[1] > y + 200.0f) return true;
-    }
-    return false;
+    auto above = [&](float px, float pz) {
+        for (const Floor& f : floors) {
+            const float* a = f.p[0]; const float* b = f.p[1]; const float* c = f.p[2];
+            if (px < std::min({ a[0], b[0], c[0] }) || px > std::max({ a[0], b[0], c[0] }) ||
+                pz < std::min({ a[2], b[2], c[2] }) || pz > std::max({ a[2], b[2], c[2] })) continue;
+            const float d = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+            if (std::fabs(d) < 1e-6f) continue;
+            const float l0 = ((b[2] - c[2]) * (px - c[0]) + (c[0] - b[0]) * (pz - c[2])) / d;
+            const float l1 = ((c[2] - a[2]) * (px - c[0]) + (a[0] - c[0]) * (pz - c[2])) / d;
+            const float l2 = 1.0f - l0 - l1;
+            if (l0 < 0 || l1 < 0 || l2 < 0) continue;
+            const float h = l0 * a[1] + l1 * b[1] + l2 * c[1];
+            if (h > y + 200.0f && h < y + 1500.0f) return true;
+        }
+        return false;
+    };
+    if (!above(x, z)) return false;
+    int count = 1;
+    for (int dz = -1; dz <= 1; dz++)
+        for (int dx = -1; dx <= 1; dx++)
+            if ((dx != 0 || dz != 0) && above(x + 400.0f * dx, z + 400.0f * dz)) count++;
+    return count >= 7;
 }
 
 #ifndef BT_MAP_TEST

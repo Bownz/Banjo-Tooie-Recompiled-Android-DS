@@ -348,6 +348,8 @@ public final class BottomScreenView extends View {
     private float arrowDegrees = Float.NaN;
     private float lastX = Float.NaN, lastZ = Float.NaN;
     private boolean facingFlipped;
+    private float stoppedFacing = Float.NaN;   // the game's facing when he stopped moving
+    private boolean turningInPlace;
 
     // What the arrow shows: eases towards arrowDegrees the short way round (~30 times a second).
     private float shownDegrees = Float.NaN;
@@ -378,13 +380,15 @@ public final class BottomScreenView extends View {
                 float moving = (float) Math.toDegrees(Math.atan2(dx, dz));
                 arrowDegrees = moving;
                 if (!Float.isNaN(facing)) {
-                    float diff = Math.abs(((facing - moving) % 360f + 540f) % 360f - 180f);   // 0 = opposite
+                    float diff = angleBetween(facing, moving);   // 0 = same way, 180 = opposite
                     if (diff < 50f) {
-                        facingFlipped = true;
-                    } else if (diff > 130f) {
                         facingFlipped = false;
+                    } else if (diff > 130f) {
+                        facingFlipped = true;   // Talon Trot: the game's facing points backwards
                     }
                 }
+                stoppedFacing = Float.NaN;
+                turningInPlace = false;
                 lastX = p[0];
                 lastZ = p[2];
                 return;
@@ -392,9 +396,20 @@ public final class BottomScreenView extends View {
         }
         lastX = p[0];
         lastZ = p[2];
+        // Standing still: keep the way he was moving, unless he turns on the spot.
         if (!Float.isNaN(facing)) {
-            arrowDegrees = facingFlipped ? facing + 180f : facing;
+            if (Float.isNaN(stoppedFacing)) {
+                stoppedFacing = facing;
+            } else if (turningInPlace || angleBetween(facing, stoppedFacing) > 20f) {
+                turningInPlace = true;   // follow the facing until he moves again
+                arrowDegrees = facingFlipped ? facing + 180f : facing;
+            }
         }
+    }
+
+    /** The angle between two headings in degrees, 0 to 180. */
+    private static float angleBetween(float a, float b) {
+        return Math.abs(((a - b) % 360f + 540f) % 360f - 180f);
     }
 
     /** An entrance: a small door (rounded top) in a ring. */
@@ -620,7 +635,7 @@ public final class BottomScreenView extends View {
     // ---- Explored areas ----------------------------------------------------------------
     // Each area's map (and storey) is kept: the last few in memory, all of them as PNG files in
     // the app's cache, by the game's map id. Bump MAP_CACHE_VERSION when the map's look changes.
-    private static final String MAP_CACHE_VERSION = "v1";
+    private static final String MAP_CACHE_VERSION = "v2";
     private int cacheTried = Integer.MIN_VALUE;
     private final java.util.LinkedHashMap<String, GameState.MapImage> mapMemory =
         new java.util.LinkedHashMap<String, GameState.MapImage>(8, 0.75f, true) {
