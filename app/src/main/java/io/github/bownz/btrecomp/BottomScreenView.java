@@ -178,7 +178,7 @@ public final class BottomScreenView extends View {
         }
         cutscene = GameState.cutscene();
         GameState.refreshPlayer();
-        recordTrail();
+        refreshMap();
         int settings = GameState.bottomSettings();
         showButtons = (settings & 1) != 0;
         dimCutscenes = (settings & 2) != 0;
@@ -245,119 +245,156 @@ public final class BottomScreenView extends View {
     // ------------------------------------------------------------------------------
 
     /**
-     * The current area from above: its floors and walls (from the area's collision data,
-     * once found), where you've walked, and where you are. Until the game's position and
-     * area data are verified, the panel explains what's coming.
+     * The current area from above, north up: its floors (shaded by height: low ground light, high ground dark) and
+     * walls, read from the area's collision data, with Banjo on it (a red dot). The picture is built once
+     * per area (and again shortly after, in case the area was still loading) and kept as a
+     * bitmap; only Banjo's dot is drawn each frame.
      */
     private void drawMap(Canvas c, RectF r) {
         fill.setColor(Color.rgb(20, 15, 28));
         c.drawRoundRect(r, 3 * u, 3 * u, fill);
+
+        float[] here = GameState.position();
+        if (mapBitmap == null || mapBitmap.getWidth() != (int) r.width() || mapBitmap.getHeight() != (int) r.height()) {
+            if (mapTris != null && r.width() > 0 && r.height() > 0) {
+                buildMapBitmap((int) r.width(), (int) r.height());
+            }
+        }
+        if (mapBitmap == null) {
+            text.setColor(TAN);
+            text.setTextSize(3.6f * u);
+            drawCentered(c, here == null ? "Waiting for the game" : "Loading the map…", r.centerX(), r.centerY());
+        } else {
+            c.drawBitmap(mapBitmap, r.left, r.top, null);
+            if (here != null) {
+                float px = r.left + mapOx + here[0] * mapScale, pz = r.top + mapOz + here[2] * mapScale;
+                float pulse = (SystemClock.uptimeMillis() % 1200) / 1200f;
+                fill.setColor(Color.argb((int) (140 * (1 - pulse)), 230, 70, 60));
+                c.drawCircle(px, pz, (1.6f + 2.4f * pulse) * u, fill);
+                fill.setColor(MAP_DOT);
+                c.drawCircle(px, pz, 1.4f * u, fill);
+                stroke.setColor(CREAM);
+                stroke.setStrokeWidth(0.4f * u);
+                c.drawCircle(px, pz, 1.4f * u, stroke);
+            }
+        }
         stroke.setColor(Color.argb(200, 206, 162, 70));
         stroke.setStrokeWidth(0.45f * u);
         c.drawRoundRect(r, 3 * u, 3 * u, stroke);
+    }
 
-        float[] tris = GameState.mapTriangles();
-        float[] here = GameState.position();
-        if (tris == null && here == null) {
-            text.setColor(TAN);
-            text.setTextSize(3.6f * u);
-            drawCentered(c, "The map of this area goes here", r.centerX(), r.centerY() - 3 * u);
-            text.setTextSize(2.8f * u);
-            text.setColor(Color.argb(170, 232, 213, 168));
-            drawCentered(c, "Waiting for the game", r.centerX(), r.centerY() + 2.5f * u);
-            return;
+    // The map: the current area's triangles (see GameState.mapTriangles), and the picture of them.
+    private int mapGeometry = 0;
+    private long mapGeometryAt;
+    private boolean mapRefetched;
+    private float[] mapTris;
+    private android.graphics.Bitmap mapBitmap;
+    private float mapScale, mapOx, mapOz;
+
+    /** Picks up a new area's map (and re-reads it once, 1.5 s later, in case it was still loading). */
+    private void refreshMap() {
+        int id = GameState.mapGeometryId();
+        long now = SystemClock.uptimeMillis();
+        if (id != mapGeometry) {
+            mapGeometry = id;
+            mapGeometryAt = now;
+            mapRefetched = false;
+            mapTris = id != 0 ? GameState.mapTriangles() : null;
+            mapBitmap = null;
+        } else if (id != 0 && (mapTris == null || (!mapRefetched && now - mapGeometryAt > 1500))) {
+            mapRefetched = mapTris != null || now - mapGeometryAt > 1500;
+            mapTris = GameState.mapTriangles();
+            mapBitmap = null;
         }
-        // Fit what's known (the area's triangles, else the trail) into the panel, north up.
+    }
+
+    private void buildMapBitmap(int w, int h) {
+        float[] t = mapTris;
+        int n = t.length / 8;
+        // Fit the floors (walls can run far outside) into the panel, with a margin.
         float minX = Float.MAX_VALUE, maxX = -Float.MAX_VALUE, minZ = Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
-        float[] pts = tris != null ? tris : trailPoints();
-        for (int i = 0; i + 1 < pts.length; i += 2) {
-            minX = Math.min(minX, pts[i]); maxX = Math.max(maxX, pts[i]);
-            minZ = Math.min(minZ, pts[i + 1]); maxZ = Math.max(maxZ, pts[i + 1]);
-        }
-        if (here != null) {
-            minX = Math.min(minX, here[0]); maxX = Math.max(maxX, here[0]);
-            minZ = Math.min(minZ, here[2]); maxZ = Math.max(maxZ, here[2]);
-        }
-        float inset = 4 * u;
-        float spanX = Math.max(1f, maxX - minX), spanZ = Math.max(1f, maxZ - minZ);
-        float scale = Math.min((r.width() - inset * 2) / spanX, (r.height() - inset * 2) / spanZ);
-        float ox = r.centerX() - (minX + spanX / 2) * scale, oz = r.centerY() - (minZ + spanZ / 2) * scale;
-
-        int saved = c.save();
-        c.clipRect(r);
-        if (tris != null) {
-            // Floors and walls: x/z pairs, three per triangle.
-            fill.setColor(Color.argb(40, 255, 186, 40));
-            stroke.setColor(Color.argb(140, 255, 186, 40));
-            stroke.setStrokeWidth(Math.max(1f, 0.15f * u));
-            for (int i = 0; i + 5 < tris.length; i += 6) {
-                path.reset();
-                path.moveTo(ox + tris[i] * scale, oz + tris[i + 1] * scale);
-                path.lineTo(ox + tris[i + 2] * scale, oz + tris[i + 3] * scale);
-                path.lineTo(ox + tris[i + 4] * scale, oz + tris[i + 5] * scale);
-                path.close();
-                c.drawPath(path, fill);
+        float[] heights = new float[n];
+        int floors = 0;
+        for (int i = 0; i < n; i++) {
+            int o = i * 8;
+            if (t[o] != 0f) {
+                continue;
+            }
+            heights[floors++] = t[o + 1];
+            for (int k = 0; k < 3; k++) {
+                float x = t[o + 2 + k * 2], z = t[o + 3 + k * 2];
+                minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+                minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
             }
         }
-        // Where you've walked.
-        float[] trail = trailPoints();
-        stroke.setColor(Color.argb(150, 120, 200, 255));
-        stroke.setStrokeWidth(0.5f * u);
-        for (int i = 0; i + 3 < trail.length; i += 2) {
-            float jx = trail[i + 2] - trail[i], jz = trail[i + 3] - trail[i + 1];
-            if (jx * jx + jz * jz > 600f * 600f) {
-                continue;   // a jump (warp, door, respawn), not a walk
-            }
-            c.drawLine(ox + trail[i] * scale, oz + trail[i + 1] * scale, ox + trail[i + 2] * scale, oz + trail[i + 3] * scale, stroke);
-        }
-        if (here != null) {
-            float px = ox + here[0] * scale, pz = oz + here[2] * scale;
-            fill.setColor(HONEY);
-            c.drawCircle(px, pz, 1.6f * u, fill);
-            stroke.setColor(CREAM);
-            stroke.setStrokeWidth(0.4f * u);
-            c.drawCircle(px, pz, 1.6f * u, stroke);
-        }
-        c.restoreToCount(saved);
-    }
-
-    // The trail: positions (x, z) in the current area, one every so often. Each area keeps its
-    // own trail for this session, so going back somewhere shows where you've already been.
-    private final java.util.HashMap<Integer, java.util.ArrayList<float[]>> trails = new java.util.HashMap<>();
-    private java.util.ArrayList<float[]> trail = new java.util.ArrayList<>();
-
-    private void recordTrail() {
-        float[] p = GameState.position();
-        int area = GameState.area();
-        if (p == null) {
+        if (floors == 0) {
             return;
         }
-        java.util.ArrayList<float[]> forArea = trails.get(area);
-        if (forArea == null) {
-            forArea = new java.util.ArrayList<>();
-            trails.put(area, forArea);
+        java.util.Arrays.sort(heights, 0, floors);
+        float lowY = heights[floors / 20], highY = heights[floors - 1 - floors / 20];
+        float inset = 3 * u;
+        float spanX = Math.max(1f, maxX - minX), spanZ = Math.max(1f, maxZ - minZ);
+        mapScale = Math.min((w - inset * 2) / spanX, (h - inset * 2) / spanZ);
+        mapOx = w / 2f - (minX + spanX / 2) * mapScale;
+        mapOz = h / 2f - (minZ + spanZ / 2) * mapScale;
+
+        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        Canvas b = new Canvas(bitmap);
+        Path clip = new Path();
+        clip.addRoundRect(new RectF(0, 0, w, h), 3 * u, 3 * u, Path.Direction.CW);
+        b.clipPath(clip);
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        p.setStyle(Paint.Style.FILL_AND_STROKE);
+        p.setStrokeWidth(1f);   // closes the hairline gaps between neighbouring triangles
+        // Floors, lowest first so higher ground covers lower ground.
+        Integer[] order = new Integer[n];
+        for (int i = 0; i < n; i++) {
+            order[i] = i;
         }
-        trail = forArea;
-        if (!trail.isEmpty()) {
-            float[] last = trail.get(trail.size() - 1);
-            float dx = p[0] - last[0], dz = p[2] - last[1];
-            if (dx * dx + dz * dz < 40f * 40f) {
-                return;   // only every 40 units or so
+        java.util.Arrays.sort(order, (a, c2) -> Float.compare(t[a * 8 + 1], t[c2 * 8 + 1]));
+        Path tri = new Path();
+        for (int i : order) {
+            int o = i * 8;
+            if (t[o] != 0f) {
+                continue;
             }
+            float k = Math.max(0f, Math.min(1f, (t[o + 1] - lowY) / Math.max(1f, highY - lowY)));
+            p.setColor(blend(MAP_LOW, MAP_HIGH, k));
+            tri.reset();
+            tri.moveTo(mapOx + t[o + 2] * mapScale, mapOz + t[o + 3] * mapScale);
+            tri.lineTo(mapOx + t[o + 4] * mapScale, mapOz + t[o + 5] * mapScale);
+            tri.lineTo(mapOx + t[o + 6] * mapScale, mapOz + t[o + 7] * mapScale);
+            tri.close();
+            b.drawPath(tri, p);
         }
-        trail.add(new float[] { p[0], p[2] });
-        if (trail.size() > 4000) {
-            trail.remove(0);
+        // Walls: thin light edges.
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(Math.max(1f, 0.18f * u));
+        p.setColor(Color.argb(150, 255, 214, 130));
+        for (int i = 0; i < n; i++) {
+            int o = i * 8;
+            if (t[o] != 1f) {
+                continue;
+            }
+            tri.reset();
+            tri.moveTo(mapOx + t[o + 2] * mapScale, mapOz + t[o + 3] * mapScale);
+            tri.lineTo(mapOx + t[o + 4] * mapScale, mapOz + t[o + 5] * mapScale);
+            tri.lineTo(mapOx + t[o + 6] * mapScale, mapOz + t[o + 7] * mapScale);
+            tri.close();
+            b.drawPath(tri, p);
         }
+        mapBitmap = bitmap;
     }
 
-    private float[] trailPoints() {
-        float[] out = new float[trail.size() * 2];
-        for (int i = 0; i < trail.size(); i++) {
-            out[i * 2] = trail.get(i)[0];
-            out[i * 2 + 1] = trail.get(i)[1];
-        }
-        return out;
+    // Low ground (where you mostly walk) light, high ground and cliffs dark.
+    private static final int MAP_LOW = Color.rgb(196, 138, 62), MAP_HIGH = Color.rgb(52, 34, 26);
+    private static final int MAP_DOT = Color.rgb(230, 70, 60);
+
+    private static int blend(int a, int b, float k) {
+        return Color.rgb(
+            (int) (Color.red(a) + (Color.red(b) - Color.red(a)) * k),
+            (int) (Color.green(a) + (Color.green(b) - Color.green(a)) * k),
+            (int) (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * k));
     }
 
     /** A few fixed stars: the Isle at night. */

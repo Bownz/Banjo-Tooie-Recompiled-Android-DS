@@ -52,6 +52,19 @@ namespace {
     // indoors, another area); all three must agree. Not yet checked against cutscenes.
     constexpr uint32_t kPauseFlags[] = { 0x8007A217u, 0x8007ADF3u, 0x80135A11u };
 
+    // The current area's map model: the game keeps pointers to its collision list and vertex
+    // list side by side (found 11 Nov; same in Spiral Mountain, Banjo's house, Jinjo Village).
+    // The model's header (magic 0x0B) is at 0x801285BC; collision = model + header[0x1C],
+    // vertices = model + header[0x10]. Formats as in Banjo-Kazooie's model files:
+    //   collision list: s16 min[3], max[3], y_stride, z_stride, geo_count, cell_size, tri_count,
+    //     pad (0x18 bytes); geo_count * 4 bytes of grid cells; then tri_count triangles of
+    //     12 bytes: s16 vertex index[3], s16 ?, u32 flags.
+    //   vertex list: s16 min[3], max[3], centre[3], ?, count, ? (0x18 bytes); then N64 Vtx
+    //     (16 bytes: s16 x, y, z, ...).
+    constexpr uint32_t kMapCollisionPtr = 0x801285B0u;
+    constexpr uint32_t kMapVerticesPtr = 0x801285C0u;
+    constexpr uint32_t kCollisionInvisible = 0x01000000u;  // flag on the boundary / out-of-bounds shell
+
     constexpr size_t kRdramSize = 8 * 1024 * 1024;
 
     // The recompiler stores RDRAM as host-endian 32-bit words (see MEM_BU / MEM_HU in
@@ -290,6 +303,48 @@ namespace {
         }).detach();
     }
 
+    // TEMPORARY: pause-flag timing. Bytes that were 0/1 and flipped only in the paused snapshot
+    // (0.4.2 run). The 0.5.0 flags flip late (once the pause screen has loaded); this logs the
+    // game frame and time each candidate flips, so the earliest reliable one can be picked.
+    constexpr uint32_t kPauseWatch[] = {
+        0x800624A5u, 0x80068EC1u, 0x80068ECDu, 0x8006AE5Cu, 0x8006AE94u, 0x8006B39Cu, 0x8006B4DCu,
+        0x8006F084u, 0x8006F0CAu, 0x8006F0D4u, 0x8006F0FCu, 0x8006F174u, 0x8006F37Cu, 0x8006FE3Cu,
+        0x8007A217u, 0x8007A423u, 0x8007ADF3u, 0x8011A7D3u, 0x801238ACu, 0x801238C8u, 0x801238E4u,
+        0x8012398Cu, 0x801239A0u, 0x801239A8u, 0x8012D695u, 0x80132DCBu, 0x80132DCDu, 0x80135853u,
+        0x80135A11u,
+    };
+    constexpr size_t kPauseWatchCount = sizeof(kPauseWatch) / sizeof(kPauseWatch[0]);
+
+    void pause_watch_thread() {
+        uint8_t last[kPauseWatchCount];
+        unsigned logged[kPauseWatchCount] = {};
+        bool have = false;
+        const auto start = std::chrono::steady_clock::now();
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+            uint8_t* rdram = g_rdram.load();
+            if (rdram == nullptr || !ultramodern::is_game_started()) {
+                continue;
+            }
+            const uint32_t frame = read_u32(rdram, kGameFrameCount);
+            const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            bool any = false;
+            for (size_t i = 0; i < kPauseWatchCount; i++) {
+                const uint8_t v = read_u8(rdram, kPauseWatch[i]);
+                if (have && v != last[i] && logged[i] < 200) {   // a busy byte isn't a pause flag
+                    probe_log("watch %08X %u->%u frame %u t=%lldms", kPauseWatch[i], last[i], v, frame, ms);
+                    logged[i]++;
+                    any = true;
+                }
+                last[i] = v;
+            }
+            if (any) {
+                std::fflush(stderr);
+            }
+            have = true;
+        }
+    }
+
     void probe_thread() {
         uint32_t last_mode = 0xFFFFFFFFu;
         while (true) {
@@ -318,6 +373,10 @@ namespace {
             std::thread([] {
                 pthread_setname_np(pthread_self(), "BT probe");
                 probe_thread();
+            }).detach();
+            std::thread([] {
+                pthread_setname_np(pthread_self(), "BT pause watch");
+                pause_watch_thread();
             }).detach();
         }
     }
@@ -357,6 +416,107 @@ Java_io_github_bownz_btrecomp_GameState_nativePlayer(JNIEnv* env, jclass, jfloat
     }
     env->SetFloatArrayRegion(out, 0, 3, p);
     return read_u16(rdram, kMapId);
+}
+
+// An id for the current area's collision data (its address), or 0 when there's none; the
+// bottom screen rebuilds its map when this changes.
+JNIEXPORT jint JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeMapGeometryId(JNIEnv*, jclass) {
+    uint8_t* rdram = running_rdram();
+    if (rdram == nullptr) {
+        return 0;
+    }
+    const uint32_t collision = read_u32(rdram, kMapCollisionPtr);
+    const uint32_t vertices = read_u32(rdram, kMapVerticesPtr);
+    if (collision < 0x80000000u || collision >= 0x80800000u || vertices < 0x80000000u || vertices >= 0x80800000u) {
+        return 0;
+    }
+    return static_cast<jint>(collision ^ (vertices << 1));
+}
+
+// The current area's floors and walls from above, 8 floats per triangle: kind (0 floor,
+// 1 wall), mean height, then x, z of each corner. Ceilings and the invisible boundary are left
+// out. Null when there's no valid collision data.
+JNIEXPORT jfloatArray JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeMapTriangles(JNIEnv* env, jclass) {
+    uint8_t* rdram = running_rdram();
+    if (rdram == nullptr) {
+        return nullptr;
+    }
+    const uint32_t collision = read_u32(rdram, kMapCollisionPtr);
+    const uint32_t vertices = read_u32(rdram, kMapVerticesPtr);
+    auto in_ram = [](uint32_t address, uint32_t bytes) {
+        return address >= 0x80000000u && address < 0x80800000u && bytes <= 0x80800000u - address;
+    };
+    if (!in_ram(collision, 0x18) || !in_ram(vertices, 0x18)) {
+        return nullptr;
+    }
+    auto s16 = [&](uint32_t address) { return static_cast<int16_t>(read_u16(rdram, address)); };
+    const int geo_count = s16(collision + 0x10);
+    const int tri_count = s16(collision + 0x14);
+    const int vertex_count = s16(vertices + 0x14);
+    if (geo_count <= 0 || tri_count <= 0 || vertex_count <= 0) {
+        return nullptr;
+    }
+    const uint32_t tris = collision + 0x18 + static_cast<uint32_t>(geo_count) * 4;
+    const uint32_t verts = vertices + 0x18;
+    if (!in_ram(tris, static_cast<uint32_t>(tri_count) * 12) || !in_ram(verts, static_cast<uint32_t>(vertex_count) * 16)) {
+        return nullptr;
+    }
+    std::vector<float> out;
+    out.reserve(static_cast<size_t>(tri_count) * 8);
+    for (int t = 0; t < tri_count; t++) {
+        const uint32_t tri = tris + static_cast<uint32_t>(t) * 12;
+        if (read_u32(rdram, tri + 8) & kCollisionInvisible) {
+            continue;
+        }
+        float p[3][3];
+        bool ok = true;
+        for (int k = 0; k < 3 && ok; k++) {
+            const int index = s16(tri + 2 * k);
+            if (index < 0 || index >= vertex_count) {
+                ok = false;
+                break;
+            }
+            const uint32_t v = verts + static_cast<uint32_t>(index) * 16;
+            p[k][0] = s16(v);
+            p[k][1] = s16(v + 2);
+            p[k][2] = s16(v + 4);
+        }
+        if (!ok) {
+            continue;
+        }
+        const float ax = p[1][0] - p[0][0], ay = p[1][1] - p[0][1], az = p[1][2] - p[0][2];
+        const float bx = p[2][0] - p[0][0], by = p[2][1] - p[0][1], bz = p[2][2] - p[0][2];
+        const float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+        const float length = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (length <= 0.0f) {
+            continue;
+        }
+        const float up = ny / length;   // floors face up with this winding; ceilings down
+        float kind;
+        if (up > 0.5f) {
+            kind = 0.0f;
+        } else if (std::fabs(up) < 0.3f) {
+            kind = 1.0f;
+        } else {
+            continue;
+        }
+        out.push_back(kind);
+        out.push_back((p[0][1] + p[1][1] + p[2][1]) / 3.0f);
+        for (int k = 0; k < 3; k++) {
+            out.push_back(p[k][0]);
+            out.push_back(p[k][2]);
+        }
+    }
+    if (out.empty()) {
+        return nullptr;
+    }
+    jfloatArray array = env->NewFloatArray(static_cast<jsize>(out.size()));
+    if (array != nullptr) {
+        env->SetFloatArrayRegion(array, 0, static_cast<jsize>(out.size()), out.data());
+    }
+    return array;
 }
 
 // Whether the game is paused (provisional, see kPauseFlags).

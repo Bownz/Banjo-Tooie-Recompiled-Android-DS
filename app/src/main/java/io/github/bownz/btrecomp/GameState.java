@@ -18,6 +18,8 @@ final class GameState {
     private static native int nativeBottomSettings();
     private static native int nativePlayer(float[] out);
     private static native boolean nativePaused();
+    private static native float[] nativeMapTriangles();
+    private static native int nativeMapGeometryId();
 
     /** The game's frame counter, or -1 before the game runs. */
     static int frameCount() {
@@ -92,8 +94,26 @@ final class GameState {
     /** The current area (the game's map id, e.g. 0xAF Spiral Mountain), or UNKNOWN. */
     static synchronized int area() { return playerArea; }
 
-    /** The current area's floors and walls from above: x, z per corner, 3 corners per triangle; or null. */
-    static float[] mapTriangles() { return null; }
+    /**
+     * The current area's floors and walls from above, from its collision data: 8 floats per
+     * triangle (kind 0 floor / 1 wall, mean height, then x, z of each corner); or null.
+     */
+    static float[] mapTriangles() {
+        try {
+            return nativeMapTriangles();
+        } catch (UnsatisfiedLinkError e) {
+            return null;
+        }
+    }
+
+    /** Changes when the area's collision data does (0 when there's none). */
+    static int mapGeometryId() {
+        try {
+            return nativeMapGeometryId();
+        } catch (UnsatisfiedLinkError e) {
+            return 0;
+        }
+    }
 
     static boolean cutscene() { return false; }
 
