@@ -7,8 +7,8 @@
 // 2. The area's collision floors give the ground you can walk on.
 // 3. Walkable ground is shown bright, shaded by height (low light, high dark; the outer hills
 //    dimmer), with a light outline around the area's edge only; spots inside it you can't
-//    stand on are drawn as ground; things beyond the edge in their own colours, darker; the
-//    rest is transparent.
+//    stand on are drawn as ground; things just beyond the edge in their own colours, darker,
+//    fading out into the (transparent) background.
 //
 // Runs on a background thread (GameState.buildMap), once per area.
 
@@ -621,19 +621,48 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
     const float lo = heights[heights.size() / 20], hi = heights[heights.size() - 1 - heights.size() / 20];
     const float middle = heights[heights.size() / 2];
 
-    // 3. Smoothing: a light blur of the textures; a wide, coverage-weighted blur for the dim colour.
+    // 3. Smoothing: a light blur of the textures.
     std::vector<float> sR = R, sG = G, sB = B;
     boxBlur(sR, W, H, px); boxBlur(sG, W, H, px); boxBlur(sB, W, H, px);
-    std::vector<float> fR(N), fG(N), fB(N), cover(N);
-    for (size_t i = 0; i < N; i++) { fR[i] = R[i] * drawn[i]; fG[i] = G[i] * drawn[i]; fB[i] = B[i] * drawn[i]; cover[i] = drawn[i]; }
-    const int wide = 12 * px;
-    boxBlur(fR, W, H, wide); boxBlur(fG, W, H, wide); boxBlur(fB, W, H, wide); boxBlur(cover, W, H, wide);
-    boxBlur(fR, W, H, wide); boxBlur(fG, W, H, wide); boxBlur(fB, W, H, wide); boxBlur(cover, W, H, wide);
 
-    std::vector<uint8_t> nearAny(N);
-    for (size_t i = 0; i < N; i++) nearAny[i] = drawn[i] | walk[i];
-    nearAny = morph(nearAny, W, H, 8 * px, true);
-    const std::vector<uint8_t> inner = morph(walk, W, H, px, false);
+    // The area you play in: walkable ground up to a little above the main level. Ground far
+    // above it (the tops of Jinjo Village's tree walls and cliffs, Spiral Mountain's outer
+    // hills) is treated like the surroundings: no outline, faded out.
+    const float span = std::max(1.0f, hi - lo);
+    const float ceiling = middle + 0.35f * span;
+    std::vector<uint8_t> main(N);
+    for (size_t i = 0; i < N; i++) main[i] = walk[i] && ground[i] <= ceiling;
+    main = morph(morph(main, W, H, 2 * px, true), W, H, 2 * px, false);   // no ragged bits
+    for (size_t i = 0; i < N; i++) main[i] = main[i] && walk[i];
+    // Keep only sizeable pieces (at least 4% of the biggest): slivers and shards left over from
+    // the cut become surroundings too.
+    {
+        std::vector<int> label(N, -1), sizes, stack;
+        for (size_t start = 0; start < N; start++) {
+            if (!main[start] || label[start] >= 0) continue;
+            const int id = int(sizes.size());
+            int count = 0;
+            stack.assign(1, int(start));
+            label[start] = id;
+            while (!stack.empty()) {
+                const int i = stack.back();
+                stack.pop_back();
+                count++;
+                const int x = i % W, z = i / W;
+                const int next[4][2] = { { x - 1, z }, { x + 1, z }, { x, z - 1 }, { x, z + 1 } };
+                for (const auto& n : next) {
+                    if (n[0] < 0 || n[1] < 0 || n[0] >= W || n[1] >= H) continue;
+                    const size_t j = size_t(n[1]) * W + n[0];
+                    if (main[j] && label[j] < 0) { label[j] = id; stack.push_back(int(j)); }
+                }
+            }
+            sizes.push_back(count);
+        }
+        const int biggest = sizes.empty() ? 0 : *std::max_element(sizes.begin(), sizes.end());
+        for (size_t i = 0; i < N; i++)
+            if (main[i] && sizes[size_t(label[i])] < biggest / 25) main[i] = 0;
+    }
+    const std::vector<uint8_t> inner = morph(main, W, H, px, false);
     const std::vector<uint8_t> waterInner = morph(water, W, H, px, false);
 
     // Definition: the surface height everywhere something is drawn; dark lines at the foot of
@@ -672,12 +701,19 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
             }
     }
 
+    // How far beyond the area's edge a pixel is: 1 at the edge, fading to 0 about 12 panel
+    // pixels out (two box blurs of the walkable/water mask).
+    std::vector<float> fade(N);
+    for (size_t i = 0; i < N; i++) fade[i] = (main[i] || water[i]) ? 1.0f : 0.0f;
+    boxBlur(fade, W, H, 8 * px);
+    boxBlur(fade, W, H, 8 * px);
+    for (float& f : fade) f = std::clamp(f * 2.2f, 0.0f, 1.0f) * 0.85f;
+
     // 4. Compose.
     out.assign(N, 0);
     constexpr float warmR = 235, warmG = 190, warmB = 120;
     constexpr float warm = 0.12f;         // a light warm tint keeps colours distinct
     constexpr float saturation = 1.22f;
-    constexpr float bgR = 18, bgG = 13, bgB = 26;
     for (size_t i = 0; i < N; i++) {
         float r, g, b;
         if (water[i]) {
@@ -688,13 +724,10 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
             if (!waterInner[i]) {
                 r = r * 0.3f + 205 * 0.7f; g = g * 0.3f + 238 * 0.7f; b = b * 0.3f + 255 * 0.7f;
             }
-        } else if (walk[i]) {
+        } else if (main[i]) {
             const float k = std::clamp((ground[i] - lo) / std::max(1.0f, hi - lo), 0.0f, 1.0f);
             float f = 1.08f - 0.55f * k;
-            // Ground well above the area's main level (outer hills) is dimmer still.
-            const float span = std::max(1.0f, hi - lo);
-            const float above = std::clamp((ground[i] - (middle + 0.30f * span)) / (0.25f * span), 0.0f, 1.0f);
-            f *= 1.0f - 0.5f * above;
+
             r = sR[i] * (1 - warm) + warmR * warm;
             g = sG[i] * (1 - warm) + warmG * warm;
             b = sB[i] * (1 - warm) + warmB * warm;
@@ -705,25 +738,20 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
             if (!inner[i]) {   // the outline
                 r = r * 0.1f + 255 * 0.9f; g = g * 0.1f + 236 * 0.9f; b = b * 0.1f + 190 * 0.9f;
             }
-        } else if (drawn[i]) {
-            // Visible but not walkable (beyond the area's edge): its own colours, darker.
+        } else if ((drawn[i] || walk[i]) && fade[i] > 0.02f) {
+            // Beyond the area's edge: its own colours, darker, fading out with distance.
             const float wr = sR[i] * (1 - warm) + warmR * warm, wg = sG[i] * (1 - warm) + warmG * warm, wb = sB[i] * (1 - warm) + warmB * warm;
             const float grey = (wr + wg + wb) / 3.0f;
             r = (grey * 0.15f + wr * 0.85f) * 0.5f * footShade[i];
             g = (grey * 0.15f + wg * 0.85f) * 0.5f * footShade[i];
             b = (grey * 0.15f + wb * 0.85f) * 0.5f * footShade[i];
-        } else if (nearAny[i] && cover[i] > 0.05f) {
-            const float c = std::max(cover[i], 1e-3f);
-            const float wr = fR[i] / c * 0.7f + warmR * 0.3f, wg = fG[i] / c * 0.7f + warmG * 0.3f, wb = fB[i] / c * 0.7f + warmB * 0.3f;
-            const float grey = (wr + wg + wb) / 3.0f;
-            r = (grey * 0.55f + wr * 0.45f) * 0.42f + bgR * 0.25f;
-            g = (grey * 0.55f + wg * 0.45f) * 0.42f + bgG * 0.25f;
-            b = (grey * 0.55f + wb * 0.45f) * 0.42f + bgB * 0.25f;
         } else {
             continue;   // transparent
         }
         const int ri = std::clamp(int(r), 0, 255), gi = std::clamp(int(g), 0, 255), bi = std::clamp(int(b), 0, 255);
-        out[i] = int32_t(0xFF000000u | (uint32_t(ri) << 16) | (uint32_t(gi) << 8) | uint32_t(bi));
+        const bool inside = water[i] || main[i];
+        const uint32_t alpha = inside ? 255u : uint32_t(std::clamp(fade[i], 0.0f, 1.0f) * 255.0f);
+        out[i] = int32_t((alpha << 24) | (uint32_t(ri) << 16) | (uint32_t(gi) << 8) | uint32_t(bi));
     }
 
     meta[0] = float(W); meta[1] = float(H); meta[2] = minX; meta[3] = minZ; meta[4] = scale;
