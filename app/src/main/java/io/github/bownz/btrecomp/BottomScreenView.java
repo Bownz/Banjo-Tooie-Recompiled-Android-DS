@@ -93,9 +93,9 @@ public final class BottomScreenView extends View {
     // Bottom Screen Buttons: Hold Z. The buttons are hidden until Z is held, then slide in
     // from the right over the bottom of the map, and slide out when it's let go.
     private boolean slideButtons, zHeld;
-    private float slide = 1f;   // 0 hidden .. 1 in place
-    private long slideAt;
-    private static final float SLIDE_MS = 160f;
+    private float buttonSlide = 1f;   // 0 hidden .. 1 in place
+    private long buttonSlideAt;
+    private static final float BUTTON_SLIDE_MS = 160f;
     private float dim = 0f;   // 0 .. 1, eased toward the target
     private long dimAt;
 
@@ -237,8 +237,8 @@ public final class BottomScreenView extends View {
 
         if (showButtons && !slideButtons) {
             drawMoves(c, new RectF(pad, bottom + 3 * u, w - pad, bottom + 3 * u + movesH));
-        } else if (slideButtons && slide > 0f) {
-            float e = 1f - (1f - slide) * (1f - slide) * (1f - slide);   // ease out
+        } else if (slideButtons && buttonSlide > 0f) {
+            float e = 1f - (1f - buttonSlide) * (1f - buttonSlide) * (1f - buttonSlide);   // ease out
             c.save();
             c.translate((1f - e) * w, 0f);
             // A dark band behind them, so they read over the map.
@@ -1289,7 +1289,7 @@ public final class BottomScreenView extends View {
                 }
                 return true;
             }
-            if (showButtons && frame >= 0 && (!slideButtons || slide > 0.6f)) {
+            if (showButtons && frame >= 0 && (!slideButtons || buttonSlide > 0.6f)) {
                 for (Move m : moves) {
                     if (m.rect.contains(x, y)) {
                         pressMove(m);
@@ -1320,15 +1320,15 @@ public final class BottomScreenView extends View {
     /** Moves the Hold Z slide toward where it should be; keeps drawing until it's there. */
     private void stepSlide() {
         long now = android.os.SystemClock.uptimeMillis();
-        float dt = slideAt == 0 ? 0f : Math.min(0.12f, (now - slideAt) / SLIDE_MS);   // at most a frame's step
-        slideAt = now;
+        float dt = buttonSlideAt == 0 ? 0f : Math.min(0.12f, (now - buttonSlideAt) / BUTTON_SLIDE_MS);   // at most a frame's step
+        buttonSlideAt = now;
         float target = !slideButtons || zHeld ? 1f : 0f;
-        if (slide < target) {
-            slide = Math.min(target, slide + dt);
-        } else if (slide > target) {
-            slide = Math.max(target, slide - dt);
+        if (buttonSlide < target) {
+            buttonSlide = Math.min(target, buttonSlide + dt);
+        } else if (buttonSlide > target) {
+            buttonSlide = Math.max(target, buttonSlide - dt);
         }
-        if (slide != target) {
+        if (buttonSlide != target) {
             postInvalidateOnAnimation();
         }
     }
