@@ -179,6 +179,7 @@ public final class BottomScreenView extends View {
         cutscene = GameState.cutscene();
         GameState.refreshPlayer();
         refreshMap();
+        recordEntry();
         int settings = GameState.bottomSettings();
         showButtons = (settings & 1) != 0;
         dimCutscenes = (settings & 2) != 0;
@@ -286,6 +287,19 @@ public final class BottomScreenView extends View {
             c.drawBitmap(m.bitmap, 0, 0, mapPaint);
             c.restoreToCount(saved);
 
+            // Where you came in (each entrance used in this area this session; the latest brighter).
+            java.util.List<float[]> entries = entrances.get(GameState.area());
+            if (entries != null) {
+                int saved2 = c.save();
+                c.clipPath(mapClip);
+                for (int i = 0; i < entries.size(); i++) {
+                    float[] e = entries.get(i);
+                    drawEntrance(c, r.centerX() + (e[0] - cx) * viewScale, r.centerY() + (e[2] - cz) * viewScale,
+                        (mapFollow ? 2.2f : 1.7f) * u, i == entries.size() - 1);
+                }
+                c.restoreToCount(saved2);
+            }
+
             if (here != null) {
                 float px = r.centerX() + (here[0] - cx) * viewScale;
                 float pz = r.centerY() + (here[2] - cz) * viewScale;
@@ -300,6 +314,60 @@ public final class BottomScreenView extends View {
         stroke.setColor(Color.argb(200, 206, 162, 70));
         stroke.setStrokeWidth(0.45f * u);
         c.drawRoundRect(r, 3 * u, 3 * u, stroke);
+    }
+
+    /** An entrance: a small door (rounded top) in a ring. */
+    private void drawEntrance(Canvas c, float x, float z, float size, boolean latest) {
+        fill.setColor(latest ? Color.argb(235, 40, 26, 18) : Color.argb(170, 40, 26, 18));
+        c.drawCircle(x, z, size, fill);
+        stroke.setColor(latest ? HONEY : Color.argb(170, 255, 186, 40));
+        stroke.setStrokeWidth(0.35f * u);
+        c.drawCircle(x, z, size, stroke);
+        float dw = size * 0.55f, dh = size * 1.05f;
+        RectF door = new RectF(x - dw / 2, z - dh / 2, x + dw / 2, z + dh / 2);
+        fill.setColor(latest ? CREAM : Color.argb(170, 255, 244, 214));
+        c.drawRoundRect(door, dw / 2, dw / 2, fill);
+        c.drawRect(door.left, door.centerY(), door.right, door.bottom, fill);
+    }
+
+    // Entrances used this session, per area (where Banjo appeared on entering it).
+    private final java.util.HashMap<Integer, java.util.ArrayList<float[]>> entrances = new java.util.HashMap<>();
+    private int entryArea = GameState.UNKNOWN;
+    private long entryAreaSince;
+
+    /** Once an area has been current for a second (so the entry point is the new area's), notes it. */
+    private void recordEntry() {
+        int area = GameState.area();
+        long now = SystemClock.uptimeMillis();
+        if (area != entryArea) {
+            entryArea = area;
+            entryAreaSince = now;
+            return;
+        }
+        if (area < 0 || now - entryAreaSince < 1000) {
+            return;
+        }
+        float[] e = GameState.entryPoint();
+        if (e == null) {
+            return;
+        }
+        java.util.ArrayList<float[]> list = entrances.get(area);
+        if (list == null) {
+            list = new java.util.ArrayList<>();
+            entrances.put(area, list);
+        }
+        for (int i = 0; i < list.size(); i++) {
+            float[] o = list.get(i);
+            float dx = o[0] - e[0], dz = o[2] - e[2];
+            if (dx * dx + dz * dz < 300f * 300f) {
+                if (i != list.size() - 1) {   // used again: make it the latest
+                    list.remove(i);
+                    list.add(o);
+                }
+                return;
+            }
+        }
+        list.add(e);
     }
 
     /** Banjo: a red arrow pointing the way he faces (0 degrees = +z = down the map), or a dot. */

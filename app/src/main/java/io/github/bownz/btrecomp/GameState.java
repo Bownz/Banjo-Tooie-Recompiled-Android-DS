@@ -19,6 +19,7 @@ final class GameState {
     private static native int nativeBottomSettings();
     private static native int nativePlayer(float[] out);
     private static native boolean nativePaused();
+    private static native boolean nativeEntryPoint(float[] out);
     private static native int[] nativeBuildMap(int maxSize, float[] info);
     private static native int nativeMapGeometryId();
 
@@ -99,6 +100,16 @@ final class GameState {
     /** Banjo's position {x, y, z} in the current area (as of refreshPlayer()), or null. */
     static synchronized float[] position() {
         return playerArea >= 0 ? new float[] { playerBuffer[0], playerBuffer[1], playerBuffer[2] } : null;
+    }
+
+    /** Where Banjo entered the current area {x, y, z}, or null. */
+    static float[] entryPoint() {
+        float[] p = new float[3];
+        try {
+            return nativeEntryPoint(p) ? p : null;
+        } catch (UnsatisfiedLinkError e) {
+            return null;
+        }
     }
 
     /** Which way Banjo faces, in degrees (0 = +z, 90 = +x), or NaN. */

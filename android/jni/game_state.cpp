@@ -50,7 +50,11 @@ namespace {
     // Banjo's facing, f32 degrees (0 = +z, 90 = +x; direction = sin, cos): player-state slot 0's
     // structure + 0x3F4. Found 12 Nov: matched the walking direction both ways (220.8 / 20.3).
     constexpr uint32_t kPlayerYawOffset = 0x3F4u;
-    constexpr uint32_t kMapId = 0x80132DC2u;           // u16: Spiral Mountain 0xAF, Banjo's house 0x173, Jinjo Village 0x142
+    constexpr uint32_t kMapId = 0x80132DC2u;
+    // Where Banjo appeared when entering the current area: f32 x, y, z. Constant while in an
+    // area, new on each entry (Spiral Mountain from the game start (4200, -259, 6258) and from
+    // Banjo's house (3958, -410, 6879) by its door; the house (0, 97, 523); Jinjo Village).
+    constexpr uint32_t kEntryPoint = 0x80137320u;           // u16: Spiral Mountain 0xAF, Banjo's house 0x173, Jinjo Village 0x142
     // PROVISIONAL pause flags: each was 1 only while paused (and 0 walking, first person, eggs,
     // indoors, another area); all three must agree. Not yet checked against cutscenes.
     constexpr uint32_t kPauseFlags[] = { 0x8007A217u, 0x8007ADF3u, 0x80135A11u };
@@ -460,6 +464,24 @@ Java_io_github_bownz_btrecomp_GameState_nativeMapGeometryId(JNIEnv*, jclass) {
         return 0;
     }
     return static_cast<jint>(collision ^ (vertices << 1));
+}
+
+// Where Banjo entered the current area into out[0..2]; false when the game isn't running.
+JNIEXPORT jboolean JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeEntryPoint(JNIEnv* env, jclass, jfloatArray out) {
+    uint8_t* rdram = running_rdram();
+    if (rdram == nullptr || out == nullptr || env->GetArrayLength(out) < 3) {
+        return JNI_FALSE;
+    }
+    jfloat p[3];
+    for (int i = 0; i < 3; i++) {
+        p[i] = read_f32(rdram, kEntryPoint + 4 * i);
+        if (!std::isfinite(p[i]) || std::fabs(p[i]) > 100000.0f) {
+            return JNI_FALSE;
+        }
+    }
+    env->SetFloatArrayRegion(out, 0, 3, p);
+    return JNI_TRUE;
 }
 
 // Whether the game is paused (provisional, see kPauseFlags).
