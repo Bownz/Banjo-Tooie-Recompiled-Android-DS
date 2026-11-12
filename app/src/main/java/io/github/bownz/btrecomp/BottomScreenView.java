@@ -224,7 +224,6 @@ public final class BottomScreenView extends View {
         float movesH = showButtons ? 15 * u : 0f;
         boolean reserve = showButtons && !slideButtons;   // Hold Z: the map keeps the room
         float bottom = h - pad - markH - 2 * u - (reserve ? movesH + 3 * u : 0f);
-        float movesTop = h - pad - markH - 2 * u - movesH;
         stepSlide();
 
         // One line on top: where you are, this world's Jiggies and notes.
@@ -238,14 +237,17 @@ public final class BottomScreenView extends View {
         if (showButtons && !slideButtons) {
             drawMoves(c, new RectF(pad, bottom + 3 * u, w - pad, bottom + 3 * u + movesH));
         } else if (slideButtons && buttonSlide > 0f) {
+            // Hold Z: a column down the right side of the map, sliding in from the right edge.
             float e = 1f - (1f - buttonSlide) * (1f - buttonSlide) * (1f - buttonSlide);   // ease out
+            float colW = Math.min(30 * u, map.width() * 0.34f);
+            RectF col = new RectF(map.right - colW, map.top, map.right, map.bottom);
             c.save();
-            c.translate((1f - e) * w, 0f);
+            c.translate((1f - e) * (colW + pad + 2 * u), 0f);
             // A dark band behind them, so they read over the map.
-            fill.setColor(Color.argb(170, 14, 12, 26));
+            fill.setColor(Color.argb(185, 14, 12, 26));
             float band = 1.5f * u;
-            c.drawRoundRect(new RectF(pad - band, movesTop - band, w - pad + band, movesTop + movesH + band), 3 * u, 3 * u, fill);
-            drawMoves(c, new RectF(pad, movesTop, w - pad, movesTop + movesH));
+            c.drawRoundRect(new RectF(col.left - band, col.top - band, col.right + band, col.bottom + band), 3 * u, 3 * u, fill);
+            drawMovesColumn(c, col);
             c.restore();
         }
         drawMark(c, new RectF(pad, h - pad - markH, w - pad, h - pad));
@@ -1186,6 +1188,30 @@ public final class BottomScreenView extends View {
         }
     }
 
+    /** The move buttons stacked top to bottom (Hold Z). */
+    private void drawMovesColumn(Canvas c, RectF area) {
+        float gap = 1.5f * u;
+        float bh = (area.height() - gap * (moves.length - 1)) / moves.length;
+        float bw = area.width();
+        for (int i = 0; i < moves.length; i++) {
+            Move m = moves[i];
+            m.rect.set(area.left, area.top + i * (bh + gap), area.right, area.top + i * (bh + gap) + bh);
+            boolean on = m.down || m.lit || m == tapping;
+            float rad = Math.min(bh, bw) * 0.3f;
+            fill.setColor(on ? Color.argb(240, 150, 96, 30) : WOOD);
+            c.drawRoundRect(m.rect, rad, rad, fill);
+            stroke.setColor(on ? HONEY : WOOD_EDGE);
+            stroke.setStrokeWidth((on ? 0.6f : 0.3f) * u);
+            c.drawRoundRect(m.rect, rad, rad, stroke);
+            fitText(m.name, bw * 0.86f, Math.min(3.6f * u, bh * 0.32f));
+            text.setColor(on ? HONEY : CREAM);
+            drawCentered(c, m.name, m.rect.centerX(), m.rect.centerY() - bh * 0.12f);
+            fitText(m.keys, bw * 0.86f, Math.min(2.6f * u, bh * 0.22f));
+            text.setColor(TAN);
+            drawCentered(c, m.keys, m.rect.centerX(), m.rect.centerY() + bh * 0.24f);
+        }
+    }
+
     /** TEMPORARY: the probe's Mark button and what it's for. */
     private void drawMark(Canvas c, RectF r) {
         boolean flash = SystemClock.uptimeMillis() - markFlashAt < 300;
@@ -1252,8 +1278,13 @@ public final class BottomScreenView extends View {
         int action = e.getActionMasked();
         int index = e.getActionIndex();
         float x = e.getX(index), y = e.getY(index);
+        // Hold Z: while the buttons are out, they get the touches and the map ignores them.
+        boolean buttonsOut = slideButtons && (zHeld || buttonSlide > 0.05f);
+        if (buttonsOut && mapTouching) {
+            mapTouching = false;   // Z came on mid-gesture: drop it
+        }
         // The map: a tap cycles the zoom, a pinch zooms freely.
-        if (!bookOpen && mapImage != null && (mapTouching || (action == MotionEvent.ACTION_DOWN && mapRect.contains(x, y)))) {
+        if (!bookOpen && !buttonsOut && mapImage != null && (mapTouching || (action == MotionEvent.ACTION_DOWN && mapRect.contains(x, y)))) {
             pinch.onTouchEvent(e);
             if (action == MotionEvent.ACTION_DOWN) {
                 mapTouching = true;
@@ -1289,7 +1320,7 @@ public final class BottomScreenView extends View {
                 }
                 return true;
             }
-            if (showButtons && frame >= 0 && (!slideButtons || buttonSlide > 0.6f)) {
+            if (showButtons && frame >= 0 && (!slideButtons || buttonsOut)) {
                 for (Move m : moves) {
                     if (m.rect.contains(x, y)) {
                         pressMove(m);
