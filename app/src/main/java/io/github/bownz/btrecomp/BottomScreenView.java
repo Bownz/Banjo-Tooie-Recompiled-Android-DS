@@ -256,13 +256,20 @@ public final class BottomScreenView extends View {
      */
     private void drawMap(Canvas c, RectF r) {
         mapRect.set(r);
-        fill.setColor(Color.rgb(18, 13, 26));
-        c.drawRoundRect(r, 3 * u, 3 * u, fill);
+        // Slate grey behind the map (what's past the play area's edge), lighter at the top.
+        if (mapBackground == null || mapBackgroundTop != r.top || mapBackgroundBottom != r.bottom) {
+            mapBackground = new android.graphics.LinearGradient(0, r.top, 0, r.bottom,
+                Color.rgb(104, 104, 108), Color.rgb(68, 68, 74), android.graphics.Shader.TileMode.CLAMP);
+            mapBackgroundTop = r.top;
+            mapBackgroundBottom = r.bottom;
+        }
+        mapBackgroundPaint.setShader(mapBackground);
+        c.drawRoundRect(r, 3 * u, 3 * u, mapBackgroundPaint);
 
         float[] here = GameState.position();
         GameState.MapImage m = mapImage;
         if (m == null) {
-            text.setColor(TAN);
+            text.setColor(CREAM);
             text.setTextSize(3.6f * u);
             drawCentered(c, here == null ? "Waiting for the game" : "Drawing the map…", r.centerX(), r.centerY());
         } else {
@@ -455,6 +462,9 @@ public final class BottomScreenView extends View {
 
     // The map picture for the current area, built in the background.
     private final RectF mapRect = new RectF();
+    private final Paint mapBackgroundPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private android.graphics.Shader mapBackground;
+    private float mapBackgroundTop = Float.NaN, mapBackgroundBottom = Float.NaN;
     private final Path mapClip = new Path();
     private final Paint mapPaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
     private boolean mapWhole = false;

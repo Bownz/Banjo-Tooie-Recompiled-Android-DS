@@ -8,7 +8,8 @@
 // 3. Walkable ground is shown bright, shaded by height (low light, high dark; the outer hills
 //    dimmer), with a light outline around the area's edge only; spots inside it you can't
 //    stand on are drawn as ground; things just beyond the edge in their own colours, darker,
-//    fading out into the (transparent) background.
+//    fading out into the (transparent) background, with a soft shadow under the play area's
+//    edge; the bottom screen draws a slate grey behind it.
 //
 // Runs on a background thread (GameState.buildMap), once per area.
 
@@ -717,6 +718,12 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
     for (size_t i = 0; i < N; i++) fade[i] = (main[i] || water[i]) ? 1.0f : 0.0f;
     boxBlur(fade, W, H, 8 * px);
     boxBlur(fade, W, H, 8 * px);
+    // A soft shadow under the play area's edge on the (slate grey) background, so the play
+    // area looks raised: a wider blur of the same mask.
+    std::vector<float> shadow(N);
+    for (size_t i = 0; i < N; i++) shadow[i] = fade[i];
+    boxBlur(shadow, W, H, 5 * px);
+    boxBlur(shadow, W, H, 5 * px);
     for (float& f : fade) f = std::clamp(f * 2.2f, 0.0f, 1.0f) * 0.85f;
 
     // 4. Compose.
@@ -756,11 +763,18 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
             g = (grey * 0.15f + wg * 0.85f) * 0.5f * footShade[i];
             b = (grey * 0.15f + wb * 0.85f) * 0.5f * footShade[i];
         } else {
-            continue;   // transparent
+            r = g = b = 0;
+            fade[i] = 0;
         }
-        const int ri = std::clamp(int(r), 0, 255), gi = std::clamp(int(g), 0, 255), bi = std::clamp(int(b), 0, 255);
+        // Over the shadow (black): a = content alpha, s = shadow alpha.
         const bool inside = water[i] || main[i];
-        const uint32_t alpha = inside ? 255u : uint32_t(std::clamp(fade[i], 0.0f, 1.0f) * 255.0f);
+        const float a = inside ? 1.0f : std::clamp(fade[i], 0.0f, 1.0f);
+        const float sh = inside ? 0.0f : std::clamp(shadow[i] * 0.6f, 0.0f, 0.6f);
+        const float total = a + sh * (1.0f - a);
+        if (total < 1.0f / 255.0f) continue;   // transparent
+        const float k = a / total;
+        const int ri = std::clamp(int(r * k), 0, 255), gi = std::clamp(int(g * k), 0, 255), bi = std::clamp(int(b * k), 0, 255);
+        const uint32_t alpha = uint32_t(std::clamp(total, 0.0f, 1.0f) * 255.0f);
         out[i] = int32_t((alpha << 24) | (uint32_t(ri) << 16) | (uint32_t(gi) << 8) | uint32_t(bi));
     }
 
