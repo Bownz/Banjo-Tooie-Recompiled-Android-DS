@@ -399,6 +399,7 @@ public class BTActivity extends SDLActivity
 
     private final Handler fpsHandler = new Handler(Looper.getMainLooper());
     private int fpsLastFrame = -1;
+    private int fpsLastGameFrame = -1;
     private long fpsLastTime;
 
     private void addFpsCounter() {
@@ -418,12 +419,16 @@ public class BTActivity extends SDLActivity
         fpsHandler.post(fpsTick);
     }
 
-    /** Twice a second: the game's frames since the last tick, from its own frame counter. */
+    /**
+     * Twice a second: frames shown on screen since the last tick (including the in-between
+     * frames made for the 60 FPS setting), plus the game's own rate, which is 30 at most.
+     */
     private final Runnable fpsTick = new Runnable() {
         @Override
         public void run() {
             boolean show = (GameState.bottomSettings() & 4) != 0;
-            int frame = show ? GameState.frameCount() : -1;
+            int frame = show ? GameState.presentedFrames() : -1;
+            int gameFrame = show ? GameState.frameCount() : -1;
             long now = android.os.SystemClock.uptimeMillis();
             if (frame < 0) {
                 fpsView.setVisibility(View.GONE);
@@ -431,11 +436,16 @@ public class BTActivity extends SDLActivity
             } else {
                 if (fpsLastFrame >= 0 && frame >= fpsLastFrame && now > fpsLastTime) {
                     float fps = (frame - fpsLastFrame) * 1000f / (now - fpsLastTime);
-                    fpsView.setText(Math.round(fps) + " FPS");
+                    String text = Math.round(fps) + " FPS";
+                    if (gameFrame >= 0 && fpsLastGameFrame >= 0 && gameFrame >= fpsLastGameFrame) {
+                        text += "  (game " + Math.round((gameFrame - fpsLastGameFrame) * 1000f / (now - fpsLastTime)) + ")";
+                    }
+                    fpsView.setText(text);
                     fpsView.setVisibility(View.VISIBLE);
                     fpsView.bringToFront();
                 }
                 fpsLastFrame = frame;
+                fpsLastGameFrame = gameFrame;
                 fpsLastTime = now;
             }
             fpsHandler.postDelayed(this, 500);

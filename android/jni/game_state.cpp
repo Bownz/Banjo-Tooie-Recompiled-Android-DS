@@ -400,6 +400,17 @@ Java_io_github_bownz_btrecomp_GameState_nativeFrameCount(JNIEnv*, jclass) {
     return static_cast<jint>(read_u32(rdram, kGameFrameCount) & 0x7FFFFFFF);
 }
 
+// Frames RT64 has shown on screen (rt64-android.patch), for Show FPS; -1 before the game runs.
+extern "C" uint32_t rt64_android_presented_frames();
+
+JNIEXPORT jint JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativePresentedFrames(JNIEnv*, jclass) {
+    if (running_rdram() == nullptr) {
+        return -1;
+    }
+    return static_cast<jint>(rt64_android_presented_frames() & 0x7FFFFFFF);
+}
+
 // Banjo's position into out[0..2] (x, y, z); returns the map id, or -1 when the game isn't running.
 JNIEXPORT jint JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativePlayer(JNIEnv* env, jclass, jfloatArray out) {

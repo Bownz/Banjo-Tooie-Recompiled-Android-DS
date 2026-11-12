@@ -14,6 +14,7 @@ final class GameState {
     private GameState() {}
 
     private static native int nativeFrameCount();
+    private static native int nativePresentedFrames();
     private static native int nativeProbeMark(String snapshotDir);
     private static native int nativeBottomSettings();
     private static native int nativePlayer(float[] out);
@@ -25,6 +26,15 @@ final class GameState {
     static int frameCount() {
         try {
             return nativeFrameCount();
+        } catch (UnsatisfiedLinkError e) {
+            return -1;
+        }
+    }
+
+    /** Frames shown on screen so far (RT64's count, including in-between frames), or -1. */
+    static int presentedFrames() {
+        try {
+            return nativePresentedFrames();
         } catch (UnsatisfiedLinkError e) {
             return -1;
         }
