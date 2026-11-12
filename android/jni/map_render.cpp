@@ -645,21 +645,30 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
         raster(X, Z, W, H, [&](int i, float l0, float l1, float l2) {
             const float y = l0 * t.v[0].y + l1 * t.v[1].y + l2 * t.v[2].y;
             if (y < top[i]) return;
-            float r = 200, g = 200, b = 200;
+            float r = 200, g = 200, b = 200, alpha = 1.0f;
             if (t.tex != nullptr) {
                 const float s = l0 * t.v[0].s + l1 * t.v[1].s + l2 * t.v[2].s;
                 const float tt = l0 * t.v[0].t + l1 * t.v[1].t + l2 * t.v[2].t;
                 const int si = wrapCoord(s, t.tex->w, t.tile.cms, t.tile.ms, std::min(t.tile.w, t.tex->w));
                 const int ti = wrapCoord(tt, t.tex->h, t.tile.cmt, t.tile.mt, std::min(t.tile.h, t.tex->h));
                 const Rgba& c = t.tex->px[size_t(ti) * t.tex->w + si];
-                if (c.a <= 32) return;
+                if (c.a <= 8) return;
                 r = c.r; g = c.g; b = c.b;
+                alpha = c.a / 255.0f;
             }
             const float sr = l0 * t.v[0].r + l1 * t.v[1].r + l2 * t.v[2].r;
             const float sg = l0 * t.v[0].g + l1 * t.v[1].g + l2 * t.v[2].g;
             const float sb = l0 * t.v[0].b + l1 * t.v[1].b + l2 * t.v[2].b;
-            top[i] = y;
-            R[i] = r * sr * light; G[i] = g * sg * light; B[i] = b * sb * light;
+            // A see-through texel over the same surface (Isle o' Hags' soft-edged path overlays,
+            // drawn in several passes over the grass) blends in by its alpha, so where two path
+            // pieces meet in their faded ends they still join up.
+            const bool over = drawn[i] && alpha < 0.98f && y - top[i] < 30.0f;
+            if (!over && alpha <= 0.125f) return;
+            const float k = over ? std::min(1.0f, alpha * 1.6f) : 1.0f;   // a little stronger: paths stay readable small
+            top[i] = std::max(top[i], y);
+            R[i] = R[i] * (1 - k) + r * sr * light * k;
+            G[i] = G[i] * (1 - k) + g * sg * light * k;
+            B[i] = B[i] * (1 - k) + b * sb * light * k;
             drawn[i] = 1;
             water[i] = t.water ? 1 : 0;
         });

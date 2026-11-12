@@ -90,6 +90,12 @@ public final class BottomScreenView extends View {
     private int world = GameState.UNKNOWN;
     private boolean paused, cutscene;
     private boolean showButtons = true, dimCutscenes = true;
+    // Bottom Screen Buttons: Hold Z. The buttons are hidden until Z is held, then slide in
+    // from the right over the bottom of the map, and slide out when it's let go.
+    private boolean slideButtons, zHeld;
+    private float slide = 1f;   // 0 hidden .. 1 in place
+    private long slideAt;
+    private static final float SLIDE_MS = 160f;
     private float dim = 0f;   // 0 .. 1, eased toward the target
     private long dimAt;
 
@@ -186,6 +192,10 @@ public final class BottomScreenView extends View {
         int settings = GameState.bottomSettings();
         showButtons = (settings & 1) != 0;
         dimCutscenes = (settings & 2) != 0;
+        slideButtons = showButtons && (settings & 8) != 0;
+        boolean held = (GameState.n64Buttons() & GameState.BUTTON_Z) != 0;
+        for (Move m : moves) held |= m.down;
+        zHeld = held;
         invalidate();
     }
 
@@ -212,7 +222,10 @@ public final class BottomScreenView extends View {
             return;
         }
         float movesH = showButtons ? 15 * u : 0f;
-        float bottom = h - pad - markH - 2 * u - (showButtons ? movesH + 3 * u : 0f);
+        boolean reserve = showButtons && !slideButtons;   // Hold Z: the map keeps the room
+        float bottom = h - pad - markH - 2 * u - (reserve ? movesH + 3 * u : 0f);
+        float movesTop = h - pad - markH - 2 * u - movesH;
+        stepSlide();
 
         // One line on top: where you are, this world's Jiggies and notes.
         float stripH = 6 * u;
@@ -222,8 +235,18 @@ public final class BottomScreenView extends View {
         RectF map = new RectF(pad, pad + stripH + 2.5f * u, w - pad, bottom);
         drawMap(c, map);
 
-        if (showButtons) {
+        if (showButtons && !slideButtons) {
             drawMoves(c, new RectF(pad, bottom + 3 * u, w - pad, bottom + 3 * u + movesH));
+        } else if (slideButtons && slide > 0f) {
+            float e = 1f - (1f - slide) * (1f - slide) * (1f - slide);   // ease out
+            c.save();
+            c.translate((1f - e) * w, 0f);
+            // A dark band behind them, so they read over the map.
+            fill.setColor(Color.argb(170, 14, 12, 26));
+            float band = 1.5f * u;
+            c.drawRoundRect(new RectF(pad - band, movesTop - band, w - pad + band, movesTop + movesH + band), 3 * u, 3 * u, fill);
+            drawMoves(c, new RectF(pad, movesTop, w - pad, movesTop + movesH));
+            c.restore();
         }
         drawMark(c, new RectF(pad, h - pad - markH, w - pad, h - pad));
         drawDim(c, w, h);
@@ -1266,7 +1289,7 @@ public final class BottomScreenView extends View {
                 }
                 return true;
             }
-            if (showButtons && frame >= 0) {
+            if (showButtons && frame >= 0 && (!slideButtons || slide > 0.6f)) {
                 for (Move m : moves) {
                     if (m.rect.contains(x, y)) {
                         pressMove(m);
@@ -1292,6 +1315,22 @@ public final class BottomScreenView extends View {
             }
         }
         return true;
+    }
+
+    /** Moves the Hold Z slide toward where it should be; keeps drawing until it's there. */
+    private void stepSlide() {
+        long now = android.os.SystemClock.uptimeMillis();
+        float dt = slideAt == 0 ? 0f : Math.min(0.12f, (now - slideAt) / SLIDE_MS);   // at most a frame's step
+        slideAt = now;
+        float target = !slideButtons || zHeld ? 1f : 0f;
+        if (slide < target) {
+            slide = Math.min(target, slide + dt);
+        } else if (slide > target) {
+            slide = Math.max(target, slide - dt);
+        }
+        if (slide != target) {
+            postInvalidateOnAnimation();
+        }
     }
 
     private void pressMove(Move m) {

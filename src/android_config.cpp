@@ -49,7 +49,7 @@ namespace {
     std::atomic<bool> drag_camera{ true };
     std::atomic<int> drag_camera_speed{ 3 };
     std::atomic<int> touch_feedback{ 2 };   // 0 off, 1 light, 2 medium, 3 strong
-    std::atomic<bool> bottom_buttons{ true };
+    std::atomic<int> bottom_buttons{ 1 };   // 0 off, 1 always, 2 slide in while Z is held
     std::atomic<bool> show_fps{ false };
 
     // Video > Frame Copy (test): passed to RT64 (rt64-android.patch).
@@ -171,17 +171,23 @@ namespace {
                 }
                 save_touch_config(context);
             });
+        static EnumOptionVector button_modes = {
+            {0u, "Off", "Off"},
+            {1u, "Always", "Always"},
+            {2u, "HoldZ", "Hold Z"},
+        };
         config.add_enum_option(
             "android_bottom_buttons",
             "Bottom Screen Buttons",
             "Buttons on the bottom screen for the moves done with Z held and a C button: firing and laying "
-            "eggs, Talon Trot and Wonderwing.",
-            on_off,
+            "eggs, Talon Trot and Wonderwing. Always: shown all the time. Hold Z: hidden until you hold Z, "
+            "then they slide in from the right, and slide out when you let go.",
+            button_modes,
             1u
         );
         config.add_option_change_callback("android_bottom_buttons",
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
-                bottom_buttons.store(std::get<uint32_t>(cur) == 1u);
+                bottom_buttons.store(static_cast<int>(std::get<uint32_t>(cur)));
                 save_touch_config(context);
             });
         config.add_enum_option(
@@ -644,5 +650,6 @@ Java_io_github_bownz_btrecomp_TouchInput_nativeTouchFeedback(JNIEnv*, jclass) {
 // Bit 1 Bottom Screen Buttons, bit 2 Dim During Cutscenes, bit 4 Video > Show FPS.
 extern "C" JNIEXPORT jint JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeBottomSettings(JNIEnv*, jclass) {
-    return (bottom_buttons.load() ? 1 : 0) | (cutscene_dim.load() ? 2 : 0) | (show_fps.load() ? 4 : 0);
+    const int buttons = bottom_buttons.load();
+    return (buttons != 0 ? 1 : 0) | (cutscene_dim.load() ? 2 : 0) | (show_fps.load() ? 4 : 0) | (buttons == 2 ? 8 : 0);
 }

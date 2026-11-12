@@ -147,6 +147,18 @@ Java_io_github_bownz_btrecomp_TouchInput_nativeSetN64Buttons(JNIEnv*, jclass, ji
     direct_n64_buttons.store(static_cast<uint16_t>(buttons), std::memory_order_relaxed);
 }
 
+// Player 1's buttons as the game last read them (all controllers and touch combined), for
+// the bottom screen's Hold Z buttons.
+static std::atomic<uint16_t> last_n64_buttons{0};
+void bt_android_note_n64_buttons(uint16_t buttons) {
+    last_n64_buttons.store(buttons, std::memory_order_relaxed);
+}
+
+JNIEXPORT jint JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeN64Buttons(JNIEnv*, jclass) {
+    return last_n64_buttons.load(std::memory_order_relaxed);
+}
+
 } // extern "C"
 
 // ---- Calls from the game's settings into the activity ------------------------------------

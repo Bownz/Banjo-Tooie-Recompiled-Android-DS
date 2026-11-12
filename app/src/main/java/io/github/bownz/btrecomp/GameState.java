@@ -23,6 +23,7 @@ final class GameState {
     private static native int[] nativeBuildMap(int maxSize, float capY, float[] info);
     private static native boolean nativeFloorAbove(float x, float y, float z);
     private static native String nativeAreaName();
+    private static native int nativeN64Buttons();
     private static native int nativeMapGeometryId();
 
     /** The game's frame counter, or -1 before the game runs. */
@@ -156,6 +157,18 @@ final class GameState {
         }
         android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(pixels, w, h, android.graphics.Bitmap.Config.ARGB_8888);
         return new MapImage(bitmap, info[2], info[3], info[4]);
+    }
+
+    /** Z on the N64 controller. */
+    static final int BUTTON_Z = 0x2000;
+
+    /** Player 1's N64 buttons as the game last read them (every controller and touch combined). */
+    static int n64Buttons() {
+        try {
+            return nativeN64Buttons();
+        } catch (UnsatisfiedLinkError e) {
+            return 0;
+        }
     }
 
     /** Whether walkable floor lies directly above (x, z), more than 200 units over y. */

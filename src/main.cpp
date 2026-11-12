@@ -50,6 +50,9 @@
 
 #include "librecomp/game.hpp"
 #include "librecomp/mods.hpp"
+#ifdef __ANDROID__
+extern "C" void bt_android_note_n64_buttons(uint16_t buttons);   // android/jni/touch_controller.cpp
+#endif
 #include "librecomp/rsp.hpp"
 
 #include "funcs.h"
@@ -926,7 +929,19 @@ int main(int argc, char** argv) {
 
     ultramodern::input::callbacks_t input_callbacks{
         .poll_input = recompinput::poll_inputs,
+#ifdef __ANDROID__
+        // Android: also note player 1's buttons, so the bottom screen can show its move
+        // buttons while Z is held (android/jni/touch_controller.cpp).
+        .get_input = [](int player, uint16_t* buttons, float* x, float* y) {
+            const bool ok = recompinput::profiles::get_n64_input(player, buttons, x, y);
+            if (ok && player == 0 && buttons != nullptr) {
+                bt_android_note_n64_buttons(*buttons);
+            }
+            return ok;
+        },
+#else
         .get_input = recompinput::profiles::get_n64_input,
+#endif
         .set_rumble = recompinput::set_rumble,
         .get_connected_device_info = get_connected_device_info,
     };
