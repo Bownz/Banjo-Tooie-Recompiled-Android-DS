@@ -9,6 +9,8 @@
 // - The state the on-screen controls poll (TouchInput.nativeUiState) and their settings.
 
 #include <atomic>
+#include <cstdio>
+#include <variant>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -34,6 +36,8 @@
 extern "C" void bt_android_set_touch_controls_mode(int mode);   // android/jni/touch_controller.cpp
 extern "C" void bt_android_edit_touch_layout();                  // android/jni/touch_controller.cpp
 extern "C" void bt_android_set_bottom_screen(int enabled);        // android/jni/touch_controller.cpp
+extern "C" void rt64_android_set_ram_copy_mode(int mode);  // rt64-android.patch
+
 
 namespace {
     using EnumOptionVector = const std::vector<recomp::config::ConfigOptionEnumOption>;
@@ -46,6 +50,13 @@ namespace {
     std::atomic<int> touch_feedback{ 2 };   // 0 off, 1 light, 2 medium, 3 strong
     std::atomic<bool> bottom_buttons{ true };
     std::atomic<bool> show_fps{ false };
+
+    // Video > Frame Copy (test): passed to RT64 (rt64-android.patch).
+    void apply_frame_copy(uint32_t mode) {
+        rt64_android_set_ram_copy_mode(static_cast<int>(mode <= 2u ? mode : 0u));
+        std::printf("Frame Copy: %s\n", mode == 1u ? "Wait" : mode == 2u ? "Off" : "Late");
+        std::fflush(stdout);
+    }
     std::atomic<bool> cutscene_dim{ true };
 
     std::filesystem::path config_file(const char* name) {
@@ -423,6 +434,31 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             });
     }
 
+    {
+        // TEMPORARY test switch: how the renderer's copy of each finished frame reaches the
+        // game's memory (rt64-android.patch, rt64_android_set_ram_copy_mode). Late is the
+        // DK64 speed-up; Wait is upstream; Off skips the copy (fastest, may break effects).
+        static EnumOptionVector copy_options = {
+            {0u, "Late", "Late (fast)"},
+            {1u, "Wait", "Wait (safe)"},
+            {2u, "Off", "Off (test)"},
+        };
+        graphics_config.add_enum_option(
+            "android_frame_copy",
+            "Frame Copy (test)",
+            "How each finished frame is copied back to the game, which uses it for some effects. "
+            "Late: fastest, copied while the game carries on. Wait: the game waits for the copy, as on PC. "
+            "Off: no copy at all; much faster, but effects that use the last frame may look wrong. "
+            "For testing flicker and speed.",
+            copy_options,
+            0u
+        );
+        graphics_config.add_option_change_callback("android_frame_copy",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+                apply_frame_copy(std::get<uint32_t>(cur));
+            });
+    }
+
     auto& touch_config = recompui::config::create_config_tab("Touch", touch_config_id, false);
     add_touch_options(touch_config);
     recompui::config::set_tab_visible(touch_config_id, false);
@@ -511,6 +547,12 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
 }
 
 void bt::android::after_config_loaded() {
+    {
+        const recomp::config::ConfigValueVariant mode = recompui::config::get_graphics_config().get_option_value("android_frame_copy");
+        if (const uint32_t* value = std::get_if<uint32_t>(&mode)) {
+            apply_frame_copy(*value);
+        }
+    }
     // Once: set-ups made before B backed out of menus get Back (Menu) on B.
     const std::filesystem::path marker = config_file("menu_back_b.txt");
     if (!std::filesystem::exists(marker)) {
