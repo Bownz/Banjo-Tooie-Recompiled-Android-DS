@@ -28,8 +28,8 @@ import android.view.View;
  *   <li>Eggs and feathers carried.</li>
  *   <li>Four buttons for the moves that need Z held with a C button (Bottom Screen Buttons).</li>
  * </ul>
- * The progress book (like the game's own pause screen): it opens whenever the game is paused,
- * or by tapping the puzzle, and pages with ◀ ▶ or a swipe through every world in a table, then
+ * The progress book (like the game's own pause screen): it opens whenever the game is paused
+ * and closes when it's unpaused, and pages with ◀ ▶ or a swipe through every world in a table, then
  * each world on its own. The screen dims during cutscenes.
  *
  * The game state comes from {@link GameState}, which only reports values whose memory
@@ -59,13 +59,15 @@ public final class BottomScreenView extends View {
     private static final class Move {
         final String name, keys;
         final int buttons;        // pressed together after Z
-        final boolean hold;       // held while the finger stays down (Wonderwing)
-        final boolean toggle;     // on until tapped again (Talon Trot)
+        // Toggles (Talon Trot, Wonderwing) stay on until tapped again, holding Z the whole time
+        // like the moves need: Talon Trot taps its C button once, Wonderwing holds it too.
+        final boolean toggle;
+        final boolean holdC;
         final RectF rect = new RectF();
         boolean down, lit;
 
-        Move(String name, String keys, int buttons, boolean hold, boolean toggle) {
-            this.name = name; this.keys = keys; this.buttons = buttons; this.hold = hold; this.toggle = toggle;
+        Move(String name, String keys, int buttons, boolean toggle, boolean holdC) {
+            this.name = name; this.keys = keys; this.buttons = buttons; this.toggle = toggle; this.holdC = holdC;
         }
     }
 
@@ -73,8 +75,8 @@ public final class BottomScreenView extends View {
     private final Move[] moves = {
         new Move("Fire Egg", "Z + C▲", Z | TouchInput.N64_C_UP, false, false),
         new Move("Lay Egg", "Z + C▼", Z | TouchInput.N64_C_DOWN, false, false),
-        new Move("Talon Trot", "Z + C◀", Z | TouchInput.N64_C_LEFT, false, true),
-        new Move("Wonderwing", "hold · Z + C▶", Z | TouchInput.N64_C_RIGHT, true, false),
+        new Move("Talon Trot", "on / off · holds Z", Z | TouchInput.N64_C_LEFT, true, false),
+        new Move("Wonderwing", "on / off · holds Z", Z | TouchInput.N64_C_RIGHT, true, true),
     };
 
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -112,7 +114,7 @@ public final class BottomScreenView extends View {
     private long markFlashAt;
 
     private Move tapping;     // a tap move in progress
-    private int heldButtons;  // buttons held by hold moves
+    private int heldButtons;  // buttons held by the toggle that's on
 
     private float u = 1f;     // layout unit: 1% of the shorter side
 
@@ -147,6 +149,7 @@ public final class BottomScreenView extends View {
         heldButtons = 0;
         for (Move m : moves) {
             m.down = false;
+            m.lit = false;   // toggles go off: nothing stays held while the app is away
         }
         TouchInput.setN64Buttons(0);
         TouchInput.setHeldN64Buttons(0);
@@ -436,6 +439,7 @@ public final class BottomScreenView extends View {
         GameState.GLOWBOS, GameState.CHEATO_PAGES, GameState.HONEYCOMBS };
     private static final String[] BOOK_NAMES = { "Jiggies", "Notes", "Jinjos", "Glowbos", "Cheato Pages", "Honeycombs" };
 
+    /** Opens the book (when the game pauses). */
     private void openBook(boolean byPause) {
         bookOpen = true;
         bookByPause = byPause;
@@ -722,11 +726,6 @@ public final class BottomScreenView extends View {
                 }
                 return true;
             }
-            if (boardRect.contains(x, y)) {
-                openBook(false);
-                Haptics.tap(this);
-                return true;
-            }
             if (showButtons && frame >= 0) {
                 for (Move m : moves) {
                     if (m.rect.contains(x, y)) {
@@ -758,21 +757,34 @@ public final class BottomScreenView extends View {
     private void pressMove(Move m) {
         Haptics.tap(this);
         m.down = true;
-        if (m.hold) {
-            // Z first, then the C button a moment later, held until the finger lifts.
-            heldButtons |= Z;
-            TouchInput.setHeldN64Buttons(heldButtons);
-            final Move held = m;
-            handler.postDelayed(() -> {
-                if (held.down) {
-                    heldButtons |= held.buttons;
-                    TouchInput.setHeldN64Buttons(heldButtons);
-                }
-            }, 90);
-        } else if (tapping == null) {
-            if (m.toggle) {
-                m.lit = !m.lit;
+        if (m.toggle) {
+            boolean on = !m.lit;
+            for (Move other : moves) {
+                other.lit = false;   // one toggle at a time
             }
+            heldButtons = 0;
+            TouchInput.setHeldN64Buttons(0);
+            if (on) {
+                m.lit = true;
+                // Hold Z, then a moment later the C button: held for Wonderwing, a tap to
+                // start the Talon Trot. Z stays held until the toggle is tapped off.
+                heldButtons = Z;
+                TouchInput.setHeldN64Buttons(heldButtons);
+                final Move toggled = m;
+                handler.postDelayed(() -> {
+                    if (!toggled.lit) {
+                        return;
+                    }
+                    if (toggled.holdC) {
+                        heldButtons = toggled.buttons;
+                        TouchInput.setHeldN64Buttons(heldButtons);
+                    } else if (tapping == null) {
+                        tapping = toggled;
+                        handler.post(pressTap);
+                    }
+                }, 90);
+            }
+        } else if (tapping == null) {
             tapping = m;
             TouchInput.setN64Buttons(Z);            // crouch first...
             handler.postDelayed(pressTap, 90);      // ...then the C button
@@ -782,10 +794,6 @@ public final class BottomScreenView extends View {
 
     private void releaseMove(Move m) {
         m.down = false;
-        if (m.hold) {
-            heldButtons &= ~m.buttons;
-            TouchInput.setHeldN64Buttons(heldButtons);
-        }
         invalidate();
     }
 
