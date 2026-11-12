@@ -423,6 +423,11 @@ namespace {
                 for (int k = 0; k < 64 && ram.ok(sub + 8u * k, 8); k++) {
                     const uint32_t x0 = ram.u32(sub + 8u * k), x1 = ram.u32(sub + 8u * k + 4);
                     if ((x0 >> 24) == 0xDF) break;
+                    // Not its texture scale: the game rewrites these shared lists while it runs,
+                    // so what's in memory isn't what applied to this level's passes. Taking the
+                    // 1.0 found there drew Isle o' Hags' path overlays at double scale, so only a
+                    // quarter of each crossing showed and the path pieces didn't join (12 Nov).
+                    if ((x0 >> 24) == 0xD7) continue;
                     run(x0, x1);
                 }
                 continue;
