@@ -803,6 +803,40 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
             if (main[i] && sizes[size_t(label[i])] < biggest / 25) main[i] = 0;
     }
     const std::vector<uint8_t> inner = morph(main, W, H, px, false);
+    const std::vector<uint8_t> waterInner = morph(water, W, H, px, false);
+    // Raised scenery standing in the play area (Spiral Mountain's lair roof, above the play
+    // area's height): drawn in full colour like the ground, not faded out like the
+    // surroundings. A piece counts when at least 3/4 of its edge borders the play area
+    // (the lair roof: all of it; Jinjo Village's cliff walls: about half, still faded).
+    std::vector<uint8_t> solid(N, 0);
+    {
+        std::vector<int> label(N, -1), stack, part;
+        for (size_t start = 0; start < N; start++) {
+            if (label[start] >= 0 || main[start] || water[start] || !drawn[start]) continue;
+            part.clear();
+            stack.assign(1, int(start));
+            label[start] = 1;
+            int inside = 0, outside = 0;
+            while (!stack.empty()) {
+                const int i = stack.back();
+                stack.pop_back();
+                part.push_back(i);
+                const int x = i % W, z = i / W;
+                const int next[4][2] = { { x - 1, z }, { x + 1, z }, { x, z - 1 }, { x, z + 1 } };
+                for (const auto& n : next) {
+                    if (n[0] < 0 || n[1] < 0 || n[0] >= W || n[1] >= H) { outside++; continue; }
+                    const size_t j = size_t(n[1]) * W + n[0];
+                    if (main[j] || water[j]) { inside++; continue; }
+                    if (!drawn[j]) { outside++; continue; }
+                    if (label[j] < 0) { label[j] = 1; stack.push_back(int(j)); }
+                }
+            }
+#ifdef BT_MAP_TEST
+            if (part.size() > 200) std::fprintf(stderr, "piece %zu px at %d,%d: inside %d outside %d\n", part.size(), part[0] % W, part[0] / W, inside, outside);
+#endif
+            if (inside >= 3 * outside) for (int i : part) solid[i] = 1;
+        }
+    }
     // The outline goes only where the play area meets empty space (the map's edge), not
     // along water or raised scenery inside it (Spiral Mountain's lair roof).
     std::vector<uint8_t> nearEmpty(N);
@@ -867,14 +901,16 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
     for (size_t i = 0; i < N; i++) {
         float r, g, b;
         if (water[i]) {
-            // Water: its own texture pulled towards a clear blue, no warm tint. (No shoreline:
-            // the ground's own edge shading shows it; the user preferred it without, 12 Nov.)
+            // Water: its own texture pulled towards a clear blue, no warm tint, a light shoreline.
             r = sR[i] * 0.5f + 60 * 0.5f;
             g = sG[i] * 0.5f + 135 * 0.5f;
             b = sB[i] * 0.5f + 225 * 0.5f;
-        } else if (main[i]) {
+            if (!waterInner[i]) {
+                r = r * 0.3f + 205 * 0.7f; g = g * 0.3f + 238 * 0.7f; b = b * 0.3f + 255 * 0.7f;
+            }
+        } else if (main[i] || solid[i]) {
             const float k = std::clamp((ground[i] - lo) / std::max(1.0f, hi - lo), 0.0f, 1.0f);
-            float f = 1.08f - 0.55f * k;
+            float f = main[i] ? 1.08f - 0.55f * k : 1.0f;   // raised scenery keeps its own colours
 
             r = sR[i] * (1 - warm) + warmR * warm;
             g = sG[i] * (1 - warm) + warmG * warm;
@@ -883,7 +919,7 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
             r = (grey + (r - grey) * saturation) * f * footShade[i];
             g = (grey + (g - grey) * saturation) * f * footShade[i];
             b = (grey + (b - grey) * saturation) * f * footShade[i];
-            if (!inner[i] && nearEmpty[i]) {   // the outline: only where the map ends
+            if (main[i] && !inner[i] && nearEmpty[i]) {   // the outline: only where the map ends
                 r = r * 0.1f + 255 * 0.9f; g = g * 0.1f + 236 * 0.9f; b = b * 0.1f + 190 * 0.9f;
             }
         } else if ((drawn[i] || walk[i]) && fade[i] > 0.02f) {
@@ -898,7 +934,7 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
             fade[i] = 0;
         }
         // Over the shadow (black): a = content alpha, s = shadow alpha.
-        const bool inside = water[i] || main[i];
+        const bool inside = water[i] || main[i] || solid[i];
         const float a = inside ? 1.0f : std::clamp(fade[i], 0.0f, 1.0f);
         const float sh = inside ? 0.0f : std::clamp(shadow[i] * 0.6f, 0.0f, 0.6f);
         const float total = a + sh * (1.0f - a);
