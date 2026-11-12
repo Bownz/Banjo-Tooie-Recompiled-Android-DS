@@ -182,6 +182,7 @@ public final class BottomScreenView extends View {
         refreshMap();
         recordEntry();
         updateHeading();
+        easeArrow();
         int settings = GameState.bottomSettings();
         showButtons = (settings & 1) != 0;
         dimCutscenes = (settings & 2) != 0;
@@ -312,7 +313,7 @@ public final class BottomScreenView extends View {
             if (here != null) {
                 float px = r.centerX() + (here[0] - cx) * viewScale;
                 float pz = r.centerY() + (here[2] - cz) * viewScale;
-                drawArrow(c, px, pz, arrowDegrees, (!mapWhole ? 2.6f : 2.0f) * u);
+                drawArrow(c, px, pz, shownDegrees, (!mapWhole ? 2.6f : 2.0f) * u);
             }
             text.setTextSize(2.4f * u);
             text.setColor(Color.argb(170, 232, 213, 168));
@@ -347,6 +348,22 @@ public final class BottomScreenView extends View {
     private float arrowDegrees = Float.NaN;
     private float lastX = Float.NaN, lastZ = Float.NaN;
     private boolean facingFlipped;
+
+    // What the arrow shows: eases towards arrowDegrees the short way round (~30 times a second).
+    private float shownDegrees = Float.NaN;
+
+    private void easeArrow() {
+        if (Float.isNaN(arrowDegrees)) {
+            return;
+        }
+        if (Float.isNaN(shownDegrees)) {
+            shownDegrees = arrowDegrees;
+            return;
+        }
+        float diff = ((arrowDegrees - shownDegrees) % 360f + 540f) % 360f - 180f;
+        shownDegrees = Math.abs(diff) < 0.5f ? arrowDegrees : shownDegrees + diff * 0.3f;
+        shownDegrees = (shownDegrees % 360f + 360f) % 360f;
+    }
 
     private void updateHeading() {
         float[] p = GameState.position();
@@ -529,6 +546,7 @@ public final class BottomScreenView extends View {
             mapImage = null;
             wantedCap = GameState.WHOLE;
             mapCap = GameState.WHOLE;
+            cacheTried = Integer.MIN_VALUE;
             if (id != 0) {
                 buildMap(id, wantedCap);
             }
@@ -536,6 +554,12 @@ public final class BottomScreenView extends View {
         }
         if (id == 0) {
             return;
+        }
+        // An area seen before: show its saved map straight away (the fresh one replaces it).
+        int area = GameState.area();
+        if (mapImage == null && area >= 0 && cacheTried != area) {
+            cacheTried = area;
+            showSavedMap(id, area, GameState.WHOLE);
         }
         if (now - layerCheckedAt > 500) {
             layerCheckedAt = now;
@@ -550,6 +574,14 @@ public final class BottomScreenView extends View {
             return;
         }
         if (wantedCap != mapCap) {
+            if (area >= 0) {
+                GameState.MapImage saved = mapMemory.get(mapKey(area, wantedCap));
+                if (saved != null) {   // a storey seen before: switch at once, refresh behind it
+                    mapImage = saved;
+                    mapCap = wantedCap;
+                    invalidate();
+                }
+            }
             buildMap(id, wantedCap);
         } else if ((mapImage == null || !mapRebuilt) && now - mapGeometryAt > 1500) {
             mapRebuilt = true;
@@ -563,18 +595,112 @@ public final class BottomScreenView extends View {
         }
         mapBuilding = true;
         mapWorker.execute(() -> {
+            int areaBefore = GameState.area();
             GameState.MapImage built = GameState.buildMap(2048, cap);
+            int areaAfter = GameState.area();
+            if (built != null && areaBefore >= 0 && areaBefore == areaAfter) {
+                saveMap(areaBefore, cap, built);
+            }
             post(() -> {
                 mapBuilding = false;
                 if (id == mapGeometry && built != null) {
                     mapImage = built;
                     mapCap = cap;
+                    if (areaBefore >= 0 && areaBefore == areaAfter) {
+                        mapMemory.put(mapKey(areaBefore, cap), built);
+                    }
                     invalidate();
                 } else if (id == mapGeometry && cap != GameState.WHOLE) {
                     mapCap = cap;   // nothing below: keep showing the whole area
                 }
             });
         });
+    }
+
+    // ---- Explored areas ----------------------------------------------------------------
+    // Each area's map (and storey) is kept: the last few in memory, all of them as PNG files in
+    // the app's cache, by the game's map id. Bump MAP_CACHE_VERSION when the map's look changes.
+    private static final String MAP_CACHE_VERSION = "v1";
+    private int cacheTried = Integer.MIN_VALUE;
+    private final java.util.LinkedHashMap<String, GameState.MapImage> mapMemory =
+        new java.util.LinkedHashMap<String, GameState.MapImage>(8, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(java.util.Map.Entry<String, GameState.MapImage> eldest) {
+                return size() > 4;
+            }
+        };
+
+    private static String mapKey(int area, float cap) {
+        return MAP_CACHE_VERSION + "-" + Integer.toHexString(area) + "-" + (cap >= GameState.WHOLE ? "all" : Integer.toString(Math.round(cap)));
+    }
+
+    private java.io.File mapFile(String key, String ext) {
+        java.io.File dir = new java.io.File(getContext().getCacheDir(), "maps");
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        return new java.io.File(dir, "map-" + key + ext);
+    }
+
+    /** Shows a saved map for the area right away: from memory, or read from the cache in the background. */
+    private void showSavedMap(int id, int area, float cap) {
+        String key = mapKey(area, cap);
+        GameState.MapImage memory = mapMemory.get(key);
+        if (memory != null) {
+            mapImage = memory;
+            invalidate();
+            return;
+        }
+        mapWorker.execute(() -> {
+            GameState.MapImage loaded = loadMap(key);
+            if (loaded == null) {
+                return;
+            }
+            post(() -> {
+                if (id == mapGeometry && mapImage == null) {
+                    mapImage = loaded;
+                    mapMemory.put(key, loaded);
+                    invalidate();
+                }
+            });
+        });
+    }
+
+    private GameState.MapImage loadMap(String key) {
+        java.io.File png = mapFile(key, ".png"), meta = mapFile(key, ".txt");
+        if (!png.isFile() || !meta.isFile()) {
+            return null;
+        }
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(meta))) {
+            String[] v = r.readLine().trim().split(" ");
+            android.graphics.Bitmap b = android.graphics.BitmapFactory.decodeFile(png.getPath());
+            if (b == null || v.length < 3) {
+                return null;
+            }
+            return new GameState.MapImage(b, Float.parseFloat(v[0]), Float.parseFloat(v[1]), Float.parseFloat(v[2]));
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Saves a map to the cache (on the map worker thread). */
+    private void saveMap(int area, float cap, GameState.MapImage m) {
+        String key = mapKey(area, cap);
+        java.io.File png = mapFile(key, ".png"), meta = mapFile(key, ".txt");
+        java.io.File tmp = mapFile(key, ".png.tmp");
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(tmp)) {
+            if (!m.bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)) {
+                return;
+            }
+        } catch (java.io.IOException e) {
+            return;
+        }
+        try (java.io.FileWriter w = new java.io.FileWriter(meta)) {
+            w.write(m.minX + " " + m.minZ + " " + m.scale + "\n");
+        } catch (java.io.IOException e) {
+            return;
+        }
+        //noinspection ResultOfMethodCallIgnored
+        tmp.renameTo(png);
     }
 
     // ---- Area names --------------------------------------------------------------------
