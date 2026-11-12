@@ -452,13 +452,23 @@ namespace {
 
 // Builds the current area's map picture: ARGB pixels (0 = transparent) and meta =
 // { width, height, world x at pixel 0, world z at pixel 0, pixels per world unit }.
-bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, float meta[5]) {
+bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int32_t>& out, float meta[5]) {
     const Ram ram{ rdram };
 
     std::vector<Tri> tris;
     std::map<std::tuple<uint32_t, int, int, int, int, uint32_t, bool>, Texture> textures;
     std::vector<Floor> floors;
     if (!collect(ram, kModelPtr, kTextureBlockPtr, false, tris, textures) || !collectFloors(ram, floors)) return false;
+    // A floor layer (Banjo under another floor): leave out everything entirely above capY.
+    if (capY < 1e8f) {
+        tris.erase(std::remove_if(tris.begin(), tris.end(), [&](const Tri& t) {
+            return std::min({ t.v[0].y, t.v[1].y, t.v[2].y }) > capY;
+        }), tris.end());
+        floors.erase(std::remove_if(floors.begin(), floors.end(), [&](const Floor& f) {
+            return std::min({ f.p[0][1], f.p[1][1], f.p[2][1] }) > capY;
+        }), floors.end());
+        if (floors.empty()) return false;
+    }
     // The second (see-through) model: only its water is drawn: bluish textures at about the
     // ground's height. In Spiral Mountain that's the moat, river and pool; Jinjo Village's is
     // grey mist/scenery from far below the island to far above it (not drawn).
@@ -758,19 +768,67 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
     return true;
 }
 
+// Whether some walkable floor lies directly above (x, z), more than 200 units over y: Banjo is
+// under another floor (a lower storey), so the map should show his layer.
+bool bt_floor_above(const uint8_t* rdram, float x, float y, float z) {
+    const Ram ram{ rdram };
+    std::vector<Floor> floors;
+    if (!collectFloors(ram, floors)) return false;
+    for (const Floor& f : floors) {
+        const float* a = f.p[0]; const float* b = f.p[1]; const float* c = f.p[2];
+        const float d = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+        if (std::fabs(d) < 1e-6f) continue;
+        const float l0 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / d;
+        const float l1 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / d;
+        const float l2 = 1.0f - l0 - l1;
+        if (l0 < 0 || l1 < 0 || l2 < 0) continue;
+        if (l0 * a[1] + l1 * b[1] + l2 * c[1] > y + 200.0f) return true;
+    }
+    return false;
+}
+
 #ifndef BT_MAP_TEST
-// GameState.buildMap: runs on a background thread.
+// GameState.buildMap: runs on a background thread. capY: leave out what's entirely above it
+// (a lower storey's map), or >= 1e8 for the whole area.
 extern "C" JNIEXPORT jintArray JNICALL
-Java_io_github_bownz_btrecomp_GameState_nativeBuildMap(JNIEnv* env, jclass, jint maxSize, jfloatArray info) {
+Java_io_github_bownz_btrecomp_GameState_nativeBuildMap(JNIEnv* env, jclass, jint maxSize, jfloat capY, jfloatArray info) {
     uint8_t* rdram = bt_android_running_rdram();
     if (rdram == nullptr || info == nullptr || env->GetArrayLength(info) < 5) return nullptr;
     std::vector<int32_t> out;
     float meta[5];
-    if (!bt_build_map(rdram, maxSize, out, meta)) return nullptr;
+    if (!bt_build_map(rdram, maxSize, capY, out, meta)) return nullptr;
     jintArray pixels = env->NewIntArray(jsize(out.size()));
     if (pixels == nullptr) return nullptr;
     env->SetIntArrayRegion(pixels, 0, jsize(out.size()), reinterpret_cast<const jint*>(out.data()));
     env->SetFloatArrayRegion(info, 0, 5, meta);
     return pixels;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeFloorAbove(JNIEnv*, jclass, jfloat x, jfloat y, jfloat z) {
+    uint8_t* rdram = bt_android_running_rdram();
+    return rdram != nullptr && bt_floor_above(rdram, x, y, z) ? JNI_TRUE : JNI_FALSE;
+}
+
+// The area's name as the game writes it on entering (0x80191560, found 12 Nov: "SPIRAL
+// MOUNTAIN", "BANJO'S HOUSE", "ISLE O' HAGS ( JINJO VILLAGE )"); null when it isn't there
+// (it isn't after loading a save) or doesn't look like a name.
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeAreaName(JNIEnv* env, jclass) {
+    uint8_t* rdram = bt_android_running_rdram();
+    if (rdram == nullptr) return nullptr;
+    const Ram ram{ rdram };
+    char name[64];
+    int n = 0;
+    for (; n < 63; n++) {
+        const char c = char(ram.u8(0x80191560u + n));
+        if (c == 0) break;
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == ' ' || c == '\'' || c == '(' || c == ')' || c == '-' || c == '.' || c == '&' || c == '!';
+        if (!ok) return nullptr;
+        name[n] = c;
+    }
+    if (n < 4 || n >= 63) return nullptr;
+    name[n] = 0;
+    return env->NewStringUTF(name);
 }
 #endif

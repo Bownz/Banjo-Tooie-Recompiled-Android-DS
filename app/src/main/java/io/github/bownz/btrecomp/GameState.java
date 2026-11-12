@@ -20,7 +20,9 @@ final class GameState {
     private static native int nativePlayer(float[] out);
     private static native boolean nativePaused();
     private static native boolean nativeEntryPoint(float[] out);
-    private static native int[] nativeBuildMap(int maxSize, float[] info);
+    private static native int[] nativeBuildMap(int maxSize, float capY, float[] info);
+    private static native boolean nativeFloorAbove(float x, float y, float z);
+    private static native String nativeAreaName();
     private static native int nativeMapGeometryId();
 
     /** The game's frame counter, or -1 before the game runs. */
@@ -133,12 +135,18 @@ final class GameState {
         }
     }
 
-    /** Draws the current area's map, at most maxSize pixels across; slow (call off the UI thread). */
-    static MapImage buildMap(int maxSize) {
+    /** No floor layer: the whole area (for buildMap). */
+    static final float WHOLE = 1e9f;
+
+    /**
+     * Draws the current area's map, at most maxSize pixels across; slow (call off the UI thread).
+     * capY: leave out everything entirely above it (the storey Banjo is on), or WHOLE.
+     */
+    static MapImage buildMap(int maxSize, float capY) {
         float[] info = new float[5];
         int[] pixels;
         try {
-            pixels = nativeBuildMap(maxSize, info);
+            pixels = nativeBuildMap(maxSize, capY, info);
         } catch (UnsatisfiedLinkError e) {
             return null;
         }
@@ -148,6 +156,24 @@ final class GameState {
         }
         android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(pixels, w, h, android.graphics.Bitmap.Config.ARGB_8888);
         return new MapImage(bitmap, info[2], info[3], info[4]);
+    }
+
+    /** Whether walkable floor lies directly above (x, z), more than 200 units over y. */
+    static boolean floorAbove(float x, float y, float z) {
+        try {
+            return nativeFloorAbove(x, y, z);
+        } catch (UnsatisfiedLinkError e) {
+            return false;
+        }
+    }
+
+    /** The area's name as the game writes it on entering ("ISLE O' HAGS ( JINJO VILLAGE )"), or null. */
+    static String areaName() {
+        try {
+            return nativeAreaName();
+        } catch (UnsatisfiedLinkError e) {
+            return null;
+        }
     }
 
     /** Changes when the area's collision data does (0 when there's none). */

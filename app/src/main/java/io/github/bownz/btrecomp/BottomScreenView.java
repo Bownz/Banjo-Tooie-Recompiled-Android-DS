@@ -168,7 +168,8 @@ public final class BottomScreenView extends View {
 
     private void poll() {
         frame = GameState.frameCount();
-        world = GameState.world();
+        refreshAreaName();
+        world = areaWorld >= 0 ? areaWorld : GameState.world();
         boolean wasPaused = paused;
         paused = GameState.paused();
         if (paused && !wasPaused && !bookOpen) {
@@ -180,6 +181,7 @@ public final class BottomScreenView extends View {
         GameState.refreshPlayer();
         refreshMap();
         recordEntry();
+        updateHeading();
         int settings = GameState.bottomSettings();
         showButtons = (settings & 1) != 0;
         dimCutscenes = (settings & 2) != 0;
@@ -230,7 +232,7 @@ public final class BottomScreenView extends View {
         text.setTextSize(3.4f * u);
         text.setTextAlign(Paint.Align.LEFT);
         text.setColor(TAN);
-        String where = world >= 0 ? GameState.WORLDS[world] : "Banjo-Tooie";
+        String where = world >= 0 ? GameState.WORLDS[world] : (areaLabel != null ? areaLabel : "Banjo-Tooie");
         c.drawText(where, r.left, r.centerY() - (text.descent() + text.ascent()) / 2f, text);
         text.setTextAlign(Paint.Align.RIGHT);
         text.setColor(HONEY);
@@ -267,8 +269,8 @@ public final class BottomScreenView extends View {
             // View: world units -> screen. Close-up: about 4500 units across the panel's short side.
             float worldW = m.bitmap.getWidth() / m.scale, worldH = m.bitmap.getHeight() / m.scale;
             float viewScale, cx, cz;
-            if (mapFollow && here != null) {
-                viewScale = Math.min(r.width(), r.height()) / 4500f;
+            if (!mapWhole && here != null) {
+                viewScale = Math.min(r.width(), r.height()) / followSpan;
                 cx = here[0];
                 cz = here[2];
             } else {
@@ -295,7 +297,7 @@ public final class BottomScreenView extends View {
                 for (int i = 0; i < entries.size(); i++) {
                     float[] e = entries.get(i);
                     drawEntrance(c, r.centerX() + (e[0] - cx) * viewScale, r.centerY() + (e[2] - cz) * viewScale,
-                        (mapFollow ? 2.2f : 1.7f) * u, i == entries.size() - 1);
+                        (!mapWhole ? 2.2f : 1.7f) * u, i == entries.size() - 1);
                 }
                 c.restoreToCount(saved2);
             }
@@ -303,17 +305,72 @@ public final class BottomScreenView extends View {
             if (here != null) {
                 float px = r.centerX() + (here[0] - cx) * viewScale;
                 float pz = r.centerY() + (here[2] - cz) * viewScale;
-                drawArrow(c, px, pz, GameState.facing(), (mapFollow ? 2.6f : 2.0f) * u);
+                drawArrow(c, px, pz, arrowDegrees, (!mapWhole ? 2.6f : 2.0f) * u);
             }
             text.setTextSize(2.4f * u);
             text.setColor(Color.argb(170, 232, 213, 168));
             text.setTextAlign(Paint.Align.RIGHT);
-            c.drawText(mapFollow ? "Tap: whole area" : "Tap: close-up", r.right - 2 * u, r.bottom - 1.6f * u, text);
+            c.drawText("Tap or pinch to zoom", r.right - 2 * u, r.bottom - 1.6f * u, text);
+            // The area's name, top left (once the game has shown it).
+            if (areaLabel != null) {
+                text.setTextAlign(Paint.Align.LEFT);
+                text.setTextSize(3.0f * u);
+                float tw = text.measureText(areaLabel);
+                fill.setColor(Color.argb(170, 18, 13, 26));
+                c.drawRoundRect(r.left + 1.5f * u, r.top + 1.5f * u, r.left + 4.5f * u + tw, r.top + 6.5f * u, 2 * u, 2 * u, fill);
+                text.setColor(CREAM);
+                c.drawText(areaLabel, r.left + 3 * u, r.top + 5.1f * u, text);
+            }
+            if (mapCap < GameState.WHOLE) {
+                text.setTextAlign(Paint.Align.LEFT);
+                text.setTextSize(2.4f * u);
+                text.setColor(Color.argb(200, 232, 213, 168));
+                c.drawText("Lower floor", r.left + 2 * u, r.bottom - 1.6f * u, text);
+            }
             text.setTextAlign(Paint.Align.CENTER);
         }
         stroke.setColor(Color.argb(200, 206, 162, 70));
         stroke.setStrokeWidth(0.45f * u);
         c.drawRoundRect(r, 3 * u, 3 * u, stroke);
+    }
+
+    // The arrow's direction. While Banjo moves it's the way he's moving; standing still it's the
+    // game's facing value, flipped when that was last seen pointing backwards (it does during
+    // Talon Trot, where Kazooie carries Banjo the other way round).
+    private float arrowDegrees = Float.NaN;
+    private float lastX = Float.NaN, lastZ = Float.NaN;
+    private boolean facingFlipped;
+
+    private void updateHeading() {
+        float[] p = GameState.position();
+        float facing = GameState.facing();
+        if (p == null) {
+            lastX = Float.NaN;
+            return;
+        }
+        if (!Float.isNaN(lastX)) {
+            float dx = p[0] - lastX, dz = p[2] - lastZ;
+            if (dx * dx + dz * dz > 6f * 6f && dx * dx + dz * dz < 400f * 400f) {   // moving (not a warp)
+                float moving = (float) Math.toDegrees(Math.atan2(dx, dz));
+                arrowDegrees = moving;
+                if (!Float.isNaN(facing)) {
+                    float diff = Math.abs(((facing - moving) % 360f + 540f) % 360f - 180f);   // 0 = opposite
+                    if (diff < 50f) {
+                        facingFlipped = true;
+                    } else if (diff > 130f) {
+                        facingFlipped = false;
+                    }
+                }
+                lastX = p[0];
+                lastZ = p[2];
+                return;
+            }
+        }
+        lastX = p[0];
+        lastZ = p[2];
+        if (!Float.isNaN(facing)) {
+            arrowDegrees = facingFlipped ? facing + 180f : facing;
+        }
     }
 
     /** An entrance: a small door (rounded top) in a ring. */
@@ -400,7 +457,38 @@ public final class BottomScreenView extends View {
     private final RectF mapRect = new RectF();
     private final Path mapClip = new Path();
     private final Paint mapPaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
-    private boolean mapFollow = true;
+    private boolean mapWhole = false;
+    private float followSpan = 4500f;   // world units across the panel's short side (close-up)
+    private boolean mapTouching, mapPinched;
+    private long mapTouchAt;
+    private final android.view.ScaleGestureDetector pinch = new android.view.ScaleGestureDetector(getContext(),
+        new android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override
+            public boolean onScale(android.view.ScaleGestureDetector d) {
+                if (mapWhole) {
+                    mapWhole = false;
+                    followSpan = 12000f;
+                }
+                followSpan = Math.max(1200f, Math.min(30000f, followSpan / d.getScaleFactor()));
+                mapPinched = true;
+                invalidate();
+                return true;
+            }
+        });
+
+    /** Tap: close-up -> wider -> whole area -> close-up. */
+    private void cycleZoom() {
+        if (mapWhole) {
+            mapWhole = false;
+            followSpan = 3500f;
+        } else if (followSpan < 5000f) {
+            followSpan = 7500f;
+        } else {
+            mapWhole = true;
+        }
+        Haptics.tap(this);
+        invalidate();
+    }
     private volatile GameState.MapImage mapImage;
     private int mapGeometry = 0;
     private long mapGeometryAt;
@@ -412,7 +500,15 @@ public final class BottomScreenView extends View {
         return t;
     });
 
-    /** Builds a new area's map (and once more 1.5 s later, in case the area was still loading). */
+    // The floor layer shown: GameState.WHOLE, or a height cap when Banjo is under another floor.
+    private float mapCap = GameState.WHOLE;
+    private float wantedCap = GameState.WHOLE;
+    private long layerCheckedAt;
+
+    /**
+     * Builds a new area's map (and once more 1.5 s later, in case the area was still loading),
+     * and a lower storey's when Banjo is under another floor (checked twice a second).
+     */
     private void refreshMap() {
         int id = GameState.mapGeometryId();
         long now = SystemClock.uptimeMillis();
@@ -421,30 +517,119 @@ public final class BottomScreenView extends View {
             mapGeometryAt = now;
             mapRebuilt = false;
             mapImage = null;
+            wantedCap = GameState.WHOLE;
+            mapCap = GameState.WHOLE;
             if (id != 0) {
-                buildMap(id);
+                buildMap(id, wantedCap);
             }
-        } else if (id != 0 && !mapBuilding && (mapImage == null || !mapRebuilt) && now - mapGeometryAt > 1500) {
+            return;
+        }
+        if (id == 0) {
+            return;
+        }
+        if (now - layerCheckedAt > 500) {
+            layerCheckedAt = now;
+            float[] p = GameState.position();
+            if (p != null) {
+                boolean under = GameState.floorAbove(p[0], p[1], p[2]);
+                // Round the cap so small height changes on one storey don't redraw the map.
+                wantedCap = under ? (float) (Math.ceil((p[1] + 250f) / 500f) * 500f) : GameState.WHOLE;
+            }
+        }
+        if (mapBuilding) {
+            return;
+        }
+        if (wantedCap != mapCap) {
+            buildMap(id, wantedCap);
+        } else if ((mapImage == null || !mapRebuilt) && now - mapGeometryAt > 1500) {
             mapRebuilt = true;
-            buildMap(id);
+            buildMap(id, wantedCap);
         }
     }
 
-    private void buildMap(int id) {
+    private void buildMap(int id, float cap) {
         if (mapBuilding) {
             return;
         }
         mapBuilding = true;
         mapWorker.execute(() -> {
-            GameState.MapImage built = GameState.buildMap(2048);
+            GameState.MapImage built = GameState.buildMap(2048, cap);
             post(() -> {
                 mapBuilding = false;
                 if (id == mapGeometry && built != null) {
                     mapImage = built;
+                    mapCap = cap;
                     invalidate();
+                } else if (id == mapGeometry && cap != GameState.WHOLE) {
+                    mapCap = cap;   // nothing below: keep showing the whole area
                 }
             });
         });
+    }
+
+    // ---- Area names --------------------------------------------------------------------
+    // The game writes the area's name when you enter it (not after loading a save). Each one
+    // seen is remembered (by the game's map id) for next time.
+    private String areaLabel;
+    private int nameArea = GameState.UNKNOWN;
+    private long nameAreaSince;
+    private String nameBefore;
+
+    private void refreshAreaName() {
+        int area = GameState.area();
+        long now = SystemClock.uptimeMillis();
+        android.content.SharedPreferences names = getContext().getSharedPreferences("area_names", android.content.Context.MODE_PRIVATE);
+        if (area != nameArea) {
+            nameArea = area;
+            nameAreaSince = now;
+            nameBefore = GameState.areaName();
+            String known = area >= 0 ? names.getString(Integer.toString(area), null) : null;
+            setAreaName(known);
+            return;
+        }
+        if (area < 0 || now - nameAreaSince > 8000) {
+            return;
+        }
+        String seen = GameState.areaName();
+        if (seen != null && !seen.equals(nameBefore)) {
+            names.edit().putString(Integer.toString(area), seen).apply();
+            setAreaName(seen);
+            nameBefore = seen;
+        }
+    }
+
+    /** "ISLE O' HAGS ( JINJO VILLAGE )" -> label "Jinjo Village", world Isle o' Hags. */
+    private void setAreaName(String raw) {
+        if (raw == null) {
+            areaLabel = null;
+            areaWorld = GameState.UNKNOWN;
+            return;
+        }
+        String world = raw.trim(), place = world;
+        int open = raw.indexOf('('), close = raw.lastIndexOf(')');
+        if (open > 0 && close > open) {
+            world = raw.substring(0, open).trim();
+            place = raw.substring(open + 1, close).trim();
+        }
+        areaLabel = titleCase(place);
+        areaWorld = GameState.UNKNOWN;
+        for (int i = 0; i < GameState.WORLDS.length; i++) {
+            if (GameState.WORLDS[i].equalsIgnoreCase(world) || GameState.WORLDS[i].equalsIgnoreCase(place)) {
+                areaWorld = i;
+            }
+        }
+    }
+
+    private int areaWorld = GameState.UNKNOWN;
+
+    private static String titleCase(String s) {
+        StringBuilder out = new StringBuilder();
+        boolean start = true;
+        for (char ch : s.toLowerCase(java.util.Locale.ROOT).toCharArray()) {
+            out.append(start && Character.isLetter(ch) ? Character.toUpperCase(ch) : ch);
+            start = ch == ' ' || ch == '(' || ch == '-';
+        }
+        return out.toString().replace(" O' ", " o' ").replace(" Of ", " of ").replace(" The ", " the ");
     }
 
     private static final int MAP_DOT = Color.rgb(230, 70, 60);
@@ -893,16 +1078,25 @@ public final class BottomScreenView extends View {
         int action = e.getActionMasked();
         int index = e.getActionIndex();
         float x = e.getX(index), y = e.getY(index);
+        // The map: a tap cycles the zoom, a pinch zooms freely.
+        if (!bookOpen && mapImage != null && (mapTouching || (action == MotionEvent.ACTION_DOWN && mapRect.contains(x, y)))) {
+            pinch.onTouchEvent(e);
+            if (action == MotionEvent.ACTION_DOWN) {
+                mapTouching = true;
+                mapPinched = false;
+                mapTouchAt = SystemClock.uptimeMillis();
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                if (action == MotionEvent.ACTION_UP && !mapPinched && SystemClock.uptimeMillis() - mapTouchAt < 400) {
+                    cycleZoom();
+                }
+                mapTouching = false;
+            }
+            return true;
+        }
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
             if (markRect.contains(x, y)) {
                 marks = Math.max(marks, GameState.probeMark(getContext()));
                 markFlashAt = SystemClock.uptimeMillis();
-                Haptics.tap(this);
-                invalidate();
-                return true;
-            }
-            if (!bookOpen && mapImage != null && mapRect.contains(x, y)) {
-                mapFollow = !mapFollow;
                 Haptics.tap(this);
                 invalidate();
                 return true;
