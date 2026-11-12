@@ -44,12 +44,40 @@ namespace {
     constexpr uint32_t kPlayerStateSlotTable = 0x80135490u;  // 8 pointers
     constexpr uint32_t kPlayerStateSlotCount = 8u;
 
+    // Found with the probe's snapshots (0.4.2, Spiral Mountain, 11 Nov): see the project doc
+    // bt-android-ram-probe.md.
+    constexpr uint32_t kPlayerPosition = 0x80136F50u;  // f32 x, y, z: steady through pause and first person
+    constexpr uint32_t kMapId = 0x80132DC2u;           // u16: Spiral Mountain 0xAF, Banjo's house 0x173, Jinjo Village 0x142
+    // PROVISIONAL pause flags: each was 1 only while paused (and 0 walking, first person, eggs,
+    // indoors, another area); all three must agree. Not yet checked against cutscenes.
+    constexpr uint32_t kPauseFlags[] = { 0x8007A217u, 0x8007ADF3u, 0x80135A11u };
+
     constexpr size_t kRdramSize = 8 * 1024 * 1024;
 
     // The recompiler stores RDRAM as host-endian 32-bit words (see MEM_BU / MEM_HU in
     // N64Recomp's recomp.h): a guest byte address is XORed with 3.
     uint32_t read_u32(const uint8_t* rdram, uint32_t address) {
         return *reinterpret_cast<const uint32_t*>(rdram + (address - 0x80000000u));
+    }
+
+    uint16_t read_u16(const uint8_t* rdram, uint32_t address) {
+        return *reinterpret_cast<const uint16_t*>(rdram + ((address - 0x80000000u) ^ 2));
+    }
+
+    uint8_t read_u8(const uint8_t* rdram, uint32_t address) {
+        return rdram[(address - 0x80000000u) ^ 3];
+    }
+
+    float read_f32(const uint8_t* rdram, uint32_t address) {
+        float v;
+        std::memcpy(&v, rdram + (address - 0x80000000u), 4);
+        return v;
+    }
+
+    // RDRAM while the game is running, else null.
+    uint8_t* running_rdram() {
+        uint8_t* rdram = g_rdram.load();
+        return rdram != nullptr && ultramodern::is_game_started() ? rdram : nullptr;
     }
 
     // ---- TEMPORARY probe ----------------------------------------------------------------
@@ -311,6 +339,39 @@ Java_io_github_bownz_btrecomp_GameState_nativeFrameCount(JNIEnv*, jclass) {
         return -1;
     }
     return static_cast<jint>(read_u32(rdram, kGameFrameCount) & 0x7FFFFFFF);
+}
+
+// Banjo's position into out[0..2] (x, y, z); returns the map id, or -1 when the game isn't running.
+JNIEXPORT jint JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativePlayer(JNIEnv* env, jclass, jfloatArray out) {
+    uint8_t* rdram = running_rdram();
+    if (rdram == nullptr || out == nullptr || env->GetArrayLength(out) < 3) {
+        return -1;
+    }
+    jfloat p[3];
+    for (int i = 0; i < 3; i++) {
+        p[i] = read_f32(rdram, kPlayerPosition + 4 * i);
+        if (!std::isfinite(p[i]) || std::fabs(p[i]) > 100000.0f) {
+            return -1;
+        }
+    }
+    env->SetFloatArrayRegion(out, 0, 3, p);
+    return read_u16(rdram, kMapId);
+}
+
+// Whether the game is paused (provisional, see kPauseFlags).
+JNIEXPORT jboolean JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativePaused(JNIEnv*, jclass) {
+    uint8_t* rdram = running_rdram();
+    if (rdram == nullptr) {
+        return JNI_FALSE;
+    }
+    for (uint32_t flag : kPauseFlags) {
+        if (read_u8(rdram, flag) != 1) {
+            return JNI_FALSE;
+        }
+    }
+    return JNI_TRUE;
 }
 
 // Mark on the bottom screen: logs what changed since the previous Mark, then starts over.

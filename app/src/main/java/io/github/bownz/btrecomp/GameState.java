@@ -4,8 +4,8 @@ package io.github.bownz.btrecomp;
  * Banjo-Tooie's game state for the bottom screen, read from the game's memory by
  * android/jni/game_state.cpp. Read-only: nothing here changes the game.
  *
- * Only verified addresses are read. Values the bottom screen will show but whose memory
- * location hasn't been verified yet are {@link #UNKNOWN}; the bottom screen shows a dash for
+ * Only addresses found in the game's memory are read (position, area, pause so far). Values the
+ * bottom screen will show but whose memory location hasn't been found yet are {@link #UNKNOWN}; the bottom screen shows a dash for
  * them. They're being found with the temporary probe ({@link #probeMark()}).
  */
 final class GameState {
@@ -16,6 +16,8 @@ final class GameState {
     private static native int nativeFrameCount();
     private static native int nativeProbeMark(String snapshotDir);
     private static native int nativeBottomSettings();
+    private static native int nativePlayer(float[] out);
+    private static native boolean nativePaused();
 
     /** The game's frame counter, or -1 before the game runs. */
     static int frameCount() {
@@ -61,13 +63,34 @@ final class GameState {
     /** Index into {@link #WORLDS}, or UNKNOWN. */
     static int world() { return UNKNOWN; }
 
-    static boolean paused() { return false; }
+    /** Whether the game is paused. Provisional: verified against pausing, not yet cutscenes. */
+    static boolean paused() {
+        try {
+            return nativePaused();
+        } catch (UnsatisfiedLinkError e) {
+            return false;
+        }
+    }
 
-    /** Banjo's position {x, y, z} in the current area, or null. */
-    static float[] position() { return null; }
+    private static final float[] playerBuffer = new float[3];
+    private static int playerArea = UNKNOWN;
 
-    /** The current area (map) number, or UNKNOWN. */
-    static int area() { return UNKNOWN; }
+    /** Reads Banjo's position and the area together; call before position() and area(). */
+    static synchronized void refreshPlayer() {
+        try {
+            playerArea = nativePlayer(playerBuffer);
+        } catch (UnsatisfiedLinkError e) {
+            playerArea = UNKNOWN;
+        }
+    }
+
+    /** Banjo's position {x, y, z} in the current area (as of refreshPlayer()), or null. */
+    static synchronized float[] position() {
+        return playerArea >= 0 ? playerBuffer.clone() : null;
+    }
+
+    /** The current area (the game's map id, e.g. 0xAF Spiral Mountain), or UNKNOWN. */
+    static synchronized int area() { return playerArea; }
 
     /** The current area's floors and walls from above: x, z per corner, 3 corners per triangle; or null. */
     static float[] mapTriangles() { return null; }

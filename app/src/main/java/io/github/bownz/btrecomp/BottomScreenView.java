@@ -177,6 +177,7 @@ public final class BottomScreenView extends View {
             bookOpen = false;            // and unpausing closes it again
         }
         cutscene = GameState.cutscene();
+        GameState.refreshPlayer();
         recordTrail();
         int settings = GameState.bottomSettings();
         showButtons = (settings & 1) != 0;
@@ -263,7 +264,7 @@ public final class BottomScreenView extends View {
             drawCentered(c, "The map of this area goes here", r.centerX(), r.centerY() - 3 * u);
             text.setTextSize(2.8f * u);
             text.setColor(Color.argb(170, 232, 213, 168));
-            drawCentered(c, "Test build: help find Banjo's position with Mark", r.centerX(), r.centerY() + 2.5f * u);
+            drawCentered(c, "Waiting for the game", r.centerX(), r.centerY() + 2.5f * u);
             return;
         }
         // Fit what's known (the area's triangles, else the trail) into the panel, north up.
@@ -303,6 +304,10 @@ public final class BottomScreenView extends View {
         stroke.setColor(Color.argb(150, 120, 200, 255));
         stroke.setStrokeWidth(0.5f * u);
         for (int i = 0; i + 3 < trail.length; i += 2) {
+            float jx = trail[i + 2] - trail[i], jz = trail[i + 3] - trail[i + 1];
+            if (jx * jx + jz * jz > 600f * 600f) {
+                continue;   // a jump (warp, door, respawn), not a walk
+            }
             c.drawLine(ox + trail[i] * scale, oz + trail[i + 1] * scale, ox + trail[i + 2] * scale, oz + trail[i + 3] * scale, stroke);
         }
         if (here != null) {
@@ -316,9 +321,10 @@ public final class BottomScreenView extends View {
         c.restoreToCount(saved);
     }
 
-    // The trail: positions (x, z) in the current area, one every so often.
-    private final java.util.ArrayList<float[]> trail = new java.util.ArrayList<>();
-    private int trailArea = Integer.MIN_VALUE;
+    // The trail: positions (x, z) in the current area, one every so often. Each area keeps its
+    // own trail for this session, so going back somewhere shows where you've already been.
+    private final java.util.HashMap<Integer, java.util.ArrayList<float[]>> trails = new java.util.HashMap<>();
+    private java.util.ArrayList<float[]> trail = new java.util.ArrayList<>();
 
     private void recordTrail() {
         float[] p = GameState.position();
@@ -326,10 +332,12 @@ public final class BottomScreenView extends View {
         if (p == null) {
             return;
         }
-        if (area != trailArea) {
-            trail.clear();
-            trailArea = area;
+        java.util.ArrayList<float[]> forArea = trails.get(area);
+        if (forArea == null) {
+            forArea = new java.util.ArrayList<>();
+            trails.put(area, forArea);
         }
+        trail = forArea;
         if (!trail.isEmpty()) {
             float[] last = trail.get(trail.size() - 1);
             float dx = p[0] - last[0], dz = p[2] - last[1];

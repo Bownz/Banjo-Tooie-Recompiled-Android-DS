@@ -233,13 +233,14 @@ final class Diagnostics {
         File zip = new File(report.getParentFile(), report.getName().replace(".txt", ".zip"));
         byte[] buffer = new byte[1 << 16];
         try (java.util.zip.ZipOutputStream out = new java.util.zip.ZipOutputStream(new FileOutputStream(zip))) {
+            // One level for every entry: changing it between entries corrupted the first one
+            // in 0.4.2. The snapshots are gzip already, so a fast level is plenty.
+            out.setLevel(1);
             for (File f : prepend(report, files)) {
                 if (!f.isFile()) {
                     continue;
                 }
                 java.util.zip.ZipEntry entry = new java.util.zip.ZipEntry(f == report ? f.getName() : "probe/" + f.getName());
-                // The snapshots are gzip already.
-                out.setLevel(f.getName().endsWith(".gz") ? 0 : 6);
                 out.putNextEntry(entry);
                 try (InputStream in = new java.io.FileInputStream(f)) {
                     int n;
