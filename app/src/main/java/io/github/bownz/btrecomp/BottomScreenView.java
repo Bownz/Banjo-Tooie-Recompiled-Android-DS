@@ -95,7 +95,7 @@ public final class BottomScreenView extends View {
     private boolean slideButtons, zHeld;
     private float buttonSlide = 1f;   // 0 hidden .. 1 in place
     private long buttonSlideAt;
-    private static final float BUTTON_SLIDE_MS = 160f;
+    private static final float BUTTON_SLIDE_MS = 230f + 60f * 3;   // BUTTON_IN_MS + stagger × 3
     private float dim = 0f;   // 0 .. 1, eased toward the target
     private long dimAt;
 
@@ -238,17 +238,14 @@ public final class BottomScreenView extends View {
             drawMoves(c, new RectF(pad, bottom + 3 * u, w - pad, bottom + 3 * u + movesH));
         } else if (slideButtons && buttonSlide > 0f) {
             // Hold Z: a column down the right side of the map, sliding in from the right edge.
-            float e = 1f - (1f - buttonSlide) * (1f - buttonSlide) * (1f - buttonSlide);   // ease out
             float colW = Math.min(30 * u, map.width() * 0.34f);
             RectF col = new RectF(map.right - colW, map.top, map.right, map.bottom);
-            c.save();
-            c.translate((1f - e) * (colW + pad + 2 * u), 0f);
-            // A dark band behind them, so they read over the map.
-            fill.setColor(Color.argb(185, 14, 12, 26));
+            // A dark band behind them, so they read over the map; fades with the slide.
+            float fade = Math.min(1f, buttonSlide * 2.5f);
+            fill.setColor(Color.argb((int) (185 * fade), 14, 12, 26));
             float band = 1.5f * u;
             c.drawRoundRect(new RectF(col.left - band, col.top - band, col.right + band, col.bottom + band), 3 * u, 3 * u, fill);
-            drawMovesColumn(c, col);
-            c.restore();
+            drawMovesColumn(c, col, colW + pad + 2 * u);
         }
         drawMark(c, new RectF(pad, h - pad - markH, w - pad, h - pad));
         drawDim(c, w, h);
@@ -1188,14 +1185,34 @@ public final class BottomScreenView extends View {
         }
     }
 
-    /** The move buttons stacked top to bottom (Hold Z). */
-    private void drawMovesColumn(Canvas c, RectF area) {
+    // Hold Z animation: each button takes BUTTON_IN_MS to come in, the next one starting
+    // BUTTON_STAGGER_MS later (top first), with a slight overshoot; leaving runs it backwards.
+    private static final float BUTTON_IN_MS = 230f, BUTTON_STAGGER_MS = 60f;
+
+    /** How far button i is in (0 out .. 1 in place, overshooting a little on the way). */
+    private float buttonIn(int i) {
+        float total = BUTTON_IN_MS + BUTTON_STAGGER_MS * (moves.length - 1);
+        float t = (buttonSlide * total - i * BUTTON_STAGGER_MS) / BUTTON_IN_MS;
+        t = Math.max(0f, Math.min(1f, t));
+        float k = 1.5f;   // overshoot (ease-out-back): about 7% past, then settles
+        float q = t - 1f;
+        return 1f + (k + 1f) * q * q * q + k * q * q;
+    }
+
+    /** The move buttons stacked top to bottom (Hold Z), each slid right by its own progress. */
+    private void drawMovesColumn(Canvas c, RectF area, float travel) {
         float gap = 1.5f * u;
         float bh = (area.height() - gap * (moves.length - 1)) / moves.length;
         float bw = area.width();
         for (int i = 0; i < moves.length; i++) {
             Move m = moves[i];
             m.rect.set(area.left, area.top + i * (bh + gap), area.right, area.top + i * (bh + gap) + bh);
+            float in = buttonIn(i);
+            if (in <= 0f) {
+                continue;
+            }
+            c.save();
+            c.translate((1f - in) * travel, 0f);   // the touch area stays where it ends up
             boolean on = m.down || m.lit || m == tapping;
             float rad = Math.min(bh, bw) * 0.3f;
             fill.setColor(on ? Color.argb(240, 150, 96, 30) : WOOD);
@@ -1209,6 +1226,7 @@ public final class BottomScreenView extends View {
             fitText(m.keys, bw * 0.86f, Math.min(2.6f * u, bh * 0.22f));
             text.setColor(TAN);
             drawCentered(c, m.keys, m.rect.centerX(), m.rect.centerY() + bh * 0.24f);
+            c.restore();
         }
     }
 
@@ -1351,7 +1369,7 @@ public final class BottomScreenView extends View {
     /** Moves the Hold Z slide toward where it should be; keeps drawing until it's there. */
     private void stepSlide() {
         long now = android.os.SystemClock.uptimeMillis();
-        float dt = buttonSlideAt == 0 ? 0f : Math.min(0.12f, (now - buttonSlideAt) / BUTTON_SLIDE_MS);   // at most a frame's step
+        float dt = buttonSlideAt == 0 ? 0f : Math.min(0.05f, (now - buttonSlideAt) / BUTTON_SLIDE_MS);   // at most about a frame's step
         buttonSlideAt = now;
         float target = !slideButtons || zHeld ? 1f : 0f;
         if (buttonSlide < target) {
