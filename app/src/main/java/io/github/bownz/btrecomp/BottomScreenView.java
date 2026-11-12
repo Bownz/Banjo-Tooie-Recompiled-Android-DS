@@ -28,8 +28,9 @@ import android.view.View;
  *   <li>Eggs and feathers carried.</li>
  *   <li>Four buttons for the moves that need Z held with a C button (Bottom Screen Buttons).</li>
  * </ul>
- * Tap the puzzle to flip to the whole game's totals and back; pausing shows the totals too.
- * The screen dims during cutscenes.
+ * The progress book (like the game's own pause screen): it opens whenever the game is paused,
+ * or by tapping the puzzle, and pages with ◀ ▶ or a swipe through every world in a table, then
+ * each world on its own. The screen dims during cutscenes.
  *
  * The game state comes from {@link GameState}, which only reports values whose memory
  * addresses have been verified in-game; until then a value shows as a dash. A temporary Mark
@@ -92,9 +93,18 @@ public final class BottomScreenView extends View {
     private float dim = 0f;   // 0 .. 1, eased toward the target
     private long dimAt;
 
-    /** Showing the whole game's totals instead of the current world. */
-    private boolean totals;
     private final RectF boardRect = new RectF();
+
+    // The progress book: open, the page (-1 every world, else one world), and the slide
+    // between pages.
+    private boolean bookOpen, bookByPause;
+    private int bookPage = -1;
+    private int slideFrom = Integer.MIN_VALUE, slideDir;
+    private long slideAt;
+    private static final long SLIDE_MS = 320;
+    private final RectF prevRect = new RectF(), nextRect = new RectF(), closeRect = new RectF();
+    private float swipeX = Float.NaN;
+    private final RectF tmp = new RectF();
 
     // TEMPORARY: the probe's Mark button.
     private final RectF markRect = new RectF();
@@ -160,8 +170,10 @@ public final class BottomScreenView extends View {
         world = GameState.world();
         boolean wasPaused = paused;
         paused = GameState.paused();
-        if (paused != wasPaused) {
-            totals = paused;   // the pause screen shows the totals; unpausing goes back
+        if (paused && !wasPaused && !bookOpen) {
+            openBook(true);              // pausing opens the book on where you are
+        } else if (!paused && wasPaused && bookByPause) {
+            bookOpen = false;            // and unpausing closes it again
         }
         cutscene = GameState.cutscene();
         int settings = GameState.bottomSettings();
@@ -186,23 +198,29 @@ public final class BottomScreenView extends View {
 
         float pad = 4 * u;
         float markH = 7 * u;
+        if (bookOpen) {
+            drawBook(c, new RectF(pad, pad, w - pad, h - pad - markH - 2 * u));
+            drawMark(c, new RectF(pad, h - pad - markH, w - pad, h - pad));
+            drawDim(c, w, h);
+            return;
+        }
         float movesH = showButtons ? 15 * u : 0f;
         float bottom = h - pad - markH - 2 * u - (showButtons ? movesH + 3 * u : 0f);
 
-        // Caption: where the board is from.
+        // Caption: the world the board is for.
         text.setTextSize(3.6f * u);
         text.setColor(TAN);
-        String caption = totals ? "Whole game" : world >= 0 ? GameState.WORLDS[world] : "This world";
+        String caption = world >= 0 ? GameState.WORLDS[world] : "This world";
         c.drawText(caption, w / 2f, pad + 3.4f * u, text);
 
         float top = pad + 6.5f * u;
         float boardH = (bottom - top) * 0.46f;
         boardRect.set(pad, top, w - pad, top + boardH);
-        drawPuzzle(c, boardRect);
+        drawPuzzle(c, boardRect, GameState.count(GameState.JIGGIES, world));
 
         float notesTop = boardRect.bottom + 3 * u;
         RectF notes = new RectF(pad, notesTop, w - pad, notesTop + (bottom - top) * 0.17f);
-        drawNotes(c, notes);
+        drawNotes(c, notes, GameState.count(GameState.NOTES, world));
 
         RectF counters = new RectF(pad, notes.bottom + 3 * u, w - pad, bottom);
         drawCounters(c, counters);
@@ -227,34 +245,8 @@ public final class BottomScreenView extends View {
         }
     }
 
-    /**
-     * Jiggywiggy's puzzle: ten jigsaw pieces (two rows of five), filled in honey as the
-     * world's Jiggies are found. For the whole game, a bar of all 90 instead.
-     */
-    private void drawPuzzle(Canvas c, RectF r) {
-        int count = GameState.count(GameState.JIGGIES, totals ? -1 : world);
-        if (totals) {
-            float barH = r.height() * 0.22f;
-            RectF bar = new RectF(r.left, r.centerY() - barH / 2, r.right, r.centerY() + barH / 2);
-            fill.setColor(SLOT);
-            c.drawRoundRect(bar, barH / 2, barH / 2, fill);
-            if (count > 0) {
-                RectF done = new RectF(bar.left, bar.top, bar.left + bar.width() * Math.min(1f, count / (float) JIGGIES_TOTAL), bar.bottom);
-                fill.setColor(HONEY);
-                c.drawRoundRect(done, barH / 2, barH / 2, fill);
-            }
-            jiggyIcon(c, r.left + barH * 0.9f, bar.top - barH * 0.9f, barH * 0.7f, true);
-            text.setTextAlign(Paint.Align.LEFT);
-            text.setColor(CREAM);
-            text.setTextSize(barH * 0.9f);
-            c.drawText(value(count) + " / " + JIGGIES_TOTAL + " Jiggies", r.left + barH * 2f, bar.top - barH * 0.55f, text);
-            text.setTextAlign(Paint.Align.CENTER);
-            text.setColor(TAN);
-            text.setTextSize(3.2f * u);
-            c.drawText("Tap to go back to this world", r.centerX(), bar.bottom + barH * 1.3f, text);
-            return;
-        }
-
+    /** Jiggywiggy's puzzle: ten jigsaw pieces (two rows of five), filled in as they're found. */
+    private void drawPuzzle(Canvas c, RectF r, int count) {
         int cols = 5, rows = 2;
         float cell = Math.min(r.width() / cols, r.height() / rows);
         float ox = r.centerX() - cell * cols / 2f, oy = r.centerY() - cell * rows / 2f;
@@ -313,8 +305,7 @@ public final class BottomScreenView extends View {
     }
 
     /** The notes, as a stave with a count. */
-    private void drawNotes(Canvas c, RectF r) {
-        int notes = GameState.count(GameState.NOTES, totals ? -1 : world);
+    private void drawNotes(Canvas c, RectF r, int notes) {
         stroke.setColor(Color.argb(90, 232, 213, 168));
         stroke.setStrokeWidth(0.25f * u);
         float gap = r.height() / 6f;
@@ -336,7 +327,7 @@ public final class BottomScreenView extends View {
 
     /** Jinjos, Glowbos, Cheato pages, honeycombs; then eggs and feathers. */
     private void drawCounters(Canvas c, RectF r) {
-        int at = totals ? -1 : world;
+        int at = world;
         int[] items = { GameState.JINJOS, GameState.GLOWBOS, GameState.CHEATO_PAGES, GameState.HONEYCOMBS,
             GameState.EGGS, GameState.FEATHERS };
         String[] names = { "Jinjos", "Glowbos", "Cheato", "Honeycombs", "Eggs", "Feathers" };
@@ -437,6 +428,189 @@ public final class BottomScreenView extends View {
         }
     }
 
+    // ------------------------------------------------------------------------------
+    // The progress book
+    // ------------------------------------------------------------------------------
+
+    private static final int[] BOOK_ITEMS = { GameState.JIGGIES, GameState.NOTES, GameState.JINJOS,
+        GameState.GLOWBOS, GameState.CHEATO_PAGES, GameState.HONEYCOMBS };
+    private static final String[] BOOK_NAMES = { "Jiggies", "Notes", "Jinjos", "Glowbos", "Cheato Pages", "Honeycombs" };
+
+    private void openBook(boolean byPause) {
+        bookOpen = true;
+        bookByPause = byPause;
+        bookPage = world;      // open on where you are (every world if not known)
+        slideFrom = Integer.MIN_VALUE;
+        invalidate();
+    }
+
+    /** -1 (every world), then each world in turn, wrapping round. */
+    private void turnPage(int dir) {
+        int n = GameState.WORLDS.length + 1;
+        slideFrom = bookPage;
+        slideDir = dir;
+        slideAt = SystemClock.uptimeMillis();
+        bookPage = ((bookPage + 1 + dir) % n + n) % n - 1;
+        Haptics.tap(this);
+        invalidate();
+    }
+
+    private void drawBook(Canvas c, RectF r) {
+        // Header: ◀ the page's title ▶, and × to close.
+        float headH = 11 * u;
+        prevRect.set(r.left, r.top, r.left + headH, r.top + headH);
+        closeRect.set(r.right - headH * 0.8f, r.top + headH * 0.1f, r.right, r.top + headH * 0.9f);
+        nextRect.set(closeRect.left - 2 * u - headH, r.top, closeRect.left - 2 * u, r.top + headH);
+        tmp.set(prevRect.right + 2 * u, r.top, nextRect.left - 2 * u, r.top + headH);
+        fill.setColor(WOOD);
+        c.drawRoundRect(tmp, headH * 0.3f, headH * 0.3f, fill);
+        stroke.setColor(WOOD_EDGE);
+        stroke.setStrokeWidth(0.3f * u);
+        c.drawRoundRect(tmp, headH * 0.3f, headH * 0.3f, stroke);
+        String title = bookPage < 0 ? "All Worlds" : GameState.WORLDS[bookPage];
+        fitText(title, tmp.width() * 0.9f, 4.6f * u);
+        text.setColor(HONEY);
+        drawCentered(c, title, tmp.centerX(), tmp.centerY());
+        for (int i = 0; i < 2; i++) {
+            RectF a = i == 0 ? prevRect : nextRect;
+            fill.setColor(WOOD);
+            c.drawOval(a, fill);
+            c.drawOval(a, stroke);
+            arrow(c, a.centerX(), a.centerY(), a.height() * 0.2f, i == 0 ? -1 : 1);
+        }
+        stroke.setColor(TAN);
+        stroke.setStrokeWidth(0.6f * u);
+        float x = closeRect.width() * 0.22f;
+        c.drawLine(closeRect.centerX() - x, closeRect.centerY() - x, closeRect.centerX() + x, closeRect.centerY() + x, stroke);
+        c.drawLine(closeRect.centerX() - x, closeRect.centerY() + x, closeRect.centerX() + x, closeRect.centerY() - x, stroke);
+
+        // The page, on a wooden board; it slides sideways when the page turns.
+        RectF board = new RectF(r.left, r.top + headH + 3 * u, r.right, r.bottom);
+        fill.setShader(new LinearGradient(0, board.top, 0, board.bottom, Color.rgb(46, 30, 16), Color.rgb(66, 40, 18), Shader.TileMode.CLAMP));
+        c.drawRoundRect(board, 3 * u, 3 * u, fill);
+        fill.setShader(null);
+        stroke.setColor(Color.argb(200, 206, 162, 70));
+        stroke.setStrokeWidth(0.45f * u);
+        c.drawRoundRect(board, 3 * u, 3 * u, stroke);
+
+        float t = (SystemClock.uptimeMillis() - slideAt) / (float) SLIDE_MS;
+        int saved = c.save();
+        c.clipRect(board);
+        if (slideFrom != Integer.MIN_VALUE && t < 1f) {
+            float e = 1f - (1f - t) * (1f - t) * (1f - t);   // ease out
+            float bw = board.width();
+            c.translate(-slideDir * e * bw, 0);
+            drawPage(c, board, slideFrom);
+            c.translate(slideDir * bw, 0);
+            drawPage(c, board, bookPage);
+            postInvalidateOnAnimation();
+        } else {
+            drawPage(c, board, bookPage);
+        }
+        c.restoreToCount(saved);
+    }
+
+    private void drawPage(Canvas c, RectF board, int page) {
+        if (page < 0) {
+            drawAllWorlds(c, board);
+        } else {
+            drawWorldPage(c, board, page);
+        }
+    }
+
+    /** Every world in a table: a row each, a column per collectible, the totals at the bottom. */
+    private void drawAllWorlds(Canvas c, RectF b) {
+        int rows = GameState.WORLDS.length + 1;   // + the totals row
+        float pad = 2 * u;
+        float nameW = b.width() * 0.3f;
+        float headH = 7 * u;
+        float colW = (b.width() - nameW - pad * 2) / BOOK_ITEMS.length;
+        float rowH = (b.height() - headH - pad * 2) / rows;
+        for (int col = 0; col < BOOK_ITEMS.length; col++) {
+            icon(c, BOOK_ITEMS[col], b.left + pad + nameW + colW * (col + 0.5f), b.top + pad + headH / 2,
+                Math.min(headH * 0.4f, colW * 0.3f));
+        }
+        for (int row = 0; row < rows; row++) {
+            boolean total = row == rows - 1;
+            int wld = total ? -1 : row;
+            float top = b.top + pad + headH + row * rowH;
+            tmp.set(b.left + pad, top + rowH * 0.06f, b.right - pad, top + rowH * 0.94f);
+            fill.setColor(total ? Color.argb(255, 96, 62, 26) : row % 2 == 0 ? Color.argb(255, 58, 36, 16) : Color.argb(255, 50, 31, 14));
+            c.drawRoundRect(tmp, tmp.height() * 0.3f, tmp.height() * 0.3f, fill);
+            if (wld >= 0 && wld == world) {
+                stroke.setColor(HONEY);
+                stroke.setStrokeWidth(0.4f * u);
+                c.drawRoundRect(tmp, tmp.height() * 0.3f, tmp.height() * 0.3f, stroke);
+            }
+            String name = total ? "Total" : shortWorld(row);
+            text.setTextAlign(Paint.Align.LEFT);
+            fitText(name, nameW - 2 * u, Math.min(3.2f * u, rowH * 0.5f));
+            text.setColor(total ? HONEY : CREAM);
+            c.drawText(name, b.left + pad + 1.5f * u, tmp.centerY() - (text.descent() + text.ascent()) / 2f, text);
+            text.setTextAlign(Paint.Align.CENTER);
+            for (int col = 0; col < BOOK_ITEMS.length; col++) {
+                int v = GameState.count(BOOK_ITEMS[col], wld);
+                String value = BOOK_ITEMS[col] == GameState.JIGGIES && v >= 0 ? v + "/" + (total ? JIGGIES_TOTAL : JIGGIES_PER_WORLD) : value(v);
+                boolean complete = BOOK_ITEMS[col] == GameState.JIGGIES && v >= (total ? JIGGIES_TOTAL : JIGGIES_PER_WORLD);
+                fitText(value, colW * 0.9f, Math.min(3.2f * u, rowH * 0.5f));
+                text.setColor(v < 0 ? Color.rgb(150, 136, 116) : complete ? HONEY : CREAM);
+                drawCentered(c, value, b.left + pad + nameW + colW * (col + 0.5f), tmp.centerY());
+            }
+        }
+    }
+
+    /** One world: its puzzle, then a line per collectible. */
+    private void drawWorldPage(Canvas c, RectF b, int wld) {
+        float pad = 3 * u;
+        RectF puzzle = new RectF(b.left + pad, b.top + pad, b.right - pad, b.top + pad + b.height() * 0.36f);
+        drawPuzzle(c, puzzle, GameState.count(GameState.JIGGIES, wld));
+        int rows = BOOK_ITEMS.length - 1;   // all but the Jiggies (the puzzle)
+        float top = puzzle.bottom + 2 * u;
+        float rowH = (b.bottom - pad - top) / rows;
+        for (int i = 1; i < BOOK_ITEMS.length; i++) {
+            float y = top + (i - 1) * rowH + rowH / 2;
+            icon(c, BOOK_ITEMS[i], b.left + pad + 4 * u, y, Math.min(rowH * 0.32f, 3.6f * u));
+            text.setTextAlign(Paint.Align.LEFT);
+            text.setColor(CREAM);
+            text.setTextSize(Math.min(4f * u, rowH * 0.42f));
+            c.drawText(BOOK_NAMES[i], b.left + pad + 10 * u, y - (text.descent() + text.ascent()) / 2f, text);
+            text.setTextAlign(Paint.Align.RIGHT);
+            text.setColor(HONEY);
+            c.drawText(value(GameState.count(BOOK_ITEMS[i], wld)), b.right - pad - 2 * u, y - (text.descent() + text.ascent()) / 2f, text);
+            text.setTextAlign(Paint.Align.CENTER);
+            if (i < BOOK_ITEMS.length - 1) {
+                stroke.setColor(Color.argb(60, 232, 213, 168));
+                stroke.setStrokeWidth(0.2f * u);
+                c.drawLine(b.left + pad, y + rowH / 2, b.right - pad, y + rowH / 2, stroke);
+            }
+        }
+    }
+
+    private static String shortWorld(int i) {
+        switch (i) {
+            case 0: return "Isle o' Hags";
+            case 1: return "Mayahem Temple";
+            case 2: return "Glitter Gulch";
+            case 3: return "Witchyworld";
+            case 4: return "Jolly Roger's";
+            case 5: return "Terrydactyland";
+            case 6: return "Grunty Ind.";
+            case 7: return "Hailfire Peaks";
+            case 8: return "Cloud Cuckooland";
+            default: return "Cauldron Keep";
+        }
+    }
+
+    private void arrow(Canvas c, float cx, float cy, float r, int dir) {
+        path.reset();
+        path.moveTo(cx + dir * r, cy);
+        path.lineTo(cx - dir * r * 0.6f, cy - r);
+        path.lineTo(cx - dir * r * 0.6f, cy + r);
+        path.close();
+        fill.setColor(HONEY);
+        c.drawPath(path, fill);
+    }
+
     /** The four Z + C moves, in a row. */
     private void drawMoves(Canvas c, RectF area) {
         float gap = 2 * u;
@@ -534,10 +708,23 @@ public final class BottomScreenView extends View {
                 invalidate();
                 return true;
             }
+            if (bookOpen) {
+                if (prevRect.contains(x, y)) {
+                    turnPage(-1);
+                } else if (nextRect.contains(x, y)) {
+                    turnPage(1);
+                } else if (closeRect.contains(x, y)) {
+                    bookOpen = false;
+                    Haptics.tap(this);
+                    invalidate();
+                } else if (action == MotionEvent.ACTION_DOWN) {
+                    swipeX = x;   // a sideways swipe turns the page
+                }
+                return true;
+            }
             if (boardRect.contains(x, y)) {
-                totals = !totals;
+                openBook(false);
                 Haptics.tap(this);
-                invalidate();
                 return true;
             }
             if (showButtons && frame >= 0) {
@@ -547,6 +734,14 @@ public final class BottomScreenView extends View {
                         return true;
                     }
                 }
+            }
+            return true;
+        }
+        if (action == MotionEvent.ACTION_UP && bookOpen && !Float.isNaN(swipeX)) {
+            float dx = e.getX() - swipeX;
+            swipeX = Float.NaN;
+            if (Math.abs(dx) > 12 * u) {
+                turnPage(dx < 0 ? 1 : -1);
             }
             return true;
         }
