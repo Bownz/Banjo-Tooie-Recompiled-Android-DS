@@ -164,7 +164,7 @@ function(bt_configure_android_target target)
         add_dependencies(${target} main_hook file_redirect_hook gsl_alloc_hook)
     endif()
 
-    target_link_libraries(${target} PRIVATE SDL2::SDL2 android log)
+    target_link_libraries(${target} PRIVATE SDL2::SDL2 android log z)
 
     # Fail at link time rather than at System.loadLibrary() time on the device.
     target_link_options(${target} PRIVATE "-Wl,--no-undefined")

@@ -14,7 +14,7 @@ final class GameState {
     private GameState() {}
 
     private static native int nativeFrameCount();
-    private static native int nativeProbeMark();
+    private static native int nativeProbeMark(String snapshotDir);
     private static native int nativeBottomSettings();
 
     /** The game's frame counter, or -1 before the game runs. */
@@ -27,12 +27,15 @@ final class GameState {
     }
 
     /**
-     * TEMPORARY: logs (tag BTProbe) the memory that changed a little since the last mark.
+     * TEMPORARY: logs (tag BTProbe) the memory that changed a little since the last mark, and
+     * saves a snapshot of the game's memory to Android/data/<app>/files/probe (pull-probe.bat).
      * Returns the mark's number, or -1 if the game isn't running.
      */
-    static int probeMark() {
+    static int probeMark(android.content.Context context) {
+        java.io.File base = context.getExternalFilesDir(null);
+        String dir = base != null ? new java.io.File(base, "probe").getAbsolutePath() : null;
         try {
-            return nativeProbeMark();
+            return nativeProbeMark(dir);
         } catch (UnsatisfiedLinkError e) {
             return -1;
         }

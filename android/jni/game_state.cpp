@@ -15,6 +15,9 @@
 
 #include <android/log.h>
 #include <cstdarg>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <zlib.h>
 #include <jni.h>
 
 #include <algorithm>
@@ -129,12 +132,14 @@ namespace {
         const uint32_t frame = read_u32(rdram, kGameFrameCount);
         probe_log("MARK %d: %zu candidates (game mode %u, frame %u)",
             mark, found.size(), mode, frame);
-        // Globals (below the heap) first: the likeliest home of counters and state.
+        // Globals (below the heap) first: the likeliest home of counters and state. Since 0.4.2
+        // the snapshots carry everything, so only a few lines go to the log.
         int lines = 0;
+        constexpr int kMaxByteLines = 40;
         for (int pass = 0; pass < 2; pass++) {
             for (const Candidate& c : found) {
                 const bool global = c.address < 0x80200000u;
-                if ((pass == 0) != global || lines >= 400) {
+                if ((pass == 0) != global || lines >= kMaxByteLines) {
                     continue;
                 }
                 probe_log("M%d %08X %u->%u (%+d, %u changes)%s",
@@ -159,7 +164,7 @@ namespace {
     // Area numbers and other 16-bit state in the globals: changed 1-2 times, any step.
     void probe_report_halfwords_locked(const uint8_t* rdram, int mark) {
         int lines = 0;
-        for (uint32_t guest = 0x80000000u; guest < 0x80200000u && lines < 120; guest += 2) {
+        for (uint32_t guest = 0x80000000u; guest < 0x80200000u && lines < 40; guest += 2) {
             // A guest halfword at `guest` is host bytes (guest ^ 2) .. +1.
             const size_t host = (guest - 0x80000000u) ^ 2;
             const unsigned n = std::max(g_count[host], g_count[host + 1]);
@@ -220,6 +225,43 @@ namespace {
         probe_report_float_range_locked(rdram, mark, 0x80000000u, 0x80200000u, "global", lines);
     }
 
+    // Each Mark also saves all of RDRAM (host order, gzip) to <dir>/mark-NN.bin.gz, with a line
+    // in <dir>/marks.txt, so the marks can be compared offline (pull-probe.bat). The first Mark
+    // of a run clears the previous run's files.
+    std::string g_snapshot_dir;
+    bool g_snapshot_cleared = false;
+
+    void snapshot_clear_locked(const std::string& dir) {
+        mkdir(dir.c_str(), 0775);
+        if (DIR* d = opendir(dir.c_str())) {
+            while (dirent* e = readdir(d)) {
+                const std::string name = e->d_name;
+                if (name.rfind("mark-", 0) == 0 || name == "marks.txt") {
+                    std::remove((dir + "/" + name).c_str());
+                }
+            }
+            closedir(d);
+        }
+    }
+
+    void snapshot_save(const std::string& dir, int mark, std::vector<uint8_t> copy, uint32_t mode, uint32_t frame) {
+        std::thread([dir, mark, copy = std::move(copy), mode, frame] {
+            char name[64];
+            std::snprintf(name, sizeof(name), "/mark-%02d.bin.gz", mark);
+            const std::string path = dir + name;
+            gzFile f = gzopen(path.c_str(), "wb1");
+            bool ok = f != nullptr && gzwrite(f, copy.data(), static_cast<unsigned>(copy.size())) == static_cast<int>(copy.size());
+            if (f != nullptr) {
+                ok = gzclose(f) == Z_OK && ok;
+            }
+            if (FILE* m = std::fopen((dir + "/marks.txt").c_str(), "a")) {
+                std::fprintf(m, "%d frame=%u mode=%u file=%s %s\n", mark, frame, mode, name + 1, ok ? "ok" : "FAILED");
+                std::fclose(m);
+            }
+            probe_log("MARK %d saved to %s%s", mark, path.c_str(), ok ? "" : " (FAILED)");
+        }).detach();
+    }
+
     void probe_thread() {
         uint32_t last_mode = 0xFFFFFFFFu;
         while (true) {
@@ -273,13 +315,28 @@ Java_io_github_bownz_btrecomp_GameState_nativeFrameCount(JNIEnv*, jclass) {
 
 // Mark on the bottom screen: logs what changed since the previous Mark, then starts over.
 JNIEXPORT jint JNICALL
-Java_io_github_bownz_btrecomp_GameState_nativeProbeMark(JNIEnv*, jclass) {
+Java_io_github_bownz_btrecomp_GameState_nativeProbeMark(JNIEnv* env, jclass, jstring dir) {
     uint8_t* rdram = g_rdram.load();
     if (rdram == nullptr) {
         return -1;
     }
     std::lock_guard lock{ g_probe_mutex };
     const int mark = ++g_marks;
+    if (dir != nullptr) {
+        const char* chars = env->GetStringUTFChars(dir, nullptr);
+        g_snapshot_dir = chars != nullptr ? chars : "";
+        if (chars != nullptr) {
+            env->ReleaseStringUTFChars(dir, chars);
+        }
+    }
+    if (!g_snapshot_dir.empty()) {
+        if (!g_snapshot_cleared) {
+            snapshot_clear_locked(g_snapshot_dir);
+            g_snapshot_cleared = true;
+        }
+        snapshot_save(g_snapshot_dir, mark, std::vector<uint8_t>(rdram, rdram + kRdramSize),
+            read_u32(rdram, kGameMode), read_u32(rdram, kGameFrameCount));
+    }
     if (g_prev.size() == kRdramSize) {
         probe_sample_locked(rdram);
         probe_report_locked(rdram, mark);

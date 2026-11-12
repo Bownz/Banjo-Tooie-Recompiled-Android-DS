@@ -798,7 +798,7 @@ public final class BottomScreenView extends View {
         float x = e.getX(index), y = e.getY(index);
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
             if (markRect.contains(x, y)) {
-                marks = Math.max(marks, GameState.probeMark());
+                marks = Math.max(marks, GameState.probeMark(getContext()));
                 markFlashAt = SystemClock.uptimeMillis();
                 Haptics.tap(this);
                 invalidate();
