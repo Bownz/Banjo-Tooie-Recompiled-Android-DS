@@ -38,7 +38,7 @@ final class GameState {
         }
     }
 
-    /** Input > Dual Screen: bit 1 Bottom Screen Buttons, bit 2 Dim During Cutscenes. */
+    /** Bit 1 Bottom Screen Buttons, bit 2 Dim During Cutscenes, bit 4 Video > Show FPS. */
     static int bottomSettings() {
         try {
             return nativeBottomSettings();
@@ -49,20 +49,11 @@ final class GameState {
 
     // ---- To be read from memory once verified -------------------------------------------
 
-    /** The worlds, in the order the game unlocks them, then the hub. */
+    /** The hub and the worlds, for the caption above the bottom screen's puzzle. */
     static final String[] WORLDS = {
         "Isle o' Hags", "Mayahem Temple", "Glitter Gulch Mine", "Witchyworld", "Jolly Roger's Lagoon",
         "Terrydactyland", "Grunty Industries", "Hailfire Peaks", "Cloud Cuckooland", "Cauldron Keep",
     };
-
-    /** The playable characters and forms. */
-    static final String[] CHARACTERS = {
-        "Banjo & Kazooie", "Banjo", "Kazooie", "Mumbo", "Stony", "Detonator", "Van", "Submarine",
-        "T-Rex", "Washing Machine", "Snowball", "Bee", "Dragon Kazooie",
-    };
-
-    /** Index into {@link #CHARACTERS}, or UNKNOWN. */
-    static int character() { return UNKNOWN; }
 
     /** Index into {@link #WORLDS}, or UNKNOWN. */
     static int world() { return UNKNOWN; }

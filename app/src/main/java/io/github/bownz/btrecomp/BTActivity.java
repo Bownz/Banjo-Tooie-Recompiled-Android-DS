@@ -11,6 +11,8 @@ import android.hardware.input.InputManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.OpenableColumns;
 import android.util.Log;
@@ -18,6 +20,8 @@ import android.view.Display;
 import android.view.InputDevice;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.TextView;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -69,6 +73,7 @@ public class BTActivity extends SDLActivity
     private InputManager inputManager;
     private TouchControllerView overlay;
     private SecondScreenPresentation presentation;
+    private TextView fpsView;
     private boolean started;
 
     private final Object pickLock = new Object();
@@ -115,6 +120,7 @@ public class BTActivity extends SDLActivity
             overlay = new TouchControllerView(this);
             mLayout.addView(overlay, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            addFpsCounter();
         }
     }
 
@@ -386,6 +392,55 @@ public class BTActivity extends SDLActivity
             showPresentation(second);
         }
     }
+
+    // ------------------------------------------------------------------------------
+    // FPS counter (Video > Show FPS)
+    // ------------------------------------------------------------------------------
+
+    private final Handler fpsHandler = new Handler(Looper.getMainLooper());
+    private int fpsLastFrame = -1;
+    private long fpsLastTime;
+
+    private void addFpsCounter() {
+        fpsView = new TextView(this);
+        fpsView.setTextColor(0xFFFFF4D6);
+        fpsView.setTextSize(14);
+        fpsView.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        fpsView.setShadowLayer(4f, 0f, 1f, 0xFF000000);
+        fpsView.setBackgroundColor(0x66000000);
+        int pad = Math.round(4 * getResources().getDisplayMetrics().density);
+        fpsView.setPadding(pad * 2, pad, pad * 2, pad);
+        fpsView.setVisibility(View.GONE);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = lp.topMargin = pad * 2;
+        mLayout.addView(fpsView, lp);
+        fpsHandler.post(fpsTick);
+    }
+
+    /** Twice a second: the game's frames since the last tick, from its own frame counter. */
+    private final Runnable fpsTick = new Runnable() {
+        @Override
+        public void run() {
+            boolean show = (GameState.bottomSettings() & 4) != 0;
+            int frame = show ? GameState.frameCount() : -1;
+            long now = android.os.SystemClock.uptimeMillis();
+            if (frame < 0) {
+                fpsView.setVisibility(View.GONE);
+                fpsLastFrame = -1;
+            } else {
+                if (fpsLastFrame >= 0 && frame >= fpsLastFrame && now > fpsLastTime) {
+                    float fps = (frame - fpsLastFrame) * 1000f / (now - fpsLastTime);
+                    fpsView.setText(Math.round(fps) + " FPS");
+                    fpsView.setVisibility(View.VISIBLE);
+                    fpsView.bringToFront();
+                }
+                fpsLastFrame = frame;
+                fpsLastTime = now;
+            }
+            fpsHandler.postDelayed(this, 500);
+        }
+    };
 
     // ------------------------------------------------------------------------------
     // Bottom screen (a second display)

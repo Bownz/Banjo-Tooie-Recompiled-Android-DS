@@ -16,76 +16,65 @@ import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
 
-import java.util.ArrayList;
-import java.util.List;
-
 /**
  * The bottom screen for Banjo-Tooie on a second display (e.g. the AYN Thor's lower screen).
  *
+ * Banjo-Tooie is about gathering things, world by world, so the screen is a progress board
+ * for the world you're in, which follows the game on its own:
  * <ul>
- *   <li>The current character (Banjo &amp; Kazooie, Banjo or Kazooie on their own, Mumbo, or a
- *       Humba Wumba transformation).</li>
- *   <li>Collectibles per world: Jiggies, notes, Glowbos, Jinjos, Cheato pages and honeycombs,
- *       plus the eggs and feathers carried. A tab per world, and the totals.</li>
- *   <li>A column of one-tap buttons for moves that need button combinations (Bottom Screen
- *       Buttons setting).</li>
- *   <li>It dims during cutscenes, and shows the totals while the game is paused.</li>
+ *   <li>Jiggywiggy's puzzle: the world's ten Jiggies as jigsaw pieces, filled in as found.</li>
+ *   <li>The notes collected there, on a stave.</li>
+ *   <li>Jinjos, Glowbos, Cheato pages and empty honeycombs, as small counters.</li>
+ *   <li>Eggs and feathers carried.</li>
+ *   <li>Four buttons for the moves that need Z held with a C button (Bottom Screen Buttons).</li>
  * </ul>
+ * Tap the puzzle to flip to the whole game's totals and back; pausing shows the totals too.
+ * The screen dims during cutscenes.
  *
- * The game state comes from {@link GameState}, which reads the game's memory and only
- * reports values whose addresses have been verified in-game. Until then a value shows as a
- * dash. A temporary Mark button logs what changed in memory, to find them.
+ * The game state comes from {@link GameState}, which only reports values whose memory
+ * addresses have been verified in-game; until then a value shows as a dash. A temporary Mark
+ * button logs what changed in memory, to find them.
  *
  * All drawing is vector shapes made here; no game art is used.
  */
 public final class BottomScreenView extends View {
 
-    // ---- Colours (honey and wood) ----
-    private static final int BG_TOP = Color.rgb(34, 24, 46);
-    private static final int BG_BOTTOM = Color.rgb(16, 12, 22);
+    // ---- Colours (honey, wood and the night sky of the Isle) ----
+    private static final int BG_TOP = Color.rgb(30, 22, 44);
+    private static final int BG_BOTTOM = Color.rgb(14, 10, 20);
     private static final int HONEY = Color.rgb(255, 186, 40);
     private static final int HONEY_DARK = Color.rgb(196, 122, 18);
+    private static final int SLOT = Color.argb(70, 255, 186, 40);
     private static final int WOOD = Color.argb(225, 74, 46, 22);
-    private static final int WOOD_LIGHT = Color.argb(240, 104, 66, 30);
     private static final int WOOD_EDGE = Color.argb(160, 186, 140, 76);
     private static final int CREAM = Color.rgb(255, 244, 214);
     private static final int TAN = Color.rgb(232, 213, 168);
 
-    /** A move done by pressing N64 buttons in a short sequence. */
+    /** Jiggies in each world, and in the whole game. */
+    private static final int JIGGIES_PER_WORLD = 10;
+    private static final int JIGGIES_TOTAL = 90;
+
+    /** A move done with Z held and a C button. */
     private static final class Move {
         final String name, keys;
-        final int[][] steps;      // {buttons, milliseconds}, played in order on a tap
-        final int holdButtons;    // non-zero: held while the finger stays down instead
-        final boolean toggle;     // drawn lit after use until tapped again
-        RectF rect = new RectF();
+        final int buttons;        // pressed together after Z
+        final boolean hold;       // held while the finger stays down (Wonderwing)
+        final boolean toggle;     // on until tapped again (Talon Trot)
+        final RectF rect = new RectF();
         boolean down, lit;
 
-        Move(String name, String keys, int[][] steps) {
-            this(name, keys, steps, 0, false);
-        }
-
-        Move(String name, String keys, int[][] steps, int holdButtons, boolean toggle) {
-            this.name = name; this.keys = keys; this.steps = steps;
-            this.holdButtons = holdButtons; this.toggle = toggle;
+        Move(String name, String keys, int buttons, boolean hold, boolean toggle) {
+            this.name = name; this.keys = keys; this.buttons = buttons; this.hold = hold; this.toggle = toggle;
         }
     }
 
-    private static final int A = TouchInput.N64_A, B = TouchInput.N64_B, Z = TouchInput.N64_Z;
-    private static final int CU = TouchInput.N64_C_UP, CD = TouchInput.N64_C_DOWN;
-    private static final int CL = TouchInput.N64_C_LEFT, CR = TouchInput.N64_C_RIGHT;
-
-    private final List<Move> moves = new ArrayList<>();
-    {
-        // Crouch first (Z), then the combination, then let go.
-        moves.add(new Move("Shoot Egg", "Z + C▲", new int[][] { { Z, 90 }, { Z | CU, 130 }, { 0, 0 } }));
-        moves.add(new Move("Lay Egg", "Z + C▼", new int[][] { { Z, 90 }, { Z | CD, 130 }, { 0, 0 } }));
-        moves.add(new Move("Talon Trot", "Z + C◀", new int[][] { { Z, 90 }, { Z | CL, 130 }, { 0, 0 } }, 0, true));
-        moves.add(new Move("Wonderwing", "hold: Z + C▶", null, Z | CR, false));
-        moves.add(new Move("Flap Flip", "Z, then A", new int[][] { { Z, 120 }, { Z | A, 160 }, { 0, 0 } }));
-        moves.add(new Move("Beak Barge", "Z, then B", new int[][] { { Z, 110 }, { Z | B, 140 }, { 0, 0 } }));
-        moves.add(new Move("Beak Bust", "A, then Z", new int[][] { { A, 140 }, { 0, 200 }, { Z, 160 }, { 0, 0 } }));
-        moves.add(new Move("First Person", "C▲", new int[][] { { CU, 130 }, { 0, 0 } }));
-    }
+    private static final int Z = TouchInput.N64_Z;
+    private final Move[] moves = {
+        new Move("Fire Egg", "Z + C▲", Z | TouchInput.N64_C_UP, false, false),
+        new Move("Lay Egg", "Z + C▼", Z | TouchInput.N64_C_DOWN, false, false),
+        new Move("Talon Trot", "Z + C◀", Z | TouchInput.N64_C_LEFT, false, true),
+        new Move("Wonderwing", "hold · Z + C▶", Z | TouchInput.N64_C_RIGHT, true, false),
+    };
 
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -97,36 +86,30 @@ public final class BottomScreenView extends View {
 
     // State, refreshed by poll().
     private int frame = -1;
-    private int character = GameState.UNKNOWN;
     private int world = GameState.UNKNOWN;
     private boolean paused, cutscene;
     private boolean showButtons = true, dimCutscenes = true;
-    private float dim = 0f;               // 0 .. 1, eased toward the target
+    private float dim = 0f;   // 0 .. 1, eased toward the target
     private long dimAt;
 
-    /** The tab being shown: -1 totals, otherwise a world. Follows the current world unless picked. */
-    private int tab = -1;
-    private boolean tabPicked;
-    private final RectF[] tabRects = new RectF[GameState.WORLDS.length + 1];
+    /** Showing the whole game's totals instead of the current world. */
+    private boolean totals;
+    private final RectF boardRect = new RectF();
 
     // TEMPORARY: the probe's Mark button.
     private final RectF markRect = new RectF();
     private int marks;
     private long markFlashAt;
 
-    // A move being played: its steps, which one, and when the current one ends.
-    private Move playing;
-    private int playingStep;
-    private int heldFromMove;   // buttons held by a hold move
+    private Move tapping;     // a tap move in progress
+    private int heldButtons;  // buttons held by hold moves
 
-    private float u = 1f;       // layout unit: 1% of the shorter side
+    private float u = 1f;     // layout unit: 1% of the shorter side
 
     public BottomScreenView(Context context) {
         super(context);
-        for (int i = 0; i < tabRects.length; i++) {
-            tabRects[i] = new RectF();
-        }
         stroke.setStyle(Paint.Style.STROKE);
+        stroke.setStrokeCap(Paint.Cap.ROUND);
         text.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
         text.setTextAlign(Paint.Align.CENTER);
         setContentDescription("Banjo-Tooie bottom screen");
@@ -148,9 +131,10 @@ public final class BottomScreenView extends View {
 
     /** Lets go of everything (the app is pausing). */
     void cancel() {
-        handler.removeCallbacks(stepTask);
-        playing = null;
-        heldFromMove = 0;
+        handler.removeCallbacks(releaseTap);
+        handler.removeCallbacks(pressTap);
+        tapping = null;
+        heldButtons = 0;
         for (Move m : moves) {
             m.down = false;
         }
@@ -173,19 +157,11 @@ public final class BottomScreenView extends View {
 
     private void poll() {
         frame = GameState.frameCount();
-        character = GameState.character();
-        int newWorld = GameState.world();
-        if (newWorld != world) {
-            world = newWorld;
-            if (!tabPicked) {
-                tab = world;
-            }
-        }
+        world = GameState.world();
         boolean wasPaused = paused;
         paused = GameState.paused();
-        if (paused && !wasPaused) {
-            tab = -1;   // the pause screen: totals
-            tabPicked = false;
+        if (paused != wasPaused) {
+            totals = paused;   // the pause screen shows the totals; unpausing goes back
         }
         cutscene = GameState.cutscene();
         int settings = GameState.bottomSettings();
@@ -206,193 +182,199 @@ public final class BottomScreenView extends View {
         fill.setShader(new LinearGradient(0, 0, 0, h, BG_TOP, BG_BOTTOM, Shader.TileMode.CLAMP));
         c.drawRect(0, 0, w, h, fill);
         fill.setShader(null);
-        drawHoneycombBackdrop(c, w, h);
+        drawStars(c, w, h);
 
-        float buttonsW = showButtons ? Math.max(w * 0.30f, 22 * u) : 0f;
-        float left = 3 * u, right = w - buttonsW - 3 * u;
-        float top = 3 * u;
+        float pad = 4 * u;
+        float markH = 7 * u;
+        float movesH = showButtons ? 15 * u : 0f;
+        float bottom = h - pad - markH - 2 * u - (showButtons ? movesH + 3 * u : 0f);
 
-        float headerH = 16 * u;
-        drawHeader(c, new RectF(left, top, right, top + headerH));
-        float tabsTop = top + headerH + 2 * u;
-        float tabsBottom = drawTabs(c, left, tabsTop, right);
-        float markH = 9 * u;
-        RectF board = new RectF(left, tabsBottom + 2 * u, right, h - markH - 5 * u);
-        drawBoard(c, board);
-        drawMark(c, new RectF(left, h - markH - 2 * u, right, h - 2 * u));
+        // Caption: where the board is from.
+        text.setTextSize(3.6f * u);
+        text.setColor(TAN);
+        String caption = totals ? "Whole game" : world >= 0 ? GameState.WORLDS[world] : "This world";
+        c.drawText(caption, w / 2f, pad + 3.4f * u, text);
+
+        float top = pad + 6.5f * u;
+        float boardH = (bottom - top) * 0.46f;
+        boardRect.set(pad, top, w - pad, top + boardH);
+        drawPuzzle(c, boardRect);
+
+        float notesTop = boardRect.bottom + 3 * u;
+        RectF notes = new RectF(pad, notesTop, w - pad, notesTop + (bottom - top) * 0.17f);
+        drawNotes(c, notes);
+
+        RectF counters = new RectF(pad, notes.bottom + 3 * u, w - pad, bottom);
+        drawCounters(c, counters);
+
         if (showButtons) {
-            drawMoves(c, new RectF(w - buttonsW, top, w - 3 * u, h - 3 * u));
+            drawMoves(c, new RectF(pad, bottom + 3 * u, w - pad, bottom + 3 * u + movesH));
         }
+        drawMark(c, new RectF(pad, h - pad - markH, w - pad, h - pad));
         drawDim(c, w, h);
     }
 
-    private void drawHoneycombBackdrop(Canvas c, int w, int h) {
-        float r = 7 * u;
-        float dx = r * 1.732f, dy = r * 1.5f;
-        stroke.setColor(Color.argb(18, 255, 186, 40));
-        stroke.setStrokeWidth(Math.max(1f, 0.35f * u));
-        int row = 0;
-        for (float y = -r; y < h + r; y += dy, row++) {
-            for (float x = (row % 2 == 0 ? 0 : dx / 2) - dx; x < w + dx; x += dx) {
-                hexagon(path, x, y, r);
-                c.drawPath(path, stroke);
-            }
+    /** A few fixed stars: the Isle at night. */
+    private void drawStars(Canvas c, int w, int h) {
+        fill.setColor(Color.argb(60, 255, 244, 214));
+        long seed = 7;
+        for (int i = 0; i < 40; i++) {
+            seed = seed * 6364136223846793005L + 1442695040888963407L;
+            float x = ((seed >>> 33) % 1000) / 1000f * w;
+            seed = seed * 6364136223846793005L + 1442695040888963407L;
+            float y = ((seed >>> 33) % 1000) / 1000f * h;
+            c.drawCircle(x, y, (i % 3 == 0 ? 0.35f : 0.2f) * u, fill);
         }
     }
 
-    private void drawHeader(Canvas c, RectF r) {
-        panel(c, r, false);
-        float badgeR = r.height() * 0.38f;
-        float bx = r.left + r.height() * 0.5f, by = r.centerY();
-        // The character's badge: a honeycomb with the initials.
-        hexagon(path, bx, by, badgeR);
-        fill.setColor(HONEY);
-        c.drawPath(path, fill);
-        stroke.setColor(HONEY_DARK);
-        stroke.setStrokeWidth(0.6f * u);
-        c.drawPath(path, stroke);
-        String name = character >= 0 && character < GameState.CHARACTERS.length ? GameState.CHARACTERS[character] : null;
-        text.setColor(Color.rgb(70, 40, 10));
-        text.setTextSize(badgeR * 0.7f);
-        drawCentered(c, initials(name), bx, by);
+    /**
+     * Jiggywiggy's puzzle: ten jigsaw pieces (two rows of five), filled in honey as the
+     * world's Jiggies are found. For the whole game, a bar of all 90 instead.
+     */
+    private void drawPuzzle(Canvas c, RectF r) {
+        int count = GameState.count(GameState.JIGGIES, totals ? -1 : world);
+        if (totals) {
+            float barH = r.height() * 0.22f;
+            RectF bar = new RectF(r.left, r.centerY() - barH / 2, r.right, r.centerY() + barH / 2);
+            fill.setColor(SLOT);
+            c.drawRoundRect(bar, barH / 2, barH / 2, fill);
+            if (count > 0) {
+                RectF done = new RectF(bar.left, bar.top, bar.left + bar.width() * Math.min(1f, count / (float) JIGGIES_TOTAL), bar.bottom);
+                fill.setColor(HONEY);
+                c.drawRoundRect(done, barH / 2, barH / 2, fill);
+            }
+            jiggyIcon(c, r.left + barH * 0.9f, bar.top - barH * 0.9f, barH * 0.7f, true);
+            text.setTextAlign(Paint.Align.LEFT);
+            text.setColor(CREAM);
+            text.setTextSize(barH * 0.9f);
+            c.drawText(value(count) + " / " + JIGGIES_TOTAL + " Jiggies", r.left + barH * 2f, bar.top - barH * 0.55f, text);
+            text.setTextAlign(Paint.Align.CENTER);
+            text.setColor(TAN);
+            text.setTextSize(3.2f * u);
+            c.drawText("Tap to go back to this world", r.centerX(), bar.bottom + barH * 1.3f, text);
+            return;
+        }
 
+        int cols = 5, rows = 2;
+        float cell = Math.min(r.width() / cols, r.height() / rows);
+        float ox = r.centerX() - cell * cols / 2f, oy = r.centerY() - cell * rows / 2f;
+        for (int i = 0; i < cols * rows; i++) {
+            int col = i % cols, row = i / cols;
+            boolean found = count >= 0 && i < count;
+            puzzlePiece(path, ox + col * cell, oy + row * cell, cell, col, row, cols, rows);
+            fill.setColor(found ? HONEY : SLOT);
+            c.drawPath(path, fill);
+            stroke.setColor(found ? HONEY_DARK : Color.argb(110, 255, 186, 40));
+            stroke.setStrokeWidth(0.45f * u);
+            c.drawPath(path, stroke);
+        }
+        if (count < 0) {
+            text.setColor(TAN);
+            text.setTextSize(3.4f * u);
+            drawCentered(c, "Jiggies: –", r.centerX(), r.centerY());
+        }
+    }
+
+    /**
+     * One piece of a rows x cols jigsaw: a square cell with a knob out on its right and bottom
+     * edges and a matching notch in on its left and top edges (none on the outer border).
+     */
+    private static void puzzlePiece(Path p, float x, float y, float s, int col, int row, int cols, int rows) {
+        float k = s * 0.16f;   // knob radius
+        float inset = s * 0.06f;
+        float l = x + inset, t = y + inset, rt = x + s - inset, b = y + s - inset;
+        float mx = (l + rt) / 2, my = (t + b) / 2;
+        p.reset();
+        p.moveTo(l, t);
+        // Top edge: a notch unless on the top row.
+        if (row > 0) {
+            p.lineTo(mx - k, t);
+            p.arcTo(new RectF(mx - k, t - k, mx + k, t + k), 180, -180, false);
+        }
+        p.lineTo(rt, t);
+        // Right edge: a knob unless on the last column.
+        if (col < cols - 1) {
+            p.lineTo(rt, my - k);
+            p.arcTo(new RectF(rt - k + inset, my - k, rt + k + inset, my + k), 270, 180, false);
+        }
+        p.lineTo(rt, b);
+        // Bottom edge: a knob unless on the bottom row.
+        if (row < rows - 1) {
+            p.lineTo(mx + k, b);
+            p.arcTo(new RectF(mx - k, b - k + inset, mx + k, b + k + inset), 0, 180, false);
+        }
+        p.lineTo(l, b);
+        // Left edge: a notch unless on the first column.
+        if (col > 0) {
+            p.lineTo(l, my + k);
+            p.arcTo(new RectF(l - k, my - k, l + k, my + k), 90, -180, false);
+        }
+        p.close();
+    }
+
+    /** The notes, as a stave with a count. */
+    private void drawNotes(Canvas c, RectF r) {
+        int notes = GameState.count(GameState.NOTES, totals ? -1 : world);
+        stroke.setColor(Color.argb(90, 232, 213, 168));
+        stroke.setStrokeWidth(0.25f * u);
+        float gap = r.height() / 6f;
+        for (int i = 1; i <= 5; i++) {
+            float y = r.top + gap * i;
+            c.drawLine(r.left, y, r.right, y, stroke);
+        }
+        // A treble clef stand-in and the count.
+        text.setColor(HONEY);
+        text.setTextSize(r.height() * 0.95f);
         text.setTextAlign(Paint.Align.LEFT);
+        c.drawText("♫", r.left + 1 * u, r.bottom - r.height() * 0.12f, text);
+        text.setTextAlign(Paint.Align.RIGHT);
         text.setColor(CREAM);
-        float tx = bx + badgeR + 3 * u;
-        text.setTextSize(5.2f * u);
-        fitText(name != null ? name : "Banjo-Tooie", r.right - tx - 2 * u, 5.2f * u);
-        c.drawText(name != null ? name : "Banjo-Tooie", tx, r.centerY() - 0.6f * u, text);
-        text.setTextSize(3.4f * u);
-        text.setColor(TAN);
-        String status = frame < 0 ? "Waiting for the game to start"
-            : paused ? "Paused"
-            : world >= 0 ? GameState.WORLDS[world]
-            : "Playing";
-        c.drawText(status, tx, r.centerY() + 4.4f * u, text);
+        text.setTextSize(r.height() * 0.55f);
+        c.drawText(value(notes) + " notes", r.right - 1 * u, r.centerY() + r.height() * 0.2f, text);
         text.setTextAlign(Paint.Align.CENTER);
     }
 
-    private static String initials(String name) {
-        if (name == null) {
-            return "BT";
-        }
-        StringBuilder b = new StringBuilder();
-        for (String part : name.split("[ &-]+")) {
-            if (!part.isEmpty() && b.length() < 2) {
-                b.append(Character.toUpperCase(part.charAt(0)));
-            }
-        }
-        return b.toString();
-    }
-
-    /** The world tabs, wrapped onto as many rows as needed. Returns the bottom edge. */
-    private float drawTabs(Canvas c, float left, float top, float right) {
-        float chipH = 6.6f * u, gap = 1.4f * u;
-        float x = left, y = top;
-        text.setTextSize(3.0f * u);
-        for (int i = -1; i < GameState.WORLDS.length; i++) {
-            String label = i < 0 ? "Totals" : shortWorld(i);
-            float chipW = text.measureText(label) + 5 * u;
-            if (x + chipW > right && x > left) {
-                x = left;
-                y += chipH + gap;
-            }
-            RectF rect = tabRects[i + 1];
-            rect.set(x, y, x + chipW, y + chipH);
-            boolean selected = i == tab;
-            boolean here = i >= 0 && i == world;
-            fill.setColor(selected ? WOOD_LIGHT : WOOD);
-            c.drawRoundRect(rect, chipH / 2, chipH / 2, fill);
-            stroke.setColor(selected ? HONEY : here ? TAN : WOOD_EDGE);
-            stroke.setStrokeWidth((selected ? 0.5f : 0.25f) * u);
-            c.drawRoundRect(rect, chipH / 2, chipH / 2, stroke);
-            text.setColor(selected ? HONEY : CREAM);
-            drawCentered(c, label, rect.centerX(), rect.centerY());
-            x += chipW + gap;
-        }
-        return y + chipH;
-    }
-
-    private static String shortWorld(int i) {
-        switch (i) {
-            case 0: return "Isle o' Hags";
-            case 1: return "Mayahem";
-            case 2: return "Glitter Gulch";
-            case 3: return "Witchyworld";
-            case 4: return "Jolly Roger's";
-            case 5: return "Terrydactyland";
-            case 6: return "Grunty Ind.";
-            case 7: return "Hailfire";
-            case 8: return "Cloud Cuckoo";
-            default: return "Cauldron Keep";
-        }
-    }
-
-    /** The collectibles: a 3 x 2 grid for the tab, then what's carried. */
-    private void drawBoard(Canvas c, RectF r) {
-        panel(c, r, true);
-        float pad = 2.4f * u;
-        text.setTextSize(3.6f * u);
-        text.setColor(HONEY);
-        String title = tab < 0 ? (paused ? "Paused · Totals" : "Totals") : GameState.WORLDS[tab];
-        c.drawText(title, r.centerX(), r.top + pad + 3.6f * u, text);
-
-        float gridTop = r.top + pad + 6.5f * u;
-        float carryH = r.height() * 0.22f;
-        float gridBottom = r.bottom - carryH - pad;
-        int cols = 3, rows = 2;
-        float cellW = (r.width() - pad * 2) / cols, cellH = (gridBottom - gridTop) / rows;
-        int[] items = { GameState.JIGGIES, GameState.NOTES, GameState.GLOWBOS, GameState.JINJOS,
-            GameState.CHEATO_PAGES, GameState.HONEYCOMBS };
-        String[] names = { "Jiggies", "Notes", "Glowbos", "Jinjos", "Cheato Pages", "Honeycombs" };
+    /** Jinjos, Glowbos, Cheato pages, honeycombs; then eggs and feathers. */
+    private void drawCounters(Canvas c, RectF r) {
+        int at = totals ? -1 : world;
+        int[] items = { GameState.JINJOS, GameState.GLOWBOS, GameState.CHEATO_PAGES, GameState.HONEYCOMBS,
+            GameState.EGGS, GameState.FEATHERS };
+        String[] names = { "Jinjos", "Glowbos", "Cheato", "Honeycombs", "Eggs", "Feathers" };
+        int cols = 3;
+        float cw = r.width() / cols, ch = r.height() / 2;
         for (int i = 0; i < items.length; i++) {
-            float cx = r.left + pad + cellW * (i % cols + 0.5f);
-            float cy = gridTop + cellH * (i / cols + 0.5f);
-            tile(c, cx, cy, Math.min(cellW, cellH), items[i], names[i], GameState.count(items[i], tab));
+            float cx = r.left + cw * (i % cols + 0.5f), cy = r.top + ch * (i / cols + 0.5f);
+            boolean carried = items[i] == GameState.EGGS || items[i] == GameState.FEATHERS;
+            int v = GameState.count(items[i], carried ? -1 : at);
+            float s = Math.min(cw, ch);
+            icon(c, items[i], cx - s * 0.22f, cy - s * 0.08f, s * 0.17f);
+            text.setTextAlign(Paint.Align.LEFT);
+            text.setColor(CREAM);
+            text.setTextSize(s * 0.22f);
+            c.drawText(value(v), cx + s * 0.02f, cy, text);
+            text.setTextAlign(Paint.Align.CENTER);
+            text.setColor(TAN);
+            text.setTextSize(Math.min(2.8f * u, s * 0.12f));
+            c.drawText(names[i], cx, cy + s * 0.3f, text);
         }
-
-        // Carried: eggs and feathers.
-        float cy = r.bottom - pad - carryH / 2;
-        float half = (r.width() - pad * 2) / 2;
-        tile(c, r.left + pad + half * 0.5f, cy, Math.min(half, carryH * 1.6f), GameState.EGGS, "Eggs",
-            GameState.count(GameState.EGGS, -1));
-        tile(c, r.left + pad + half * 1.5f, cy, Math.min(half, carryH * 1.6f), GameState.FEATHERS, "Feathers",
-            GameState.count(GameState.FEATHERS, -1));
     }
 
-    private void tile(Canvas c, float cx, float cy, float size, int item, String name, int value) {
-        float iconR = size * 0.2f;
-        float iconY = cy - size * 0.14f;
-        icon(c, item, cx, iconY, iconR);
-        text.setColor(CREAM);
-        text.setTextSize(Math.min(6.5f * u, size * 0.2f));
-        drawCentered(c, value >= 0 ? Integer.toString(value) : "–", cx, cy + size * 0.18f);
-        text.setColor(TAN);
-        text.setTextSize(Math.min(3.0f * u, size * 0.1f));
-        drawCentered(c, name, cx, cy + size * 0.36f);
+    private static String value(int v) {
+        return v >= 0 ? Integer.toString(v) : "–";
+    }
+
+    private void jiggyIcon(Canvas c, float x, float y, float r, boolean filled) {
+        float s = r * 0.75f;
+        fill.setColor(filled ? HONEY : SLOT);
+        c.drawRect(x - s, y - s, x + s, y + s, fill);
+        c.drawCircle(x, y - s, s * 0.38f, fill);
+        c.drawCircle(x + s, y, s * 0.38f, fill);
     }
 
     /** Simple drawings for each collectible (not the game's art). */
     private void icon(Canvas c, int item, float x, float y, float r) {
-        stroke.setStrokeWidth(Math.max(1.5f, r * 0.1f));
+        stroke.setStrokeWidth(Math.max(1.5f, r * 0.12f));
         switch (item) {
-            case GameState.JIGGIES: {
-                // A puzzle piece: a square with a knob on top and on the right.
-                float s = r * 0.75f;
-                fill.setColor(HONEY);
-                c.drawRect(x - s, y - s, x + s, y + s, fill);
-                c.drawCircle(x, y - s, s * 0.38f, fill);
-                c.drawCircle(x + s, y, s * 0.38f, fill);
-                fill.setColor(BG_BOTTOM);
-                c.drawCircle(x - s, y, s * 0.3f, fill);
-                c.drawCircle(x, y + s, s * 0.3f, fill);
-                break;
-            }
-            case GameState.NOTES:
-                text.setColor(HONEY);
-                text.setTextSize(r * 2.0f);
-                drawCentered(c, "♪", x, y);
-                break;
             case GameState.GLOWBOS:
                 fill.setShader(new RadialGradient(x, y, r, Color.rgb(255, 250, 200), Color.argb(0, 255, 120, 220), Shader.TileMode.CLAMP));
                 c.drawCircle(x, y, r, fill);
@@ -455,46 +437,43 @@ public final class BottomScreenView extends View {
         }
     }
 
+    /** The four Z + C moves, in a row. */
     private void drawMoves(Canvas c, RectF area) {
-        int n = moves.size();
-        float gap = 1.6f * u;
-        float h = (area.height() - gap * (n - 1)) / n;
-        for (int i = 0; i < n; i++) {
-            Move m = moves.get(i);
-            m.rect.set(area.left, area.top + i * (h + gap), area.right, area.top + i * (h + gap) + h);
-            boolean on = m.down || m.lit || m == playing;
+        float gap = 2 * u;
+        float bw = (area.width() - gap * (moves.length - 1)) / moves.length;
+        for (int i = 0; i < moves.length; i++) {
+            Move m = moves[i];
+            m.rect.set(area.left + i * (bw + gap), area.top, area.left + i * (bw + gap) + bw, area.bottom);
+            boolean on = m.down || m.lit || m == tapping;
+            float rad = area.height() * 0.3f;
             fill.setColor(on ? Color.argb(240, 150, 96, 30) : WOOD);
-            float rad = Math.min(h, m.rect.width()) * 0.3f;
             c.drawRoundRect(m.rect, rad, rad, fill);
             stroke.setColor(on ? HONEY : WOOD_EDGE);
             stroke.setStrokeWidth((on ? 0.6f : 0.3f) * u);
             c.drawRoundRect(m.rect, rad, rad, stroke);
+            fitText(m.name, bw * 0.88f, Math.min(3.6f * u, area.height() * 0.3f));
             text.setColor(on ? HONEY : CREAM);
-            text.setTextSize(Math.min(3.6f * u, h * 0.32f));
-            fitText(m.name, m.rect.width() * 0.9f, Math.min(3.6f * u, h * 0.32f));
-            drawCentered(c, m.name, m.rect.centerX(), m.rect.centerY() - h * 0.12f);
+            drawCentered(c, m.name, m.rect.centerX(), m.rect.centerY() - area.height() * 0.12f);
+            fitText(m.keys, bw * 0.88f, Math.min(2.6f * u, area.height() * 0.22f));
             text.setColor(TAN);
-            text.setTextSize(Math.min(2.6f * u, h * 0.22f));
-            drawCentered(c, m.keys, m.rect.centerX(), m.rect.centerY() + h * 0.22f);
+            drawCentered(c, m.keys, m.rect.centerX(), m.rect.centerY() + area.height() * 0.22f);
         }
     }
 
     /** TEMPORARY: the probe's Mark button and what it's for. */
     private void drawMark(Canvas c, RectF r) {
         boolean flash = SystemClock.uptimeMillis() - markFlashAt < 300;
-        float bw = Math.min(r.width() * 0.35f, 30 * u);
+        float bw = Math.min(r.width() * 0.28f, 24 * u);
         markRect.set(r.left, r.top, r.left + bw, r.bottom);
-        fill.setColor(flash ? HONEY : Color.argb(230, 60, 90, 150));
+        fill.setColor(flash ? HONEY : Color.argb(200, 60, 90, 150));
         c.drawRoundRect(markRect, r.height() / 2, r.height() / 2, fill);
         text.setColor(flash ? Color.rgb(60, 30, 0) : Color.WHITE);
-        text.setTextSize(3.6f * u);
+        text.setTextSize(3.2f * u);
         drawCentered(c, "Mark" + (marks > 0 ? " " + marks : ""), markRect.centerX(), markRect.centerY());
         text.setTextAlign(Paint.Align.LEFT);
-        text.setColor(TAN);
-        text.setTextSize(2.5f * u);
-        float tx = markRect.right + 2 * u;
-        c.drawText("Finding the game's data (test builds only):", tx, r.centerY() - 0.6f * u, text);
-        c.drawText("tap Mark, collect one thing, tap Mark again.", tx, r.centerY() + 2.8f * u, text);
+        text.setColor(Color.argb(170, 232, 213, 168));
+        text.setTextSize(2.4f * u);
+        c.drawText("Test build: tap Mark, collect one thing, Mark again.", markRect.right + 2 * u, r.centerY() + 0.9f * u, text);
         text.setTextAlign(Paint.Align.CENTER);
         if (flash) {
             postInvalidateDelayed(300);
@@ -515,15 +494,6 @@ public final class BottomScreenView extends View {
             fill.setColor(Color.argb(Math.round(200 * dim), 0, 0, 0));
             c.drawRect(0, 0, w, h, fill);
         }
-    }
-
-    private void panel(Canvas c, RectF r, boolean strong) {
-        fill.setColor(strong ? Color.argb(215, 48, 32, 20) : WOOD);
-        float rad = 3 * u;
-        c.drawRoundRect(r, rad, rad, fill);
-        stroke.setColor(Color.argb(200, 206, 162, 70));
-        stroke.setStrokeWidth(0.45f * u);
-        c.drawRoundRect(r, rad, rad, stroke);
     }
 
     private static void hexagon(Path p, float x, float y, float r) {
@@ -554,7 +524,8 @@ public final class BottomScreenView extends View {
     @Override
     public boolean onTouchEvent(MotionEvent e) {
         int action = e.getActionMasked();
-        float x = e.getX(e.getActionIndex()), y = e.getY(e.getActionIndex());
+        int index = e.getActionIndex();
+        float x = e.getX(index), y = e.getY(index);
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
             if (markRect.contains(x, y)) {
                 marks = Math.max(marks, GameState.probeMark());
@@ -563,16 +534,11 @@ public final class BottomScreenView extends View {
                 invalidate();
                 return true;
             }
-            for (int i = 0; i < tabRects.length; i++) {
-                if (tabRects[i].contains(x, y)) {
-                    int picked = i - 1;
-                    // Tapping the current world's tab goes back to following the game.
-                    tabPicked = !(picked == world && tabPicked);
-                    tab = tabPicked ? picked : world;
-                    Haptics.tap(this);
-                    invalidate();
-                    return true;
-                }
+            if (boardRect.contains(x, y)) {
+                totals = !totals;
+                Haptics.tap(this);
+                invalidate();
+                return true;
             }
             if (showButtons && frame >= 0) {
                 for (Move m : moves) {
@@ -597,46 +563,53 @@ public final class BottomScreenView extends View {
     private void pressMove(Move m) {
         Haptics.tap(this);
         m.down = true;
-        if (m.holdButtons != 0) {
-            heldFromMove |= m.holdButtons;
-            TouchInput.setHeldN64Buttons(heldFromMove);
-        } else if (playing == null) {
+        if (m.hold) {
+            // Z first, then the C button a moment later, held until the finger lifts.
+            heldButtons |= Z;
+            TouchInput.setHeldN64Buttons(heldButtons);
+            final Move held = m;
+            handler.postDelayed(() -> {
+                if (held.down) {
+                    heldButtons |= held.buttons;
+                    TouchInput.setHeldN64Buttons(heldButtons);
+                }
+            }, 90);
+        } else if (tapping == null) {
             if (m.toggle) {
                 m.lit = !m.lit;
             }
-            playing = m;
-            playingStep = 0;
-            handler.post(stepTask);
+            tapping = m;
+            TouchInput.setN64Buttons(Z);            // crouch first...
+            handler.postDelayed(pressTap, 90);      // ...then the C button
         }
         invalidate();
     }
 
     private void releaseMove(Move m) {
         m.down = false;
-        if (m.holdButtons != 0) {
-            heldFromMove &= ~m.holdButtons;
-            TouchInput.setHeldN64Buttons(heldFromMove);
+        if (m.hold) {
+            heldButtons &= ~m.buttons;
+            TouchInput.setHeldN64Buttons(heldButtons);
         }
         invalidate();
     }
 
-    /** Plays the current move's steps, one after another. */
-    private final Runnable stepTask = new Runnable() {
+    private final Runnable pressTap = new Runnable() {
         @Override
         public void run() {
-            Move m = playing;
-            if (m == null) {
-                return;
+            if (tapping != null) {
+                TouchInput.setN64Buttons(tapping.buttons);
+                handler.postDelayed(releaseTap, 130);
             }
-            if (playingStep >= m.steps.length) {
-                TouchInput.setN64Buttons(0);
-                playing = null;
-                invalidate();
-                return;
-            }
-            int[] step = m.steps[playingStep++];
-            TouchInput.setN64Buttons(step[0]);
-            handler.postDelayed(this, Math.max(16, step[1]));
+        }
+    };
+
+    private final Runnable releaseTap = new Runnable() {
+        @Override
+        public void run() {
+            TouchInput.setN64Buttons(0);
+            tapping = null;
+            invalidate();
         }
     };
 

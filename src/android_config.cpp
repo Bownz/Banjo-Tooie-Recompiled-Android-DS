@@ -45,6 +45,7 @@ namespace {
     std::atomic<int> drag_camera_speed{ 3 };
     std::atomic<int> touch_feedback{ 2 };   // 0 off, 1 light, 2 medium, 3 strong
     std::atomic<bool> bottom_buttons{ true };
+    std::atomic<bool> show_fps{ false };
     std::atomic<bool> cutscene_dim{ true };
 
     std::filesystem::path config_file(const char* name) {
@@ -140,8 +141,8 @@ namespace {
         config.add_enum_option(
             "android_bottom_screen",
             "Bottom Screen",
-            "On a device with a second screen (like the AYN Thor), show the character, collectibles and "
-            "one-tap move buttons there.",
+            "On a device with a second screen (like the AYN Thor), show the progress in the world you're in "
+            "(Jiggies, notes and the rest) and the Z + C move buttons there.",
             on_off,
             1u
         );
@@ -155,8 +156,8 @@ namespace {
         config.add_enum_option(
             "android_bottom_buttons",
             "Bottom Screen Buttons",
-            "A column of buttons on the bottom screen for moves that need button combinations: eggs, "
-            "Talon Trot, Wonderwing, Flap Flip, Beak Barge, Beak Bust and first person.",
+            "Buttons on the bottom screen for the moves done with Z held and a C button: firing and laying "
+            "eggs, Talon Trot and Wonderwing.",
             on_off,
             1u
         );
@@ -403,6 +404,24 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
         };
         recompui::config::add_page_button(graphics_config, std::move(driver));
     }
+    {
+        static EnumOptionVector fps_options = {
+            {0u, "Off", "Off"},
+            {1u, "On", "On"},
+        };
+        graphics_config.add_enum_option(
+            "android_show_fps",
+            "Show FPS",
+            "Shows how many frames per second the game is running at, in the top-left corner. "
+            "Banjo-Tooie itself runs at up to 30 (often lower in busy places); 60 FPS mode adds frames in between.",
+            fps_options,
+            0u
+        );
+        graphics_config.add_option_change_callback("android_show_fps",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+                show_fps.store(std::get<uint32_t>(cur) == 1u);
+            });
+    }
 
     auto& touch_config = recompui::config::create_config_tab("Touch", touch_config_id, false);
     add_touch_options(touch_config);
@@ -547,8 +566,8 @@ Java_io_github_bownz_btrecomp_TouchInput_nativeTouchFeedback(JNIEnv*, jclass) {
     return touch_feedback.load();
 }
 
-// Bottom Screen Buttons / Dim During Cutscenes (BottomScreenView polls these).
+// Bit 1 Bottom Screen Buttons, bit 2 Dim During Cutscenes, bit 4 Video > Show FPS.
 extern "C" JNIEXPORT jint JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeBottomSettings(JNIEnv*, jclass) {
-    return (bottom_buttons.load() ? 1 : 0) | (cutscene_dim.load() ? 2 : 0);
+    return (bottom_buttons.load() ? 1 : 0) | (cutscene_dim.load() ? 2 : 0) | (show_fps.load() ? 4 : 0);
 }
