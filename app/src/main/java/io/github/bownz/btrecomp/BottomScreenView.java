@@ -187,7 +187,6 @@ public final class BottomScreenView extends View {
         GameState.refreshPlayer();
         refreshMap();
         recordEntry();
-        markExplored();
         updateHeading();
         easeArrow();
         int settings = GameState.bottomSettings();
@@ -325,7 +324,6 @@ public final class BottomScreenView extends View {
             }
             updateDetail(m, r, cx, cz, viewScale);
             drawShimmer(c, r, m, cx, cz, viewScale);
-            drawUnexplored(c, r, m, cx, cz, viewScale);
 
             // Where you came in (each entrance used in this area this session; the latest brighter).
             java.util.List<float[]> entries = entrances.get(GameState.area());
@@ -739,127 +737,6 @@ public final class BottomScreenView extends View {
         c.restoreToCount(layer);
     }
 
-    // ---- Explored ----------------------------------------------------------------------
-    // Each area remembers the 250-unit cells you've been within 1400 units of (kept in a file
-    // per area); the rest of its map is shown dimmer.
-    private static final float CELL = 250f, SEEN_RADIUS = 1400f;
-    private final java.util.HashMap<Integer, java.util.HashSet<Long>> explored = new java.util.HashMap<>();
-    private boolean exploredDirty;
-    private long exploredSavedAt;
-    private android.graphics.Bitmap dimBitmap;
-    private int dimOriginX, dimOriginZ, dimVersion = -1, exploredVersion;
-    private GameState.MapImage dimFor;
-    private final Paint dimPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
-    private float lastSeenX = Float.NaN, lastSeenZ = Float.NaN;
-
-    private static long cellKey(int x, int z) {
-        return ((long) x << 32) ^ (z & 0xFFFFFFFFL);
-    }
-
-    private java.util.HashSet<Long> exploredCells(int area) {
-        java.util.HashSet<Long> set = explored.get(area);
-        if (set == null) {
-            set = new java.util.HashSet<>();
-            java.io.File f = exploredFile(area);
-            if (f.isFile()) {
-                try (java.io.DataInputStream in = new java.io.DataInputStream(new java.io.BufferedInputStream(new java.io.FileInputStream(f)))) {
-                    int n = in.readInt();
-                    for (int i = 0; i < n; i++) set.add(in.readLong());
-                } catch (java.io.IOException ignored) {
-                }
-            }
-            explored.put(area, set);
-        }
-        return set;
-    }
-
-    private java.io.File exploredFile(int area) {
-        java.io.File dir = new java.io.File(getContext().getFilesDir(), "explored");
-        //noinspection ResultOfMethodCallIgnored
-        dir.mkdirs();
-        return new java.io.File(dir, "area-" + Integer.toHexString(area) + ".bin");
-    }
-
-    /** Marks the cells around Banjo as seen (each poll), and saves now and then. */
-    private void markExplored() {
-        int area = GameState.area();
-        float[] p = GameState.position();
-        if (area < 0 || p == null) {
-            return;
-        }
-        float dx = p[0] - lastSeenX, dz = p[2] - lastSeenZ;
-        if (!Float.isNaN(lastSeenX) && dx * dx + dz * dz < 60f * 60f) {
-            return;
-        }
-        lastSeenX = p[0];
-        lastSeenZ = p[2];
-        java.util.HashSet<Long> set = exploredCells(area);
-        int r = (int) Math.ceil(SEEN_RADIUS / CELL);
-        int ix = (int) Math.floor(p[0] / CELL), iz = (int) Math.floor(p[2] / CELL);
-        boolean added = false;
-        for (int z = iz - r; z <= iz + r; z++) {
-            for (int x = ix - r; x <= ix + r; x++) {
-                float wx = (x + 0.5f) * CELL - p[0], wz = (z + 0.5f) * CELL - p[2];
-                if (wx * wx + wz * wz <= SEEN_RADIUS * SEEN_RADIUS && set.add(cellKey(x, z))) {
-                    added = true;
-                }
-            }
-        }
-        if (added) {
-            exploredVersion++;
-            exploredDirty = true;
-        }
-        long now = SystemClock.uptimeMillis();
-        if (exploredDirty && now - exploredSavedAt > 5000) {
-            exploredSavedAt = now;
-            exploredDirty = false;
-            final java.io.File f = exploredFile(area);
-            final long[] cells = new long[set.size()];
-            int i = 0;
-            for (long k : set) cells[i++] = k;
-            mapWorker.execute(() -> {
-                java.io.File tmpFile = new java.io.File(f.getPath() + ".tmp");
-                try (java.io.DataOutputStream out = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(tmpFile)))) {
-                    out.writeInt(cells.length);
-                    for (long k : cells) out.writeLong(k);
-                } catch (java.io.IOException e) {
-                    return;
-                }
-                //noinspection ResultOfMethodCallIgnored
-                tmpFile.renameTo(f);
-            });
-        }
-    }
-
-    private void drawUnexplored(Canvas c, RectF r, GameState.MapImage m, float cx, float cz, float viewScale) {
-        int area = GameState.area();
-        if (area < 0) {
-            return;
-        }
-        if (dimBitmap == null || dimFor != m || dimVersion != exploredVersion) {
-            java.util.HashSet<Long> set = exploredCells(area);
-            int x0 = (int) Math.floor(m.minX / CELL) - 1, z0 = (int) Math.floor(m.minZ / CELL) - 1;
-            int cols = (int) Math.ceil(m.worldW() / CELL) + 3, rows = (int) Math.ceil(m.worldH() / CELL) + 3;
-            if (cols <= 0 || rows <= 0 || cols * rows > 400 * 400) {
-                return;
-            }
-            int[] px = new int[cols * rows];
-            int dim = Color.argb(120, 0, 0, 0);
-            for (int z = 0; z < rows; z++) {
-                for (int x = 0; x < cols; x++) {
-                    px[z * cols + x] = set.contains(cellKey(x0 + x, z0 + z)) ? 0 : dim;
-                }
-            }
-            dimBitmap = android.graphics.Bitmap.createBitmap(px, cols, rows, android.graphics.Bitmap.Config.ARGB_8888);
-            dimOriginX = x0;
-            dimOriginZ = z0;
-            dimFor = m;
-            dimVersion = exploredVersion;
-        }
-        // Cell centres sit at pixel centres: pixel (0, 0) covers world (x0, z0)-(x0+1, z0+1) cells.
-        drawWorldBitmap(c, r, dimBitmap, dimOriginX * CELL, dimOriginZ * CELL, 1f / CELL, cx, cz, viewScale, dimPaint);
-    }
-
     // ---- Your markers ------------------------------------------------------------------
     // Press and hold on the map: drop a marker there, or remove the one under your finger.
     // Kept per area in the app's preferences.
@@ -1050,7 +927,7 @@ public final class BottomScreenView extends View {
     // ---- Explored areas ----------------------------------------------------------------
     // Each area's map (and storey) is kept: the last few in memory, all of them as PNG files in
     // the app's cache, by the game's map id. Bump MAP_CACHE_VERSION when the map's look changes.
-    private static final String MAP_CACHE_VERSION = "v4";
+    private static final String MAP_CACHE_VERSION = "v5";
     private int cacheTried = Integer.MIN_VALUE;
     private final java.util.LinkedHashMap<String, GameState.MapImage> mapMemory =
         new java.util.LinkedHashMap<String, GameState.MapImage>(8, 0.75f, true) {

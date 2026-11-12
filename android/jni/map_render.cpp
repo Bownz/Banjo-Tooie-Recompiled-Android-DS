@@ -62,6 +62,7 @@ namespace {
         int w = 0, h = 0;
         std::vector<Rgba> px;
         bool bluish = false;   // average colour clearly blue: water
+        float avgR = 0, avgG = 0, avgB = 0;   // average colour (opaque texels)
     };
 
     Rgba from5551(uint16_t v) {
@@ -204,7 +205,12 @@ namespace {
     // (coordinates 0-127 on a 64-texel tile); wrapping it drew every path twice.
     int wrapCoord(float c, int size, int cm, int mask, int tileSize) {
         long v = static_cast<long>(std::floor(c));
-        if (((cm & 2) || mask == 0) && tileSize > 0) v = std::clamp<long>(v, 0, tileSize - 1);
+        // A clamped coordinate far outside its tile (Spiral Mountain's mound slopes: 7x the
+        // tile) would stretch one edge row into streaks the game doesn't show: some setting
+        // there is misread, so repeat the texture instead. The Isle o' Hags path overlays,
+        // which do clamp, stay within 2x.
+        const bool farOut = tileSize > 0 && (v < -tileSize || v >= 5 * tileSize / 2);
+        if (((cm & 2) || mask == 0) && tileSize > 0 && !(farOut && mask != 0)) v = std::clamp<long>(v, 0, tileSize - 1);
         if (mask) {
             const long period = std::min<long>(1L << mask, size);
             if (cm & 1) {
@@ -382,6 +388,9 @@ namespace {
                                 double r = 0, g = 0, b = 0;
                                 for (const Rgba& c : t.px) { r += c.r; g += c.g; b += c.b; }
                                 t.bluish = b > r * 1.25 && b > g * 1.1;
+                                double ar = 0, ag = 0, ab = 0, n = 0;
+                                for (const Rgba& c : t.px) if (c.a > 128) { ar += c.r; ag += c.g; ab += c.b; n++; }
+                                if (n > 0) { t.avgR = float(ar / n); t.avgG = float(ag / n); t.avgB = float(ab / n); }
                             }
                             cached = textures.emplace(key, std::move(t)).first;
                         }
@@ -537,6 +546,11 @@ namespace {
             const float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
             const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
             if (len <= 0 || ny / len < 0.2f) continue;
+            // Steep faces seen from above stretch their texture into streaks: draw them in the
+            // texture's average colour instead, darker the steeper they are (a cliff look).
+            const float upness = ny / len;
+            const bool steep = upness < 0.6f && t.tex != nullptr && !t.water;
+            const float steepShade = steep ? 0.55f + 0.45f * (upness - 0.2f) / 0.4f : 1.0f;
             // A little light by each triangle's slope (gentle: the hill shading does the rest, and
             // a strong per-triangle light shows the facets in close-ups).
             const float light = 0.86f + 0.18f * std::max(0.0f, (nx * lx + ny * ly + nz * lz) / len);
@@ -562,9 +576,13 @@ namespace {
                     const float w00 = (1 - ws) * (1 - wt), w10 = ws * (1 - wt), w01 = (1 - ws) * wt, w11 = ws * wt;
                     const float ca = c00.a * w00 + c10.a * w10 + c01.a * w01 + c11.a * w11;
                     if (ca <= 8) return;
-                    r = c00.r * w00 + c10.r * w10 + c01.r * w01 + c11.r * w11;
-                    g = c00.g * w00 + c10.g * w10 + c01.g * w01 + c11.g * w11;
-                    b = c00.b * w00 + c10.b * w10 + c01.b * w01 + c11.b * w11;
+                    if (steep) {
+                        r = t.tex->avgR * steepShade; g = t.tex->avgG * steepShade; b = t.tex->avgB * steepShade;
+                    } else {
+                        r = c00.r * w00 + c10.r * w10 + c01.r * w01 + c11.r * w11;
+                        g = c00.g * w00 + c10.g * w10 + c01.g * w01 + c11.g * w11;
+                        b = c00.b * w00 + c10.b * w10 + c01.b * w01 + c11.b * w11;
+                    }
                     alpha = ca / 255.0f;
                 }
                 const float sr = l0 * t.v[0].r + l1 * t.v[1].r + l2 * t.v[2].r;
@@ -984,15 +1002,19 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
     }
 
     // Hill shading: light the surface by its slope, as if the sun were low in the north-west
-    // (top left), so hills, ramps and hollows read as 3D. Slopes come from the surface heights
-    // 3 panel pixels apart; sharp jumps (walls, ledges) are left to the foot lines above.
+    // (top left), so hills, ramps and hollows read as 3D. Slopes come from widely blurred
+    // surface heights; sharp jumps (walls, ledges) are left to the foot lines above. Gentle
+    // (0.84-1.12): 0.8.6's stronger, sharper version showed every flat triangle as a patch.
     std::vector<float> hillShade(N, 1.0f);
     {
         std::vector<float> hs(N), hw(N);
         for (size_t i = 0; i < N; i++) { const bool has = surface[i] > -1e8f; hs[i] = has ? surface[i] : 0; hw[i] = has ? 1.0f : 0.0f; }
-        boxBlur(hs, W, H, px); boxBlur(hw, W, H, px);
+        // Heights blurred wide (two passes, ~12 panel pixels), so the shading rolls smoothly
+        // instead of changing in steps at each flat triangle's edge.
+        boxBlur(hs, W, H, 6 * px); boxBlur(hw, W, H, 6 * px);
+        boxBlur(hs, W, H, 6 * px); boxBlur(hw, W, H, 6 * px);
         for (size_t i = 0; i < N; i++) hs[i] = hw[i] > 0.01f ? hs[i] / hw[i] : -1e9f;
-        const int d = 3 * px;
+        const int d = 4 * px;
         const float dist = 2.0f * d / scale;   // world units between the two samples
         constexpr float sx = -0.55f, sy = 0.62f, sz = -0.55f;   // towards the sun (normalised)
         for (int z = d; z < H - d; z++)
@@ -1003,7 +1025,7 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
                 const float gx = std::clamp((h1 - h0) / dist, -1.5f, 1.5f), gz = std::clamp((v1 - v0) / dist, -1.5f, 1.5f);
                 const float len = std::sqrt(gx * gx + 1.0f + gz * gz);
                 const float lit = (-gx * sx + sy - gz * sz) / len;   // normal (-gx, 1, -gz)
-                hillShade[i] = std::clamp(1.0f + 0.85f * (lit - sy), 0.72f, 1.22f);
+                hillShade[i] = std::clamp(1.0f + 0.5f * (lit - sy), 0.84f, 1.12f);   // gentle
             }
     }
 
