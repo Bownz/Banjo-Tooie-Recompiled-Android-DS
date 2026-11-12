@@ -60,6 +60,15 @@ final class GameState {
 
     static boolean paused() { return false; }
 
+    /** Banjo's position {x, y, z} in the current area, or null. */
+    static float[] position() { return null; }
+
+    /** The current area (map) number, or UNKNOWN. */
+    static int area() { return UNKNOWN; }
+
+    /** The current area's floors and walls from above: x, z per corner, 3 corners per triangle; or null. */
+    static float[] mapTriangles() { return null; }
+
     static boolean cutscene() { return false; }
 
     /** A collectible's count in a world (or the total for world -1), or UNKNOWN. */

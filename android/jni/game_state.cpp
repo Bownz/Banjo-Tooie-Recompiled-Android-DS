@@ -7,13 +7,18 @@
 // the TEMPORARY probe below: it watches all of RDRAM and, each time the player taps Mark on
 // the bottom screen, logs the bytes that changed only a few times, by a small step, since the
 // previous Mark. Collecting one thing between two Marks narrows that thing's counter down to
-// a few candidates. Logcat tag BTProbe.
+// a few candidates. It also looks for positions (for the bottom screen's map): 32-bit floats
+// that moved a fair way, many times, since the previous Mark (walk between two Marks), in the
+// globals and in the structures the player-state slots point to; and 16-bit values that
+// changed once or twice (going through a door: the area number). Logcat tag BTProbe.
 
 #include <android/log.h>
 #include <jni.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstdio>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -31,6 +36,8 @@ namespace {
     // N64 addresses (US), verified by the port (src/recomp_api.cpp).
     constexpr uint32_t kGameMode = 0x80043380u;        // u32
     constexpr uint32_t kGameFrameCount = 0x800459C8u;  // u32, counts game frames
+    constexpr uint32_t kPlayerStateSlotTable = 0x80135490u;  // 8 pointers
+    constexpr uint32_t kPlayerStateSlotCount = 8u;
 
     constexpr size_t kRdramSize = 8 * 1024 * 1024;
 
@@ -78,6 +85,9 @@ namespace {
         }
     }
 
+    void probe_report_halfwords_locked(const uint8_t* rdram, int mark);
+    void probe_report_floats_locked(const uint8_t* rdram, int mark);
+
     struct Candidate {
         uint32_t address;
         uint8_t first, now, changes;
@@ -123,6 +133,77 @@ namespace {
         if (static_cast<int>(found.size()) > lines) {
             __android_log_print(ANDROID_LOG_INFO, kProbeTag, "M%d (%zu more not shown)", mark, found.size() - lines);
         }
+        probe_report_halfwords_locked(rdram, mark);
+        probe_report_floats_locked(rdram, mark);
+    }
+
+    // How often the 4 bytes at a (word-aligned) host offset changed: the most of any of them.
+    unsigned word_changes(size_t offset) {
+        return std::max(std::max(g_count[offset], g_count[offset + 1]), std::max(g_count[offset + 2], g_count[offset + 3]));
+    }
+
+    // Area numbers and other 16-bit state in the globals: changed 1-2 times, any step.
+    void probe_report_halfwords_locked(const uint8_t* rdram, int mark) {
+        int lines = 0;
+        for (uint32_t guest = 0x80000000u; guest < 0x80200000u && lines < 120; guest += 2) {
+            // A guest halfword at `guest` is host bytes (guest ^ 2) .. +1.
+            const size_t host = (guest - 0x80000000u) ^ 2;
+            const unsigned n = std::max(g_count[host], g_count[host + 1]);
+            if (n == 0 || n > 2) {
+                continue;
+            }
+            uint16_t first, now;
+            std::memcpy(&first, g_first.data() + host, 2);
+            std::memcpy(&now, rdram + host, 2);
+            if (first == now || now > 0x1000 || first > 0x1000) {
+                continue;
+            }
+            __android_log_print(ANDROID_LOG_INFO, kProbeTag, "M%d H %08X 0x%X->0x%X (%u changes)", mark, guest, first, now, n);
+            lines++;
+        }
+    }
+
+    bool plausible_coordinate(float v) {
+        return std::isfinite(v) && std::fabs(v) < 30000.0f;
+    }
+
+    // Positions: floats that moved by 20-6000 units with many changes since the last Mark.
+    void probe_report_float_range_locked(const uint8_t* rdram, int mark, uint32_t begin, uint32_t end,
+                                         const char* where, int& lines) {
+        for (uint32_t guest = begin; guest + 4 <= end && lines < 160; guest += 4) {
+            const size_t host = guest - 0x80000000u;
+            if (host + 4 > kRdramSize || word_changes(host) < 8) {
+                continue;
+            }
+            float first, now;
+            std::memcpy(&first, g_first.data() + host, 4);
+            std::memcpy(&now, rdram + host, 4);
+            if (!plausible_coordinate(first) || !plausible_coordinate(now)) {
+                continue;
+            }
+            const float moved = std::fabs(now - first);
+            if (moved < 20.0f || moved > 6000.0f) {
+                continue;
+            }
+            __android_log_print(ANDROID_LOG_INFO, kProbeTag, "M%d F %08X %.1f->%.1f (%u changes) %s",
+                mark, guest, first, now, word_changes(host), where);
+            lines++;
+        }
+    }
+
+    void probe_report_floats_locked(const uint8_t* rdram, int mark) {
+        int lines = 0;
+        // The player-state slots' structures first.
+        for (uint32_t i = 0; i < kPlayerStateSlotCount; i++) {
+            const uint32_t ptr = read_u32(rdram, kPlayerStateSlotTable + i * 4);
+            __android_log_print(ANDROID_LOG_INFO, kProbeTag, "M%d slot %u -> %08X", mark, i, ptr);
+            if (ptr >= 0x80000000u && ptr < 0x80800000u - 0x800) {
+                char where[32];
+                std::snprintf(where, sizeof(where), "slot%u+%X", i, 0);
+                probe_report_float_range_locked(rdram, mark, ptr, ptr + 0x800, where, lines);
+            }
+        }
+        probe_report_float_range_locked(rdram, mark, 0x80000000u, 0x80200000u, "global", lines);
     }
 
     void probe_thread() {

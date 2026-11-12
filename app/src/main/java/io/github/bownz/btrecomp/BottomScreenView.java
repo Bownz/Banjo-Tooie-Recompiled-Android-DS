@@ -19,14 +19,12 @@ import android.view.View;
 /**
  * The bottom screen for Banjo-Tooie on a second display (e.g. the AYN Thor's lower screen).
  *
- * Banjo-Tooie is about gathering things, world by world, so the screen is a progress board
- * for the world you're in, which follows the game on its own:
+ * The screen is a map of the area you're in, drawn from above:
  * <ul>
- *   <li>Jiggywiggy's puzzle: the world's ten Jiggies as jigsaw pieces, filled in as found.</li>
- *   <li>The notes collected there, on a stave.</li>
- *   <li>Jinjos, Glowbos, Cheato pages and empty honeycombs, as small counters.</li>
- *   <li>Eggs and feathers carried.</li>
- *   <li>Four buttons for the moves that need Z held with a C button (Bottom Screen Buttons).</li>
+ *   <li>A line on top: the world, its Jiggies and notes.</li>
+ *   <li>The map: the area's floors and walls (from its collision data in the game's memory),
+ *       where you've walked, and where you are.</li>
+ *   <li>Four buttons for the moves done with Z and a C button (Bottom Screen Buttons).</li>
  * </ul>
  * The progress book (like the game's own pause screen): it opens whenever the game is paused
  * and closes when it's unpaused, and pages with ◀ ▶ or a swipe through every world in a table, then
@@ -179,6 +177,7 @@ public final class BottomScreenView extends View {
             bookOpen = false;            // and unpausing closes it again
         }
         cutscene = GameState.cutscene();
+        recordTrail();
         int settings = GameState.bottomSettings();
         showButtons = (settings & 1) != 0;
         dimCutscenes = (settings & 2) != 0;
@@ -210,29 +209,147 @@ public final class BottomScreenView extends View {
         float movesH = showButtons ? 15 * u : 0f;
         float bottom = h - pad - markH - 2 * u - (showButtons ? movesH + 3 * u : 0f);
 
-        // Caption: the world the board is for.
-        text.setTextSize(3.6f * u);
-        text.setColor(TAN);
-        String caption = world >= 0 ? GameState.WORLDS[world] : "This world";
-        c.drawText(caption, w / 2f, pad + 3.4f * u, text);
+        // One line on top: where you are, this world's Jiggies and notes.
+        float stripH = 6 * u;
+        drawStrip(c, new RectF(pad, pad, w - pad, pad + stripH));
 
-        float top = pad + 6.5f * u;
-        float boardH = (bottom - top) * 0.46f;
-        boardRect.set(pad, top, w - pad, top + boardH);
-        drawPuzzle(c, boardRect, GameState.count(GameState.JIGGIES, world));
-
-        float notesTop = boardRect.bottom + 3 * u;
-        RectF notes = new RectF(pad, notesTop, w - pad, notesTop + (bottom - top) * 0.17f);
-        drawNotes(c, notes, GameState.count(GameState.NOTES, world));
-
-        RectF counters = new RectF(pad, notes.bottom + 3 * u, w - pad, bottom);
-        drawCounters(c, counters);
+        // The map of the current area.
+        RectF map = new RectF(pad, pad + stripH + 2.5f * u, w - pad, bottom);
+        drawMap(c, map);
 
         if (showButtons) {
             drawMoves(c, new RectF(pad, bottom + 3 * u, w - pad, bottom + 3 * u + movesH));
         }
         drawMark(c, new RectF(pad, h - pad - markH, w - pad, h - pad));
         drawDim(c, w, h);
+    }
+
+    private void drawStrip(Canvas c, RectF r) {
+        text.setTextSize(3.4f * u);
+        text.setTextAlign(Paint.Align.LEFT);
+        text.setColor(TAN);
+        String where = world >= 0 ? GameState.WORLDS[world] : "Banjo-Tooie";
+        c.drawText(where, r.left, r.centerY() - (text.descent() + text.ascent()) / 2f, text);
+        text.setTextAlign(Paint.Align.RIGHT);
+        text.setColor(HONEY);
+        int jiggies = GameState.count(GameState.JIGGIES, world);
+        int notes = GameState.count(GameState.NOTES, world);
+        String right = (jiggies >= 0 ? jiggies + "/" + JIGGIES_PER_WORLD : "–") + " Jiggies  ·  " + value(notes) + " ♪";
+        c.drawText(right, r.right, r.centerY() - (text.descent() + text.ascent()) / 2f, text);
+        text.setTextAlign(Paint.Align.CENTER);
+    }
+
+    // ------------------------------------------------------------------------------
+    // The map
+    // ------------------------------------------------------------------------------
+
+    /**
+     * The current area from above: its floors and walls (from the area's collision data,
+     * once found), where you've walked, and where you are. Until the game's position and
+     * area data are verified, the panel explains what's coming.
+     */
+    private void drawMap(Canvas c, RectF r) {
+        fill.setColor(Color.rgb(20, 15, 28));
+        c.drawRoundRect(r, 3 * u, 3 * u, fill);
+        stroke.setColor(Color.argb(200, 206, 162, 70));
+        stroke.setStrokeWidth(0.45f * u);
+        c.drawRoundRect(r, 3 * u, 3 * u, stroke);
+
+        float[] tris = GameState.mapTriangles();
+        float[] here = GameState.position();
+        if (tris == null && here == null) {
+            text.setColor(TAN);
+            text.setTextSize(3.6f * u);
+            drawCentered(c, "The map of this area goes here", r.centerX(), r.centerY() - 3 * u);
+            text.setTextSize(2.8f * u);
+            text.setColor(Color.argb(170, 232, 213, 168));
+            drawCentered(c, "Test build: help find Banjo's position with Mark", r.centerX(), r.centerY() + 2.5f * u);
+            return;
+        }
+        // Fit what's known (the area's triangles, else the trail) into the panel, north up.
+        float minX = Float.MAX_VALUE, maxX = -Float.MAX_VALUE, minZ = Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
+        float[] pts = tris != null ? tris : trailPoints();
+        for (int i = 0; i + 1 < pts.length; i += 2) {
+            minX = Math.min(minX, pts[i]); maxX = Math.max(maxX, pts[i]);
+            minZ = Math.min(minZ, pts[i + 1]); maxZ = Math.max(maxZ, pts[i + 1]);
+        }
+        if (here != null) {
+            minX = Math.min(minX, here[0]); maxX = Math.max(maxX, here[0]);
+            minZ = Math.min(minZ, here[2]); maxZ = Math.max(maxZ, here[2]);
+        }
+        float inset = 4 * u;
+        float spanX = Math.max(1f, maxX - minX), spanZ = Math.max(1f, maxZ - minZ);
+        float scale = Math.min((r.width() - inset * 2) / spanX, (r.height() - inset * 2) / spanZ);
+        float ox = r.centerX() - (minX + spanX / 2) * scale, oz = r.centerY() - (minZ + spanZ / 2) * scale;
+
+        int saved = c.save();
+        c.clipRect(r);
+        if (tris != null) {
+            // Floors and walls: x/z pairs, three per triangle.
+            fill.setColor(Color.argb(40, 255, 186, 40));
+            stroke.setColor(Color.argb(140, 255, 186, 40));
+            stroke.setStrokeWidth(Math.max(1f, 0.15f * u));
+            for (int i = 0; i + 5 < tris.length; i += 6) {
+                path.reset();
+                path.moveTo(ox + tris[i] * scale, oz + tris[i + 1] * scale);
+                path.lineTo(ox + tris[i + 2] * scale, oz + tris[i + 3] * scale);
+                path.lineTo(ox + tris[i + 4] * scale, oz + tris[i + 5] * scale);
+                path.close();
+                c.drawPath(path, fill);
+            }
+        }
+        // Where you've walked.
+        float[] trail = trailPoints();
+        stroke.setColor(Color.argb(150, 120, 200, 255));
+        stroke.setStrokeWidth(0.5f * u);
+        for (int i = 0; i + 3 < trail.length; i += 2) {
+            c.drawLine(ox + trail[i] * scale, oz + trail[i + 1] * scale, ox + trail[i + 2] * scale, oz + trail[i + 3] * scale, stroke);
+        }
+        if (here != null) {
+            float px = ox + here[0] * scale, pz = oz + here[2] * scale;
+            fill.setColor(HONEY);
+            c.drawCircle(px, pz, 1.6f * u, fill);
+            stroke.setColor(CREAM);
+            stroke.setStrokeWidth(0.4f * u);
+            c.drawCircle(px, pz, 1.6f * u, stroke);
+        }
+        c.restoreToCount(saved);
+    }
+
+    // The trail: positions (x, z) in the current area, one every so often.
+    private final java.util.ArrayList<float[]> trail = new java.util.ArrayList<>();
+    private int trailArea = Integer.MIN_VALUE;
+
+    private void recordTrail() {
+        float[] p = GameState.position();
+        int area = GameState.area();
+        if (p == null) {
+            return;
+        }
+        if (area != trailArea) {
+            trail.clear();
+            trailArea = area;
+        }
+        if (!trail.isEmpty()) {
+            float[] last = trail.get(trail.size() - 1);
+            float dx = p[0] - last[0], dz = p[2] - last[1];
+            if (dx * dx + dz * dz < 40f * 40f) {
+                return;   // only every 40 units or so
+            }
+        }
+        trail.add(new float[] { p[0], p[2] });
+        if (trail.size() > 4000) {
+            trail.remove(0);
+        }
+    }
+
+    private float[] trailPoints() {
+        float[] out = new float[trail.size() * 2];
+        for (int i = 0; i < trail.size(); i++) {
+            out[i * 2] = trail.get(i)[0];
+            out[i * 2 + 1] = trail.get(i)[1];
+        }
+        return out;
     }
 
     /** A few fixed stars: the Isle at night. */
@@ -326,31 +443,6 @@ public final class BottomScreenView extends View {
         text.setTextSize(r.height() * 0.55f);
         c.drawText(value(notes) + " notes", r.right - 1 * u, r.centerY() + r.height() * 0.2f, text);
         text.setTextAlign(Paint.Align.CENTER);
-    }
-
-    /** Jinjos, Glowbos, Cheato pages, honeycombs; then eggs and feathers. */
-    private void drawCounters(Canvas c, RectF r) {
-        int at = world;
-        int[] items = { GameState.JINJOS, GameState.GLOWBOS, GameState.CHEATO_PAGES, GameState.HONEYCOMBS,
-            GameState.EGGS, GameState.FEATHERS };
-        String[] names = { "Jinjos", "Glowbos", "Cheato", "Honeycombs", "Eggs", "Feathers" };
-        int cols = 3;
-        float cw = r.width() / cols, ch = r.height() / 2;
-        for (int i = 0; i < items.length; i++) {
-            float cx = r.left + cw * (i % cols + 0.5f), cy = r.top + ch * (i / cols + 0.5f);
-            boolean carried = items[i] == GameState.EGGS || items[i] == GameState.FEATHERS;
-            int v = GameState.count(items[i], carried ? -1 : at);
-            float s = Math.min(cw, ch);
-            icon(c, items[i], cx - s * 0.22f, cy - s * 0.08f, s * 0.17f);
-            text.setTextAlign(Paint.Align.LEFT);
-            text.setColor(CREAM);
-            text.setTextSize(s * 0.22f);
-            c.drawText(value(v), cx + s * 0.02f, cy, text);
-            text.setTextAlign(Paint.Align.CENTER);
-            text.setColor(TAN);
-            text.setTextSize(Math.min(2.8f * u, s * 0.12f));
-            c.drawText(names[i], cx, cy + s * 0.3f, text);
-        }
     }
 
     private static String value(int v) {
