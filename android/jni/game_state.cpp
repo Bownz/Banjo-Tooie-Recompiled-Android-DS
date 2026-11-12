@@ -226,7 +226,7 @@ namespace {
     }
 
     // Each Mark also saves all of RDRAM (host order, gzip) to <dir>/mark-NN.bin.gz, with a line
-    // in <dir>/marks.txt, so the marks can be compared offline (pull-probe.bat). The first Mark
+    // in <dir>/marks.txt, so the marks can be compared offline (Share Log zips them with the report). The first Mark
     // of a run clears the previous run's files.
     std::string g_snapshot_dir;
     bool g_snapshot_cleared = false;
@@ -249,7 +249,7 @@ namespace {
             char name[64];
             std::snprintf(name, sizeof(name), "/mark-%02d.bin.gz", mark);
             const std::string path = dir + name;
-            gzFile f = gzopen(path.c_str(), "wb1");
+            gzFile f = gzopen(path.c_str(), "wb6");
             bool ok = f != nullptr && gzwrite(f, copy.data(), static_cast<unsigned>(copy.size())) == static_cast<int>(copy.size());
             if (f != nullptr) {
                 ok = gzclose(f) == Z_OK && ok;

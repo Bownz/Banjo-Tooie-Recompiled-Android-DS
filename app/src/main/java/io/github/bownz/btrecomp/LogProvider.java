@@ -12,7 +12,7 @@ import java.io.File;
 import java.io.FileNotFoundException;
 
 /**
- * Serves the log reports written by {@link Diagnostics} (cache/share/*.txt) to the app the
+ * Serves the log reports written by {@link Diagnostics} (cache/share/*.txt, or a .zip with the test builds' memory snapshots) to the app the
  * player shares them with. Read-only, and only files in that folder.
  */
 public final class LogProvider extends ContentProvider {
@@ -40,7 +40,8 @@ public final class LogProvider extends ContentProvider {
 
     @Override
     public String getType(Uri uri) {
-        return "text/plain";
+        String name = uri.getLastPathSegment();
+        return name != null && name.endsWith(".zip") ? "application/zip" : "text/plain";
     }
 
     @Override

@@ -217,13 +217,58 @@ final class Diagnostics {
         }
     }
 
+    /**
+     * TEMPORARY (test builds): when Mark has saved memory snapshots (files/probe), packs them
+     * with the report into one zip next to it, so Share Log sends everything. Null when there
+     * are none.
+     */
+    private static File zipWithProbe(Context c, File report) throws IOException {
+        File base = c.getExternalFilesDir(null);
+        File probe = base != null ? new File(base, "probe") : null;
+        File[] files = probe != null ? probe.listFiles() : null;
+        if (files == null || files.length == 0) {
+            return null;
+        }
+        java.util.Arrays.sort(files);
+        File zip = new File(report.getParentFile(), report.getName().replace(".txt", ".zip"));
+        byte[] buffer = new byte[1 << 16];
+        try (java.util.zip.ZipOutputStream out = new java.util.zip.ZipOutputStream(new FileOutputStream(zip))) {
+            for (File f : prepend(report, files)) {
+                if (!f.isFile()) {
+                    continue;
+                }
+                java.util.zip.ZipEntry entry = new java.util.zip.ZipEntry(f == report ? f.getName() : "probe/" + f.getName());
+                // The snapshots are gzip already.
+                out.setLevel(f.getName().endsWith(".gz") ? 0 : 6);
+                out.putNextEntry(entry);
+                try (InputStream in = new java.io.FileInputStream(f)) {
+                    int n;
+                    while ((n = in.read(buffer)) > 0) {
+                        out.write(buffer, 0, n);
+                    }
+                }
+                out.closeEntry();
+            }
+        }
+        return zip;
+    }
+
+    private static File[] prepend(File first, File[] rest) {
+        File[] all = new File[rest.length + 1];
+        all[0] = first;
+        System.arraycopy(rest, 0, all, 1, rest.length);
+        return all;
+    }
+
     /** Builds the report and opens the share sheet (Files, Drive, Discord, email...). */
     static void share(Activity activity, String crash) {
         try {
             File report = writeReport(activity, crash);
-            Uri uri = Uri.parse("content://" + activity.getPackageName() + AUTHORITY_SUFFIX + "/" + report.getName());
+            File zip = zipWithProbe(activity, report);
+            File shared = zip != null ? zip : report;
+            Uri uri = Uri.parse("content://" + activity.getPackageName() + AUTHORITY_SUFFIX + "/" + shared.getName());
             Intent send = new Intent(Intent.ACTION_SEND)
-                .setType("text/plain")
+                .setType(zip != null ? "application/zip" : "text/plain")
                 .putExtra(Intent.EXTRA_STREAM, uri)
                 .putExtra(Intent.EXTRA_SUBJECT, "Banjo-Tooie Recompiled Android log (" + version(activity) + ")")
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
