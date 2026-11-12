@@ -205,12 +205,7 @@ namespace {
     // (coordinates 0-127 on a 64-texel tile); wrapping it drew every path twice.
     int wrapCoord(float c, int size, int cm, int mask, int tileSize) {
         long v = static_cast<long>(std::floor(c));
-        // A clamped coordinate far outside its tile (Spiral Mountain's mound slopes: 7x the
-        // tile) would stretch one edge row into streaks the game doesn't show: some setting
-        // there is misread, so repeat the texture instead. The Isle o' Hags path overlays,
-        // which do clamp, stay within 2x.
-        const bool farOut = tileSize > 0 && (v < -tileSize || v >= 5 * tileSize / 2);
-        if (((cm & 2) || mask == 0) && tileSize > 0 && !(farOut && mask != 0)) v = std::clamp<long>(v, 0, tileSize - 1);
+        if (((cm & 2) || mask == 0) && tileSize > 0) v = std::clamp<long>(v, 0, tileSize - 1);
         if (mask) {
             const long period = std::min<long>(1L << mask, size);
             if (cm & 1) {
@@ -566,9 +561,15 @@ namespace {
                     const float fs = s - 0.5f, ft = tt - 0.5f;
                     const float s0 = std::floor(fs), t0 = std::floor(ft);
                     const float ws = fs - s0, wt = ft - t0;
+                    // A tile bigger than its texture is a leftover size (mipmapped textures: the
+                    // texture repeats at its own size), so its clamp doesn't apply either.
+                    // Clamping there stretched one edge column into stripes (Spiral Mountain's
+                    // hill and slopes: 32x32 textures with a 64x64 clamped tile).
                     const int tws = std::min(t.tile.w, t.tex->w), twt = std::min(t.tile.h, t.tex->h);
-                    const int sa = wrapCoord(s0, t.tex->w, t.tile.cms, t.tile.ms, tws), sb = wrapCoord(s0 + 1, t.tex->w, t.tile.cms, t.tile.ms, tws);
-                    const int ta = wrapCoord(t0, t.tex->h, t.tile.cmt, t.tile.mt, twt), tb = wrapCoord(t0 + 1, t.tex->h, t.tile.cmt, t.tile.mt, twt);
+                    const int cms = t.tile.w > t.tex->w ? (t.tile.cms & 1) : t.tile.cms;
+                    const int cmt = t.tile.h > t.tex->h ? (t.tile.cmt & 1) : t.tile.cmt;
+                    const int sa = wrapCoord(s0, t.tex->w, cms, t.tile.ms, tws), sb = wrapCoord(s0 + 1, t.tex->w, cms, t.tile.ms, tws);
+                    const int ta = wrapCoord(t0, t.tex->h, cmt, t.tile.mt, twt), tb = wrapCoord(t0 + 1, t.tex->h, cmt, t.tile.mt, twt);
                     const Rgba& c00 = t.tex->px[size_t(ta) * t.tex->w + sa];
                     const Rgba& c10 = t.tex->px[size_t(ta) * t.tex->w + sb];
                     const Rgba& c01 = t.tex->px[size_t(tb) * t.tex->w + sa];
@@ -993,10 +994,10 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
                         down = std::max(down, h - n);
                     }
                 float f = 1.0f;
-                if (up > jump) f *= 1.0f - 0.55f * std::min(1.0f, (up - jump) / (full - jump) + 0.35f);     // foot: dark line
+                if (up > jump) f *= 1.0f - 0.35f * std::min(1.0f, (up - jump) / (full - jump) + 0.35f);     // foot: dark line
                 else if (down > jump) f *= 1.0f + 0.18f * std::min(1.0f, (down - jump) / (full - jump) + 0.3f);   // top: light edge
                 const float around = weight[i] > 0.01f ? avg[i] / weight[i] : h;
-                f *= 1.0f - std::clamp((around - h) / 400.0f, 0.0f, 0.28f);   // hollows
+                f *= 1.0f - std::clamp((around - h) / 400.0f, 0.0f, 0.14f);   // hollows
                 footShade[i] = f;
             }
     }
@@ -1054,7 +1055,9 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
         } else if (main[i] || solid[i]) {
             kind[i] = main[i] ? kMain : kSolid;
             const float k = std::clamp((ground[i] - lo) / std::max(1.0f, hi - lo), 0.0f, 1.0f);
-            const float f = main[i] ? 1.08f - 0.55f * k : 1.0f;   // raised scenery keeps its own colours
+            // Height: higher ground a little lighter (it was darker: Spiral Mountain's hill, the
+            // tallest thing, came out the darkest); raised scenery keeps its own colours.
+            const float f = main[i] ? 0.97f + 0.10f * k : 1.0f;
             light = f * footShade[i] * hillShade[i];
             groundColour(sR[i], sG[i], sB[i], light, main[i] && !inner[i] && nearEmpty[i], r, g, b);
         } else if ((drawn[i] || walk[i]) && fade[i] > 0.02f) {
