@@ -731,18 +731,126 @@ index 7a8c13b..bd198be 100644
          VI lastScreenVI;
          uint64_t lastScreenHash;
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..df80119 100644
+index 5a331aa..f2a8d02 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -11,6 +11,7 @@
+@@ -10,7 +10,115 @@
+ 
  #define ENABLE_HIGH_RESOLUTION_RENDERER 1
  
++#if defined(__ANDROID__)
++#   include <atomic>
++#   include <algorithm>
++#   include <cstdio>
++#   include "common/rt64_elapsed_timer.h"
++namespace {
++    // Android "60 FPS: Auto". While the device can't render two frames per game frame, drop the
++    // in-between frames (a steady 30, which looks smoother than 60 with frames skipped
++    // unevenly); go back to 60 once one frame costs clearly less than half a game frame. Each
++    // fall back soon after a return doubles the wait before the next try (4 s up to 64 s).
++    struct AndroidAutoRate {
++        std::atomic<bool> enabled{ true };
++        std::atomic<bool> capped{ false };
++        // Render thread only, over 1-second windows.
++        RT64::ElapsedTimer clock;
++        double windowStartMs = 0.0;
++        uint64_t wanted = 0, rendered = 0, samples = 0;
++        int64_t busyMicro = 0, frameMicro = 0, windowMicro = 0;
++        int badWindows = 0, goodWindows = 0;
++        double lastChangeMs = -1e9, retryAtMs = 0.0, backoffMs = 4000.0;
++
++        void resetWindow(double nowMs) {
++            windowStartMs = nowMs;
++            wanted = rendered = samples = 0;
++            busyMicro = frameMicro = windowMicro = 0;
++        }
++
++        // After each game frame: frames wanted and rendered for it, their total render time,
++        // and the game frame's length.
++        void update(bool eligible, bool paused, uint32_t wantedFrames, uint32_t renderedFrames, int64_t renderMicro, int64_t gameFrameMicro) {
++            const double nowMs = clock.elapsedMilliseconds();
++            if (!eligible || !enabled.load(std::memory_order_relaxed)) {
++                if (capped.exchange(false, std::memory_order_relaxed)) {
++                    fprintf(stdout, "Auto framerate: off, back to the setting\n");
++                    fflush(stdout);
++                }
++                badWindows = goodWindows = 0;
++                resetWindow(nowMs);
++                return;
++            }
++            if (paused) {
++                return;
++            }
++            if ((renderedFrames > 0) && (gameFrameMicro > 0)) {
++                wanted += wantedFrames;
++                rendered += renderedFrames;
++                busyMicro += renderMicro;
++                frameMicro += renderMicro / renderedFrames;
++                windowMicro += gameFrameMicro;
++                samples++;
++            }
++            if ((nowMs - windowStartMs) < 1000.0) {
++                return;
++            }
++            if (samples >= 10) {
++                const double window = double(windowMicro) / double(samples);
++                if (!capped.load(std::memory_order_relaxed)) {
++                    const double missed = (wanted > 0) ? (1.0 - double(rendered) / double(wanted)) : 0.0;
++                    const double busy = double(busyMicro) / double(samples);
++                    const bool bad = (wanted > samples) && ((missed > 0.10) || (busy > 0.95 * window));
++                    badWindows = bad ? (badWindows + 1) : 0;
++                    if (badWindows >= 2) {
++                        if ((nowMs - lastChangeMs) < 6000.0) {
++                            backoffMs = std::min(backoffMs * 2.0, 64000.0);
++                        }
++                        else if ((nowMs - lastChangeMs) > 30000.0) {
++                            backoffMs = 4000.0;
++                        }
++                        capped.store(true, std::memory_order_relaxed);
++                        retryAtMs = nowMs + backoffMs;
++                        lastChangeMs = nowMs;
++                        badWindows = goodWindows = 0;
++                        fprintf(stdout, "Auto framerate: 30 (missed %.0f%% of frames, %.1f of %.1f ms busy; next try in %.0f s)\n",
++                            missed * 100.0, busy / 1000.0, window / 1000.0, backoffMs / 1000.0);
++                        fflush(stdout);
++                    }
++                }
++                else {
++                    const double cost = double(frameMicro) / double(samples);
++                    const bool good = (2.0 * cost) <= (0.8 * window);
++                    goodWindows = good ? (goodWindows + 1) : 0;
++                    if ((goodWindows >= 3) && (nowMs >= retryAtMs)) {
++                        capped.store(false, std::memory_order_relaxed);
++                        lastChangeMs = nowMs;
++                        badWindows = goodWindows = 0;
++                        fprintf(stdout, "Auto framerate: 60 (a frame costs %.1f of %.1f ms)\n", cost / 1000.0, window / 1000.0);
++                        fflush(stdout);
++                    }
++                }
++            }
++            resetWindow(nowMs);
++        }
++    };
++    AndroidAutoRate androidAutoRate;
++}
++
++// Video > 60 FPS Mode (src/android_config.cpp): 1 Auto, 0 Always.
++extern "C" void rt64_android_set_auto_framerate(int enabled) {
++    androidAutoRate.enabled.store(enabled != 0, std::memory_order_relaxed);
++}
++
++// Whether Auto has dropped to 30 right now.
++extern "C" int rt64_android_auto_framerate_capped() {
++    return androidAutoRate.capped.load(std::memory_order_relaxed) ? 1 : 0;
++}
++#endif
++
  namespace RT64 {
 +
      // WorkloadQueue
  
      WorkloadQueue::WorkloadQueue() {
-@@ -188,7 +189,18 @@ namespace RT64 {
+@@ -188,7 +296,18 @@ namespace RT64 {
          switch (resolutionMode) {
          case UserConfiguration::Resolution::WindowIntegerScale:
              if (ext.sharedResources->swapChainHeight > 0) {
@@ -761,7 +869,20 @@ index 5a331aa..df80119 100644
              }
              else {
                  resolutionMultiplier = 1.0f;
-@@ -301,6 +313,10 @@ namespace RT64 {
+@@ -226,6 +345,12 @@ namespace RT64 {
+                 workloadConfig.targetRate = ext.sharedResources->swapChainRate;
+             }
+ 
++#       if defined(__ANDROID__)
++            if (androidAutoRate.enabled.load(std::memory_order_relaxed) && androidAutoRate.capped.load(std::memory_order_relaxed)) {
++                workloadConfig.targetRate = 0;
++            }
++#       endif
++
+             break;
+         case UserConfiguration::RefreshRate::Original:
+         default:
+@@ -301,6 +426,10 @@ namespace RT64 {
          const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
  
          rendererCPUProfiler.start();
@@ -772,7 +893,7 @@ index 5a331aa..df80119 100644
  
          const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
          const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
-@@ -484,6 +500,10 @@ namespace RT64 {
+@@ -484,6 +613,10 @@ namespace RT64 {
  
                      if (colorTarget != nullptr) {
                          rtWidth = std::max(rtWidth, colorTarget->width);
@@ -783,7 +904,7 @@ index 5a331aa..df80119 100644
                          rtHeight = std::max(rtHeight, colorTarget->height);
                          chosenRt = colorTarget;
                      }
-@@ -840,8 +860,15 @@ namespace RT64 {
+@@ -840,8 +973,15 @@ namespace RT64 {
              ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 1);
              ext.workloadGraphicsWorker->commandList->end();
              framebufferRenderer->waitForUploaders();
@@ -799,7 +920,7 @@ index 5a331aa..df80119 100644
              workerMutex.unlock();
  
              // Update the GPU profiler with the results from the timestamps of the frame.
-@@ -880,6 +907,7 @@ namespace RT64 {
+@@ -880,6 +1020,7 @@ namespace RT64 {
  
      void WorkloadQueue::renderThreadLoop() {
          Thread::setCurrentThreadName("RT64 Workload");
@@ -807,7 +928,7 @@ index 5a331aa..df80119 100644
  
          WorkloadConfiguration workloadConfig;
          int64_t logicalTicks = 0;
-@@ -1070,7 +1098,19 @@ namespace RT64 {
+@@ -1070,7 +1211,19 @@ namespace RT64 {
                          const int64_t currentTimeMicro = workloadTimer.elapsedMicroseconds() - setupTimeMicro;
                          const int64_t expectedTimeMicro = frame * maxTimePerFrameMicro;
                          const int64_t measuredFrameMicro = renderTimeTotalMicro / framesRendered;
@@ -828,6 +949,24 @@ index 5a331aa..df80119 100644
                              displayTicks += workload.viOriginalRate;
                              skippedFrames = true;
                              continue;
+@@ -1162,6 +1315,17 @@ namespace RT64 {
+                     ext.sharedResources->interpolatedCondition.notify_all();
+                 }
+ 
++#           if defined(__ANDROID__)
++                {
++                    // Auto framerate decides on the 60 setting only (targetRate is 0 while it
++                    // has dropped to 30), and not while paused.
++                    const UserConfiguration &androidConfig = ext.sharedResources->userConfig;
++                    const bool eligible = (androidConfig.refreshRate == UserConfiguration::RefreshRate::Manual) &&
++                        (androidConfig.refreshRateTarget > 30);
++                    androidAutoRate.update(eligible, workload.paused || (workload.viOriginalRate == 0), displayFrames, framesRendered, renderTimeTotalMicro, originalTimeMicro);
++                }
++#           endif
++
+                 threadConfigurationValidate();
+ 
+                 if (!workload.paused) {
 diff --git a/src/render/rt64_descriptor_sets.h b/src/render/rt64_descriptor_sets.h
 index 69a82ac..3f7dd70 100644
 --- a/src/render/rt64_descriptor_sets.h

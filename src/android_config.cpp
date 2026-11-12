@@ -37,6 +37,7 @@ extern "C" void bt_android_set_touch_controls_mode(int mode);   // android/jni/t
 extern "C" void bt_android_edit_touch_layout();                  // android/jni/touch_controller.cpp
 extern "C" void bt_android_set_bottom_screen(int enabled);        // android/jni/touch_controller.cpp
 extern "C" void rt64_android_set_ram_copy_mode(int mode);  // rt64-android.patch
+extern "C" void rt64_android_set_auto_framerate(int enabled);  // rt64-android.patch
 
 
 namespace {
@@ -55,6 +56,12 @@ namespace {
     void apply_frame_copy(uint32_t mode) {
         rt64_android_set_ram_copy_mode(static_cast<int>(mode <= 2u ? mode : 0u));
         std::printf("Frame Copy: %s\n", mode == 1u ? "Wait" : mode == 2u ? "Off" : "Late");
+        std::fflush(stdout);
+    }
+    // Video > 60 FPS Mode: Auto drops to a steady 30 while the device can't keep 60.
+    void apply_auto_framerate(uint32_t mode) {
+        rt64_android_set_auto_framerate(mode == 0u ? 1 : 0);
+        std::printf("60 FPS Mode: %s\n", mode == 0u ? "Auto" : "Always");
         std::fflush(stdout);
     }
     std::atomic<bool> cutscene_dim{ true };
@@ -459,6 +466,26 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             });
     }
 
+    {
+        static EnumOptionVector auto_options = {
+            {0u, "Auto", "Auto"},
+            {1u, "Always", "Always"},
+        };
+        graphics_config.add_enum_option(
+            "android_auto_framerate",
+            "60 FPS Mode",
+            "With Framerate at 60. Auto: in busy scenes the device can't draw every in-between frame, "
+            "so it drops to a steady 30 and goes back to 60 once things are lighter; a steady 30 looks "
+            "smoother than an uneven 40-55. Always: 60 whenever it can, skipping frames when it can't.",
+            auto_options,
+            0u
+        );
+        graphics_config.add_option_change_callback("android_auto_framerate",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+                apply_auto_framerate(std::get<uint32_t>(cur));
+            });
+    }
+
     auto& touch_config = recompui::config::create_config_tab("Touch", touch_config_id, false);
     add_touch_options(touch_config);
     recompui::config::set_tab_visible(touch_config_id, false);
@@ -551,6 +578,12 @@ void bt::android::after_config_loaded() {
         const recomp::config::ConfigValueVariant mode = recompui::config::get_graphics_config().get_option_value("android_frame_copy");
         if (const uint32_t* value = std::get_if<uint32_t>(&mode)) {
             apply_frame_copy(*value);
+        }
+    }
+    {
+        const recomp::config::ConfigValueVariant mode = recompui::config::get_graphics_config().get_option_value("android_auto_framerate");
+        if (const uint32_t* value = std::get_if<uint32_t>(&mode)) {
+            apply_auto_framerate(*value);
         }
     }
     // Once: set-ups made before B backed out of menus get Back (Menu) on B.

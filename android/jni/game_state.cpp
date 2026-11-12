@@ -117,7 +117,9 @@ namespace {
     std::mutex g_probe_mutex;
     std::vector<uint8_t> g_first, g_prev, g_count;   // per host byte, since the last Mark
     int g_marks = 0;
-    std::atomic<bool> g_probe_enabled{true};
+    // The change counter runs only once Mark has been tapped (it compares all of RDRAM 10 times
+    // a second, which costs a little in busy scenes).
+    std::atomic<bool> g_probe_enabled{false};
     std::atomic<bool> g_probe_running{false};
 
     void probe_reset_locked(const uint8_t* rdram) {
@@ -328,7 +330,7 @@ namespace {
         bool have = false;
         const auto start = std::chrono::steady_clock::now();
         while (true) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
             uint8_t* rdram = g_rdram.load();
             if (rdram == nullptr || !ultramodern::is_game_started()) {
                 continue;
@@ -508,6 +510,7 @@ Java_io_github_bownz_btrecomp_GameState_nativeProbeMark(JNIEnv* env, jclass, jst
     }
     std::lock_guard lock{ g_probe_mutex };
     const int mark = ++g_marks;
+    g_probe_enabled.store(true);
     if (dir != nullptr) {
         const char* chars = env->GetStringUTFChars(dir, nullptr);
         g_snapshot_dir = chars != nullptr ? chars : "";
