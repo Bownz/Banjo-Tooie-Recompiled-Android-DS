@@ -636,9 +636,47 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
     const std::vector<uint8_t> inner = morph(walk, W, H, px, false);
     const std::vector<uint8_t> waterInner = morph(water, W, H, px, false);
 
+    // Definition: the surface height everywhere something is drawn; dark lines at the foot of
+    // every height jump (rocks, houses, ledges, steps), a light edge on top of it, and soft
+    // shading in hollows, so objects stand apart from the ground around them.
+    std::vector<float> surface(N, -1e9f);
+    for (size_t i = 0; i < N; i++) surface[i] = drawn[i] ? top[i] : (walk[i] ? ground[i] : -1e9f);
+    std::vector<float> footShade(N, 1.0f);
+    {
+        constexpr float jump = 30.0f;    // world units: a step you'd notice
+        constexpr float full = 160.0f;   // a jump this big gets the full edge
+        std::vector<float> avg(N), weight(N);
+        for (size_t i = 0; i < N; i++) { const bool has = surface[i] > -1e8f; avg[i] = has ? surface[i] : 0; weight[i] = has ? 1.0f : 0.0f; }
+        boxBlur(avg, W, H, 6 * px); boxBlur(weight, W, H, 6 * px);
+        for (int z = 0; z < H; z++)
+            for (int x = 0; x < W; x++) {
+                const size_t i = size_t(z) * W + x;
+                const float h = surface[i];
+                if (h <= -1e8f) continue;
+                float up = 0, down = 0;
+                for (int dz = -px; dz <= px; dz += px)
+                    for (int dx = -px; dx <= px; dx += px) {
+                        const int xx = x + dx, zz = z + dz;
+                        if ((dx == 0 && dz == 0) || xx < 0 || zz < 0 || xx >= W || zz >= H) continue;
+                        const float n = surface[size_t(zz) * W + xx];
+                        if (n <= -1e8f) continue;
+                        up = std::max(up, n - h);
+                        down = std::max(down, h - n);
+                    }
+                float f = 1.0f;
+                if (up > jump) f *= 1.0f - 0.55f * std::min(1.0f, (up - jump) / (full - jump) + 0.35f);     // foot: dark line
+                else if (down > jump) f *= 1.0f + 0.18f * std::min(1.0f, (down - jump) / (full - jump) + 0.3f);   // top: light edge
+                const float around = weight[i] > 0.01f ? avg[i] / weight[i] : h;
+                f *= 1.0f - std::clamp((around - h) / 400.0f, 0.0f, 0.28f);   // hollows
+                footShade[i] = f;
+            }
+    }
+
     // 4. Compose.
     out.assign(N, 0);
     constexpr float warmR = 235, warmG = 190, warmB = 120;
+    constexpr float warm = 0.12f;         // a light warm tint keeps colours distinct
+    constexpr float saturation = 1.22f;
     constexpr float bgR = 18, bgG = 13, bgB = 26;
     for (size_t i = 0; i < N; i++) {
         float r, g, b;
@@ -657,19 +695,23 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
             const float span = std::max(1.0f, hi - lo);
             const float above = std::clamp((ground[i] - (middle + 0.30f * span)) / (0.25f * span), 0.0f, 1.0f);
             f *= 1.0f - 0.5f * above;
-            r = (sR[i] * 0.7f + warmR * 0.3f) * f;
-            g = (sG[i] * 0.7f + warmG * 0.3f) * f;
-            b = (sB[i] * 0.7f + warmB * 0.3f) * f;
+            r = sR[i] * (1 - warm) + warmR * warm;
+            g = sG[i] * (1 - warm) + warmG * warm;
+            b = sB[i] * (1 - warm) + warmB * warm;
+            const float grey = (r + g + b) / 3.0f;
+            r = (grey + (r - grey) * saturation) * f * footShade[i];
+            g = (grey + (g - grey) * saturation) * f * footShade[i];
+            b = (grey + (b - grey) * saturation) * f * footShade[i];
             if (!inner[i]) {   // the outline
                 r = r * 0.1f + 255 * 0.9f; g = g * 0.1f + 236 * 0.9f; b = b * 0.1f + 190 * 0.9f;
             }
         } else if (drawn[i]) {
             // Visible but not walkable (beyond the area's edge): its own colours, darker.
-            const float wr = sR[i] * 0.7f + warmR * 0.3f, wg = sG[i] * 0.7f + warmG * 0.3f, wb = sB[i] * 0.7f + warmB * 0.3f;
+            const float wr = sR[i] * (1 - warm) + warmR * warm, wg = sG[i] * (1 - warm) + warmG * warm, wb = sB[i] * (1 - warm) + warmB * warm;
             const float grey = (wr + wg + wb) / 3.0f;
-            r = (grey * 0.15f + wr * 0.85f) * 0.5f;
-            g = (grey * 0.15f + wg * 0.85f) * 0.5f;
-            b = (grey * 0.15f + wb * 0.85f) * 0.5f;
+            r = (grey * 0.15f + wr * 0.85f) * 0.5f * footShade[i];
+            g = (grey * 0.15f + wg * 0.85f) * 0.5f * footShade[i];
+            b = (grey * 0.15f + wb * 0.85f) * 0.5f * footShade[i];
         } else if (nearAny[i] && cover[i] > 0.05f) {
             const float c = std::max(cover[i], 1e-3f);
             const float wr = fR[i] / c * 0.7f + warmR * 0.3f, wg = fG[i] / c * 0.7f + warmG * 0.3f, wb = fB[i] / c * 0.7f + warmB * 0.3f;
