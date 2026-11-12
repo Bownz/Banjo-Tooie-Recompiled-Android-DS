@@ -5,8 +5,10 @@
 // 1. The area's map model is drawn from above with its own textures: every triangle facing
 //    up, texture x vertex colour x a little slope light; the highest surface wins per pixel.
 // 2. The area's collision floors give the ground you can walk on.
-// 3. Walkable ground is shown bright, shaded by height (low light, high dark) with a light
-//    outline; everything else you can see is a flat dim colour; the rest is transparent.
+// 3. Walkable ground is shown bright, shaded by height (low light, high dark; the outer hills
+//    dimmer), with a light outline around the area's edge only; spots inside it you can't
+//    stand on are drawn as ground; things beyond the edge in their own colours, darker; the
+//    rest is transparent.
 //
 // Runs on a background thread (GameState.buildMap), once per area.
 
@@ -505,6 +507,62 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
     for (size_t i = 0; i < N; i++) walk[i] = ground[i] > -1e8f;
     const int px = std::max(1, int(std::lround(W / 900.0f)));   // ~1 pixel at the panel's size
     walk = morph(morph(walk, W, H, 2 * px, true), W, H, 2 * px, false);   // close pinholes
+    // Spots you can't stand on that walkable ground surrounds (cliff faces, slopes, fences,
+    // rocks) are drawn as ground too, at the height the model shows there: the textures show
+    // them clearly enough, and outlining each one cluttered the map. Holes with nothing drawn
+    // (real drops) stay empty. Only the area's outer edge keeps the outline.
+    {
+        std::vector<uint8_t> outside(N, 0);
+        std::vector<int> stack;
+        auto seed = [&](int x, int z) {
+            const size_t i = size_t(z) * W + x;
+            if (!walk[i] && !outside[i]) { outside[i] = 1; stack.push_back(int(i)); }
+        };
+        for (int x = 0; x < W; x++) { seed(x, 0); seed(x, H - 1); }
+        for (int z = 0; z < H; z++) { seed(0, z); seed(W - 1, z); }
+        while (!stack.empty()) {
+            const int i = stack.back();
+            stack.pop_back();
+            const int x = i % W, z = i / W;
+            if (x > 0) seed(x - 1, z);
+            if (x < W - 1) seed(x + 1, z);
+            if (z > 0) seed(x, z - 1);
+            if (z < H - 1) seed(x, z + 1);
+        }
+        for (size_t i = 0; i < N; i++) {
+            if (!walk[i] && !outside[i] && drawn[i]) {
+                walk[i] = 1;
+                ground[i] = top[i];
+            }
+        }
+        // Small enclosed holes with nothing drawn (specks between triangles): ground too, at
+        // the height of the ground around them.
+        std::vector<uint8_t> seen(N, 0);
+        std::vector<int> part;
+        for (size_t start = 0; start < N; start++) {
+            if (walk[start] || outside[start] || seen[start]) continue;
+            part.clear();
+            stack.assign(1, int(start));
+            seen[start] = 1;
+            float edge = -1e9f;
+            while (!stack.empty()) {
+                const int i = stack.back();
+                stack.pop_back();
+                part.push_back(i);
+                const int x = i % W, z = i / W;
+                const int next[4][2] = { { x - 1, z }, { x + 1, z }, { x, z - 1 }, { x, z + 1 } };
+                for (const auto& n : next) {
+                    if (n[0] < 0 || n[1] < 0 || n[0] >= W || n[1] >= H) continue;
+                    const size_t j = size_t(n[1]) * W + n[0];
+                    if (walk[j]) { edge = std::max(edge, ground[j]); continue; }
+                    if (!seen[j] && !outside[j]) { seen[j] = 1; stack.push_back(int(j)); }
+                }
+            }
+            if (part.size() < N / 1500 && edge > -1e8f) {
+                for (int i : part) { walk[i] = 1; ground[i] = edge; }
+            }
+        }
+    }
     // Heights for the pixels closing added: the nearest known ground (grow outwards).
     for (int pass = 0; pass < 4 * px; pass++) {
         bool any = false;
@@ -529,6 +587,7 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
     if (heights.empty()) return false;
     std::sort(heights.begin(), heights.end());
     const float lo = heights[heights.size() / 20], hi = heights[heights.size() - 1 - heights.size() / 20];
+    const float middle = heights[heights.size() / 2];
 
     // 3. Smoothing: a light blur of the textures; a wide, coverage-weighted blur for the dim colour.
     std::vector<float> sR = R, sG = G, sB = B;
@@ -552,13 +611,24 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, std::vector<int32_t>& out, 
         float r, g, b;
         if (walk[i]) {
             const float k = std::clamp((ground[i] - lo) / std::max(1.0f, hi - lo), 0.0f, 1.0f);
-            const float f = 1.08f - 0.55f * k;
+            float f = 1.08f - 0.55f * k;
+            // Ground well above the area's main level (outer hills) is dimmer still.
+            const float span = std::max(1.0f, hi - lo);
+            const float above = std::clamp((ground[i] - (middle + 0.30f * span)) / (0.25f * span), 0.0f, 1.0f);
+            f *= 1.0f - 0.5f * above;
             r = (sR[i] * 0.7f + warmR * 0.3f) * f;
             g = (sG[i] * 0.7f + warmG * 0.3f) * f;
             b = (sB[i] * 0.7f + warmB * 0.3f) * f;
             if (!inner[i]) {   // the outline
                 r = r * 0.1f + 255 * 0.9f; g = g * 0.1f + 236 * 0.9f; b = b * 0.1f + 190 * 0.9f;
             }
+        } else if (drawn[i]) {
+            // Visible but not walkable (beyond the area's edge): its own colours, darker.
+            const float wr = sR[i] * 0.7f + warmR * 0.3f, wg = sG[i] * 0.7f + warmG * 0.3f, wb = sB[i] * 0.7f + warmB * 0.3f;
+            const float grey = (wr + wg + wb) / 3.0f;
+            r = (grey * 0.15f + wr * 0.85f) * 0.5f;
+            g = (grey * 0.15f + wg * 0.85f) * 0.5f;
+            b = (grey * 0.15f + wb * 0.85f) * 0.5f;
         } else if (nearAny[i] && cover[i] > 0.05f) {
             const float c = std::max(cover[i], 1e-3f);
             const float wr = fR[i] / c * 0.7f + warmR * 0.3f, wg = fG[i] / c * 0.7f + warmG * 0.3f, wb = fB[i] / c * 0.7f + warmB * 0.3f;
