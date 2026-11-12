@@ -162,7 +162,7 @@ public final class BottomScreenView extends View {
         @Override
         public void run() {
             poll();
-            handler.postDelayed(this, 100);
+            handler.postDelayed(this, 33);   // ~30 Hz, so the arrow moves smoothly
         }
     };
 
@@ -245,157 +245,141 @@ public final class BottomScreenView extends View {
     // ------------------------------------------------------------------------------
 
     /**
-     * The current area from above, north up: its floors (shaded by height: low ground light, high ground dark) and
-     * walls, read from the area's collision data, with Banjo on it (a red dot). The picture is built once
-     * per area (and again shortly after, in case the area was still loading) and kept as a
-     * bitmap; only Banjo's dot is drawn each frame.
+     * The current area from above, north up, drawn from the level the game has loaded
+     * (android/jni/map_render.cpp): its own textures, walkable ground lit by height with an
+     * outline, everything else dim. Built once per area in the background; each frame only
+     * places it and draws Banjo's arrow. Close-up following Banjo by default; a tap on the map
+     * switches to the whole area and back.
      */
     private void drawMap(Canvas c, RectF r) {
-        fill.setColor(Color.rgb(20, 15, 28));
+        mapRect.set(r);
+        fill.setColor(Color.rgb(18, 13, 26));
         c.drawRoundRect(r, 3 * u, 3 * u, fill);
 
         float[] here = GameState.position();
-        if (mapBitmap == null || mapBitmap.getWidth() != (int) r.width() || mapBitmap.getHeight() != (int) r.height()) {
-            if (mapTris != null && r.width() > 0 && r.height() > 0) {
-                buildMapBitmap((int) r.width(), (int) r.height());
-            }
-        }
-        if (mapBitmap == null) {
+        GameState.MapImage m = mapImage;
+        if (m == null) {
             text.setColor(TAN);
             text.setTextSize(3.6f * u);
-            drawCentered(c, here == null ? "Waiting for the game" : "Loading the map…", r.centerX(), r.centerY());
+            drawCentered(c, here == null ? "Waiting for the game" : "Drawing the map…", r.centerX(), r.centerY());
         } else {
-            c.drawBitmap(mapBitmap, r.left, r.top, null);
-            if (here != null) {
-                float px = r.left + mapOx + here[0] * mapScale, pz = r.top + mapOz + here[2] * mapScale;
-                float pulse = (SystemClock.uptimeMillis() % 1200) / 1200f;
-                fill.setColor(Color.argb((int) (140 * (1 - pulse)), 230, 70, 60));
-                c.drawCircle(px, pz, (1.6f + 2.4f * pulse) * u, fill);
-                fill.setColor(MAP_DOT);
-                c.drawCircle(px, pz, 1.4f * u, fill);
-                stroke.setColor(CREAM);
-                stroke.setStrokeWidth(0.4f * u);
-                c.drawCircle(px, pz, 1.4f * u, stroke);
+            // View: world units -> screen. Close-up: about 4500 units across the panel's short side.
+            float worldW = m.bitmap.getWidth() / m.scale, worldH = m.bitmap.getHeight() / m.scale;
+            float viewScale, cx, cz;
+            if (mapFollow && here != null) {
+                viewScale = Math.min(r.width(), r.height()) / 4500f;
+                cx = here[0];
+                cz = here[2];
+            } else {
+                viewScale = Math.min(r.width() / worldW, r.height() / worldH) * 0.96f;
+                cx = m.minX + worldW / 2;
+                cz = m.minZ + worldH / 2;
             }
+            int saved = c.save();
+            mapClip.reset();
+            mapClip.addRoundRect(r, 3 * u, 3 * u, Path.Direction.CW);
+            c.clipPath(mapClip);
+            c.translate(r.centerX(), r.centerY());
+            float k = viewScale / m.scale;
+            c.scale(k, k);
+            c.translate(-(cx - m.minX) * m.scale, -(cz - m.minZ) * m.scale);
+            c.drawBitmap(m.bitmap, 0, 0, mapPaint);
+            c.restoreToCount(saved);
+
+            if (here != null) {
+                float px = r.centerX() + (here[0] - cx) * viewScale;
+                float pz = r.centerY() + (here[2] - cz) * viewScale;
+                drawArrow(c, px, pz, GameState.facing(), (mapFollow ? 2.6f : 2.0f) * u);
+            }
+            text.setTextSize(2.4f * u);
+            text.setColor(Color.argb(170, 232, 213, 168));
+            text.setTextAlign(Paint.Align.RIGHT);
+            c.drawText(mapFollow ? "Tap: whole area" : "Tap: close-up", r.right - 2 * u, r.bottom - 1.6f * u, text);
+            text.setTextAlign(Paint.Align.CENTER);
         }
         stroke.setColor(Color.argb(200, 206, 162, 70));
         stroke.setStrokeWidth(0.45f * u);
         c.drawRoundRect(r, 3 * u, 3 * u, stroke);
     }
 
-    // The map: the current area's triangles (see GameState.mapTriangles), and the picture of them.
+    /** Banjo: a red arrow pointing the way he faces (0 degrees = +z = down the map), or a dot. */
+    private void drawArrow(Canvas c, float x, float z, float degrees, float size) {
+        if (Float.isNaN(degrees)) {
+            fill.setColor(MAP_DOT);
+            c.drawCircle(x, z, size * 0.7f, fill);
+            stroke.setColor(CREAM);
+            stroke.setStrokeWidth(0.35f * u);
+            c.drawCircle(x, z, size * 0.7f, stroke);
+            return;
+        }
+        double a = Math.toRadians(degrees);
+        float dx = (float) Math.sin(a), dz = (float) Math.cos(a);   // screen x right, y down = +z
+        float lx = -dz, lz = dx;
+        path.reset();
+        path.moveTo(x + dx * size * 1.6f, z + dz * size * 1.6f);
+        path.lineTo(x - dx * size * 0.9f + lx * size * 0.9f, z - dz * size * 0.9f + lz * size * 0.9f);
+        path.lineTo(x - dx * size * 0.4f, z - dz * size * 0.4f);
+        path.lineTo(x - dx * size * 0.9f - lx * size * 0.9f, z - dz * size * 0.9f - lz * size * 0.9f);
+        path.close();
+        fill.setColor(MAP_DOT);
+        c.drawPath(path, fill);
+        stroke.setColor(CREAM);
+        stroke.setStrokeWidth(0.35f * u);
+        c.drawPath(path, stroke);
+    }
+
+    // The map picture for the current area, built in the background.
+    private final RectF mapRect = new RectF();
+    private final Path mapClip = new Path();
+    private final Paint mapPaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
+    private boolean mapFollow = true;
+    private volatile GameState.MapImage mapImage;
     private int mapGeometry = 0;
     private long mapGeometryAt;
-    private boolean mapRefetched;
-    private float[] mapTris;
-    private android.graphics.Bitmap mapBitmap;
-    private float mapScale, mapOx, mapOz;
+    private boolean mapRebuilt;
+    private boolean mapBuilding;
+    private final java.util.concurrent.ExecutorService mapWorker = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "BT map");
+        t.setPriority(Thread.MIN_PRIORITY);
+        return t;
+    });
 
-    /** Picks up a new area's map (and re-reads it once, 1.5 s later, in case it was still loading). */
+    /** Builds a new area's map (and once more 1.5 s later, in case the area was still loading). */
     private void refreshMap() {
         int id = GameState.mapGeometryId();
         long now = SystemClock.uptimeMillis();
         if (id != mapGeometry) {
             mapGeometry = id;
             mapGeometryAt = now;
-            mapRefetched = false;
-            mapTris = id != 0 ? GameState.mapTriangles() : null;
-            mapBitmap = null;
-        } else if (id != 0 && (mapTris == null || (!mapRefetched && now - mapGeometryAt > 1500))) {
-            mapRefetched = mapTris != null || now - mapGeometryAt > 1500;
-            mapTris = GameState.mapTriangles();
-            mapBitmap = null;
+            mapRebuilt = false;
+            mapImage = null;
+            if (id != 0) {
+                buildMap(id);
+            }
+        } else if (id != 0 && !mapBuilding && (mapImage == null || !mapRebuilt) && now - mapGeometryAt > 1500) {
+            mapRebuilt = true;
+            buildMap(id);
         }
     }
 
-    private void buildMapBitmap(int w, int h) {
-        float[] t = mapTris;
-        int n = t.length / 8;
-        // Fit the floors (walls can run far outside) into the panel, with a margin.
-        float minX = Float.MAX_VALUE, maxX = -Float.MAX_VALUE, minZ = Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
-        float[] heights = new float[n];
-        int floors = 0;
-        for (int i = 0; i < n; i++) {
-            int o = i * 8;
-            if (t[o] != 0f) {
-                continue;
-            }
-            heights[floors++] = t[o + 1];
-            for (int k = 0; k < 3; k++) {
-                float x = t[o + 2 + k * 2], z = t[o + 3 + k * 2];
-                minX = Math.min(minX, x); maxX = Math.max(maxX, x);
-                minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
-            }
-        }
-        if (floors == 0) {
+    private void buildMap(int id) {
+        if (mapBuilding) {
             return;
         }
-        java.util.Arrays.sort(heights, 0, floors);
-        float lowY = heights[floors / 20], highY = heights[floors - 1 - floors / 20];
-        float inset = 3 * u;
-        float spanX = Math.max(1f, maxX - minX), spanZ = Math.max(1f, maxZ - minZ);
-        mapScale = Math.min((w - inset * 2) / spanX, (h - inset * 2) / spanZ);
-        mapOx = w / 2f - (minX + spanX / 2) * mapScale;
-        mapOz = h / 2f - (minZ + spanZ / 2) * mapScale;
-
-        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
-        Canvas b = new Canvas(bitmap);
-        Path clip = new Path();
-        clip.addRoundRect(new RectF(0, 0, w, h), 3 * u, 3 * u, Path.Direction.CW);
-        b.clipPath(clip);
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        p.setStyle(Paint.Style.FILL_AND_STROKE);
-        p.setStrokeWidth(1f);   // closes the hairline gaps between neighbouring triangles
-        // Floors, lowest first so higher ground covers lower ground.
-        Integer[] order = new Integer[n];
-        for (int i = 0; i < n; i++) {
-            order[i] = i;
-        }
-        java.util.Arrays.sort(order, (a, c2) -> Float.compare(t[a * 8 + 1], t[c2 * 8 + 1]));
-        Path tri = new Path();
-        for (int i : order) {
-            int o = i * 8;
-            if (t[o] != 0f) {
-                continue;
-            }
-            float k = Math.max(0f, Math.min(1f, (t[o + 1] - lowY) / Math.max(1f, highY - lowY)));
-            p.setColor(blend(MAP_LOW, MAP_HIGH, k));
-            tri.reset();
-            tri.moveTo(mapOx + t[o + 2] * mapScale, mapOz + t[o + 3] * mapScale);
-            tri.lineTo(mapOx + t[o + 4] * mapScale, mapOz + t[o + 5] * mapScale);
-            tri.lineTo(mapOx + t[o + 6] * mapScale, mapOz + t[o + 7] * mapScale);
-            tri.close();
-            b.drawPath(tri, p);
-        }
-        // Walls: thin light edges.
-        p.setStyle(Paint.Style.STROKE);
-        p.setStrokeWidth(Math.max(1f, 0.18f * u));
-        p.setColor(Color.argb(150, 255, 214, 130));
-        for (int i = 0; i < n; i++) {
-            int o = i * 8;
-            if (t[o] != 1f) {
-                continue;
-            }
-            tri.reset();
-            tri.moveTo(mapOx + t[o + 2] * mapScale, mapOz + t[o + 3] * mapScale);
-            tri.lineTo(mapOx + t[o + 4] * mapScale, mapOz + t[o + 5] * mapScale);
-            tri.lineTo(mapOx + t[o + 6] * mapScale, mapOz + t[o + 7] * mapScale);
-            tri.close();
-            b.drawPath(tri, p);
-        }
-        mapBitmap = bitmap;
+        mapBuilding = true;
+        mapWorker.execute(() -> {
+            GameState.MapImage built = GameState.buildMap(2048);
+            post(() -> {
+                mapBuilding = false;
+                if (id == mapGeometry && built != null) {
+                    mapImage = built;
+                    invalidate();
+                }
+            });
+        });
     }
 
-    // Low ground (where you mostly walk) light, high ground and cliffs dark.
-    private static final int MAP_LOW = Color.rgb(196, 138, 62), MAP_HIGH = Color.rgb(52, 34, 26);
     private static final int MAP_DOT = Color.rgb(230, 70, 60);
-
-    private static int blend(int a, int b, float k) {
-        return Color.rgb(
-            (int) (Color.red(a) + (Color.red(b) - Color.red(a)) * k),
-            (int) (Color.green(a) + (Color.green(b) - Color.green(a)) * k),
-            (int) (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * k));
-    }
 
     /** A few fixed stars: the Isle at night. */
     private void drawStars(Canvas c, int w, int h) {
@@ -845,6 +829,12 @@ public final class BottomScreenView extends View {
             if (markRect.contains(x, y)) {
                 marks = Math.max(marks, GameState.probeMark(getContext()));
                 markFlashAt = SystemClock.uptimeMillis();
+                Haptics.tap(this);
+                invalidate();
+                return true;
+            }
+            if (!bookOpen && mapImage != null && mapRect.contains(x, y)) {
+                mapFollow = !mapFollow;
                 Haptics.tap(this);
                 invalidate();
                 return true;

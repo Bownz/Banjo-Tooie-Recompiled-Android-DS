@@ -19,7 +19,7 @@ final class GameState {
     private static native int nativeBottomSettings();
     private static native int nativePlayer(float[] out);
     private static native boolean nativePaused();
-    private static native float[] nativeMapTriangles();
+    private static native int[] nativeBuildMap(int maxSize, float[] info);
     private static native int nativeMapGeometryId();
 
     /** The game's frame counter, or -1 before the game runs. */
@@ -84,7 +84,7 @@ final class GameState {
         }
     }
 
-    private static final float[] playerBuffer = new float[3];
+    private static final float[] playerBuffer = new float[4];
     private static int playerArea = UNKNOWN;
 
     /** Reads Banjo's position and the area together; call before position() and area(). */
@@ -98,22 +98,45 @@ final class GameState {
 
     /** Banjo's position {x, y, z} in the current area (as of refreshPlayer()), or null. */
     static synchronized float[] position() {
-        return playerArea >= 0 ? playerBuffer.clone() : null;
+        return playerArea >= 0 ? new float[] { playerBuffer[0], playerBuffer[1], playerBuffer[2] } : null;
+    }
+
+    /** Which way Banjo faces, in degrees (0 = +z, 90 = +x), or NaN. */
+    static synchronized float facing() {
+        return playerArea >= 0 ? playerBuffer[3] : Float.NaN;
     }
 
     /** The current area (the game's map id, e.g. 0xAF Spiral Mountain), or UNKNOWN. */
     static synchronized int area() { return playerArea; }
 
-    /**
-     * The current area's floors and walls from above, from its collision data: 8 floats per
-     * triangle (kind 0 floor / 1 wall, mean height, then x, z of each corner); or null.
-     */
-    static float[] mapTriangles() {
+    /** The current area's map picture (map_render.cpp) and where it sits in the world. */
+    static final class MapImage {
+        final android.graphics.Bitmap bitmap;
+        final float minX, minZ, scale;   // world x, z at the picture's top-left; pixels per world unit
+
+        MapImage(android.graphics.Bitmap bitmap, float minX, float minZ, float scale) {
+            this.bitmap = bitmap;
+            this.minX = minX;
+            this.minZ = minZ;
+            this.scale = scale;
+        }
+    }
+
+    /** Draws the current area's map, at most maxSize pixels across; slow (call off the UI thread). */
+    static MapImage buildMap(int maxSize) {
+        float[] info = new float[5];
+        int[] pixels;
         try {
-            return nativeMapTriangles();
+            pixels = nativeBuildMap(maxSize, info);
         } catch (UnsatisfiedLinkError e) {
             return null;
         }
+        int w = (int) info[0], h = (int) info[1];
+        if (pixels == null || w <= 0 || h <= 0 || pixels.length != w * h) {
+            return null;
+        }
+        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(pixels, w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        return new MapImage(bitmap, info[2], info[3], info[4]);
     }
 
     /** Changes when the area's collision data does (0 when there's none). */

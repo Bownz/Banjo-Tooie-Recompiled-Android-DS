@@ -47,6 +47,9 @@ namespace {
     // Found with the probe's snapshots (0.4.2, Spiral Mountain, 11 Nov): see the project doc
     // bt-android-ram-probe.md.
     constexpr uint32_t kPlayerPosition = 0x80136F50u;  // f32 x, y, z: steady through pause and first person
+    // Banjo's facing, f32 degrees (0 = +z, 90 = +x; direction = sin, cos): player-state slot 0's
+    // structure + 0x3F4. Found 12 Nov: matched the walking direction both ways (220.8 / 20.3).
+    constexpr uint32_t kPlayerYawOffset = 0x3F4u;
     constexpr uint32_t kMapId = 0x80132DC2u;           // u16: Spiral Mountain 0xAF, Banjo's house 0x173, Jinjo Village 0x142
     // PROVISIONAL pause flags: each was 1 only while paused (and 0 walking, first person, eggs,
     // indoors, another area); all three must agree. Not yet checked against cutscenes.
@@ -382,6 +385,11 @@ namespace {
     }
 }
 
+// RDRAM while the game is running, else null (for android/jni/map_render.cpp).
+extern "C" uint8_t* bt_android_running_rdram() {
+    return running_rdram();
+}
+
 // Called by RecompFrontend's renderer setup (Android patch) with the game's RDRAM.
 extern "C" void bt_android_set_rdram(uint8_t* rdram) {
     g_rdram.store(rdram);
@@ -411,21 +419,30 @@ Java_io_github_bownz_btrecomp_GameState_nativePresentedFrames(JNIEnv*, jclass) {
     return static_cast<jint>(rt64_android_presented_frames() & 0x7FFFFFFF);
 }
 
-// Banjo's position into out[0..2] (x, y, z); returns the map id, or -1 when the game isn't running.
+// Banjo's position and facing into out[0..3] (x, y, z, degrees; facing NaN when unknown);
+// returns the map id, or -1 when the game isn't running.
 JNIEXPORT jint JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativePlayer(JNIEnv* env, jclass, jfloatArray out) {
     uint8_t* rdram = running_rdram();
-    if (rdram == nullptr || out == nullptr || env->GetArrayLength(out) < 3) {
+    if (rdram == nullptr || out == nullptr || env->GetArrayLength(out) < 4) {
         return -1;
     }
-    jfloat p[3];
+    jfloat p[4];
     for (int i = 0; i < 3; i++) {
         p[i] = read_f32(rdram, kPlayerPosition + 4 * i);
         if (!std::isfinite(p[i]) || std::fabs(p[i]) > 100000.0f) {
             return -1;
         }
     }
-    env->SetFloatArrayRegion(out, 0, 3, p);
+    p[3] = NAN;
+    const uint32_t slot = read_u32(rdram, kPlayerStateSlotTable);
+    if (slot >= 0x80000000u && slot < 0x80800000u - kPlayerYawOffset - 4) {
+        const float yaw = read_f32(rdram, slot + kPlayerYawOffset);
+        if (std::isfinite(yaw) && yaw >= -720.0f && yaw <= 720.0f) {
+            p[3] = yaw;
+        }
+    }
+    env->SetFloatArrayRegion(out, 0, 4, p);
     return read_u16(rdram, kMapId);
 }
 
@@ -443,91 +460,6 @@ Java_io_github_bownz_btrecomp_GameState_nativeMapGeometryId(JNIEnv*, jclass) {
         return 0;
     }
     return static_cast<jint>(collision ^ (vertices << 1));
-}
-
-// The current area's floors and walls from above, 8 floats per triangle: kind (0 floor,
-// 1 wall), mean height, then x, z of each corner. Ceilings and the invisible boundary are left
-// out. Null when there's no valid collision data.
-JNIEXPORT jfloatArray JNICALL
-Java_io_github_bownz_btrecomp_GameState_nativeMapTriangles(JNIEnv* env, jclass) {
-    uint8_t* rdram = running_rdram();
-    if (rdram == nullptr) {
-        return nullptr;
-    }
-    const uint32_t collision = read_u32(rdram, kMapCollisionPtr);
-    const uint32_t vertices = read_u32(rdram, kMapVerticesPtr);
-    auto in_ram = [](uint32_t address, uint32_t bytes) {
-        return address >= 0x80000000u && address < 0x80800000u && bytes <= 0x80800000u - address;
-    };
-    if (!in_ram(collision, 0x18) || !in_ram(vertices, 0x18)) {
-        return nullptr;
-    }
-    auto s16 = [&](uint32_t address) { return static_cast<int16_t>(read_u16(rdram, address)); };
-    const int geo_count = s16(collision + 0x10);
-    const int tri_count = s16(collision + 0x14);
-    const int vertex_count = s16(vertices + 0x14);
-    if (geo_count <= 0 || tri_count <= 0 || vertex_count <= 0) {
-        return nullptr;
-    }
-    const uint32_t tris = collision + 0x18 + static_cast<uint32_t>(geo_count) * 4;
-    const uint32_t verts = vertices + 0x18;
-    if (!in_ram(tris, static_cast<uint32_t>(tri_count) * 12) || !in_ram(verts, static_cast<uint32_t>(vertex_count) * 16)) {
-        return nullptr;
-    }
-    std::vector<float> out;
-    out.reserve(static_cast<size_t>(tri_count) * 8);
-    for (int t = 0; t < tri_count; t++) {
-        const uint32_t tri = tris + static_cast<uint32_t>(t) * 12;
-        if (read_u32(rdram, tri + 8) & kCollisionInvisible) {
-            continue;
-        }
-        float p[3][3];
-        bool ok = true;
-        for (int k = 0; k < 3 && ok; k++) {
-            const int index = s16(tri + 2 * k);
-            if (index < 0 || index >= vertex_count) {
-                ok = false;
-                break;
-            }
-            const uint32_t v = verts + static_cast<uint32_t>(index) * 16;
-            p[k][0] = s16(v);
-            p[k][1] = s16(v + 2);
-            p[k][2] = s16(v + 4);
-        }
-        if (!ok) {
-            continue;
-        }
-        const float ax = p[1][0] - p[0][0], ay = p[1][1] - p[0][1], az = p[1][2] - p[0][2];
-        const float bx = p[2][0] - p[0][0], by = p[2][1] - p[0][1], bz = p[2][2] - p[0][2];
-        const float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
-        const float length = std::sqrt(nx * nx + ny * ny + nz * nz);
-        if (length <= 0.0f) {
-            continue;
-        }
-        const float up = ny / length;   // floors face up with this winding; ceilings down
-        float kind;
-        if (up > 0.5f) {
-            kind = 0.0f;
-        } else if (std::fabs(up) < 0.3f) {
-            kind = 1.0f;
-        } else {
-            continue;
-        }
-        out.push_back(kind);
-        out.push_back((p[0][1] + p[1][1] + p[2][1]) / 3.0f);
-        for (int k = 0; k < 3; k++) {
-            out.push_back(p[k][0]);
-            out.push_back(p[k][2]);
-        }
-    }
-    if (out.empty()) {
-        return nullptr;
-    }
-    jfloatArray array = env->NewFloatArray(static_cast<jsize>(out.size()));
-    if (array != nullptr) {
-        env->SetFloatArrayRegion(array, 0, static_cast<jsize>(out.size()), out.data());
-    }
-    return array;
 }
 
 // Whether the game is paused (provisional, see kPauseFlags).
