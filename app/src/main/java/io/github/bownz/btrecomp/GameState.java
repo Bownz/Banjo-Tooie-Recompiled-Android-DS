@@ -20,7 +20,9 @@ final class GameState {
     private static native int nativePlayer(float[] out);
     private static native boolean nativePaused();
     private static native boolean nativeEntryPoint(float[] out);
-    private static native int[] nativeBuildMap(int maxSize, float capY, float[] info);
+    private static native int[] nativeBuildMap(int maxSize, float capY, int key, float[] info);
+    private static native int[] nativeBuildDetail(int key, float x0, float z0, float x1, float z1, int maxSize, float[] info);
+    private static native byte[] nativeWaterMask(int key);
     private static native boolean nativeFloorAbove(float x, float y, float z);
     private static native String nativeAreaName();
     private static native int nativeN64Buttons();
@@ -127,17 +129,31 @@ final class GameState {
     static final class MapImage {
         final android.graphics.Bitmap bitmap;
         final float minX, minZ, scale;   // world x, z at the picture's top-left; pixels per world unit
+        final int key;                   // the build it came from (for detail tiles); -1 when loaded from a file
+        final android.graphics.Bitmap water;   // where the water is (alpha), or null
 
         MapImage(android.graphics.Bitmap bitmap, float minX, float minZ, float scale) {
+            this(bitmap, minX, minZ, scale, -1, null);
+        }
+
+        MapImage(android.graphics.Bitmap bitmap, float minX, float minZ, float scale, int key, android.graphics.Bitmap water) {
             this.bitmap = bitmap;
             this.minX = minX;
             this.minZ = minZ;
             this.scale = scale;
+            this.key = key;
+            this.water = water;
         }
+
+        /** World width and height covered. */
+        float worldW() { return bitmap.getWidth() / scale; }
+        float worldH() { return bitmap.getHeight() / scale; }
     }
 
     /** No floor layer: the whole area (for buildMap). */
     static final float WHOLE = 1e9f;
+
+    private static final java.util.concurrent.atomic.AtomicInteger buildKeys = new java.util.concurrent.atomic.AtomicInteger(1);
 
     /**
      * Draws the current area's map, at most maxSize pixels across; slow (call off the UI thread).
@@ -145,9 +161,12 @@ final class GameState {
      */
     static MapImage buildMap(int maxSize, float capY) {
         float[] info = new float[5];
+        int key = buildKeys.getAndIncrement();
         int[] pixels;
+        byte[] waterBytes;
         try {
-            pixels = nativeBuildMap(maxSize, capY, info);
+            pixels = nativeBuildMap(maxSize, capY, key, info);
+            waterBytes = pixels == null ? null : nativeWaterMask(key);
         } catch (UnsatisfiedLinkError e) {
             return null;
         }
@@ -156,7 +175,61 @@ final class GameState {
             return null;
         }
         android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(pixels, w, h, android.graphics.Bitmap.Config.ARGB_8888);
-        return new MapImage(bitmap, info[2], info[3], info[4]);
+        return new MapImage(bitmap, info[2], info[3], info[4], key, waterMask(waterBytes, w, h));
+    }
+
+    /** An alpha-only bitmap from one byte per pixel, or null. */
+    private static android.graphics.Bitmap waterMask(byte[] bytes, int w, int h) {
+        if (bytes == null || bytes.length != w * h) {
+            return null;
+        }
+        boolean any = false;
+        for (byte b : bytes) {
+            if (b != 0) { any = true; break; }
+        }
+        if (!any) {
+            return null;
+        }
+        try {
+            android.graphics.Bitmap m = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ALPHA_8);
+            if (m.getRowBytes() == w) {
+                m.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(bytes));
+            } else {
+                java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(m.getRowBytes() * h);
+                for (int y = 0; y < h; y++) {
+                    buf.position(y * m.getRowBytes());
+                    buf.put(bytes, y * w, w);
+                }
+                buf.rewind();
+                m.copyPixelsFromBuffer(buf);
+            }
+            return m;
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * A sharper close-up of part of a map built this session (key), covering world (x0, z0) to
+     * (x1, z1) at up to maxSize pixels across; null if that build isn't the latest. Slow.
+     */
+    static MapImage buildDetail(int key, float x0, float z0, float x1, float z1, int maxSize) {
+        if (key < 0) {
+            return null;
+        }
+        float[] info = new float[5];
+        int[] pixels;
+        try {
+            pixels = nativeBuildDetail(key, x0, z0, x1, z1, maxSize, info);
+        } catch (UnsatisfiedLinkError e) {
+            return null;
+        }
+        int w = (int) info[0], h = (int) info[1];
+        if (pixels == null || w <= 0 || h <= 0 || pixels.length != w * h) {
+            return null;
+        }
+        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(pixels, w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        return new MapImage(bitmap, info[2], info[3], info[4], key, null);
     }
 
     /** Z on the N64 controller. */

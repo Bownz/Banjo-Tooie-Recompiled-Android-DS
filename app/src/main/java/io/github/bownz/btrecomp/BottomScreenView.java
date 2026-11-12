@@ -187,6 +187,7 @@ public final class BottomScreenView extends View {
         GameState.refreshPlayer();
         refreshMap();
         recordEntry();
+        markExplored();
         updateHeading();
         easeArrow();
         int settings = GameState.bottomSettings();
@@ -296,40 +297,49 @@ public final class BottomScreenView extends View {
             text.setTextSize(3.6f * u);
             drawCentered(c, here == null ? "Waiting for the game" : "Drawing the map…", r.centerX(), r.centerY());
         } else {
-            // View: world units -> screen. Close-up: about 4500 units across the panel's short side.
-            float worldW = m.bitmap.getWidth() / m.scale, worldH = m.bitmap.getHeight() / m.scale;
+            // View: world units -> screen. Close-up: followSpan units across the panel's short
+            // side, centred on Banjo; whole: the area fitted. Both moved by the pan.
+            float worldW = m.worldW(), worldH = m.worldH();
             float viewScale, cx, cz;
             if (!mapWhole && here != null) {
                 viewScale = Math.min(r.width(), r.height()) / followSpan;
-                cx = here[0];
-                cz = here[2];
+                cx = here[0] + panX;
+                cz = here[2] + panZ;
             } else {
                 viewScale = Math.min(r.width() / worldW, r.height() / worldH) * 0.96f;
-                cx = m.minX + worldW / 2;
-                cz = m.minZ + worldH / 2;
+                cx = m.minX + worldW / 2 + panX;
+                cz = m.minZ + worldH / 2 + panZ;
             }
+            viewCx = cx;
+            viewCz = cz;
+            viewS = viewScale;
             int saved = c.save();
             mapClip.reset();
             mapClip.addRoundRect(r, 3 * u, 3 * u, Path.Direction.CW);
             c.clipPath(mapClip);
-            c.translate(r.centerX(), r.centerY());
-            float k = viewScale / m.scale;
-            c.scale(k, k);
-            c.translate(-(cx - m.minX) * m.scale, -(cz - m.minZ) * m.scale);
-            c.drawBitmap(m.bitmap, 0, 0, mapPaint);
-            c.restoreToCount(saved);
+            drawWorldBitmap(c, r, m.bitmap, m.minX, m.minZ, m.scale, cx, cz, viewScale, mapPaint);
+            // The sharper close-up tile over it, when there is one for this view.
+            GameState.MapImage d = detail;
+            if (d != null && d.key == m.key) {
+                drawWorldBitmap(c, r, d.bitmap, d.minX, d.minZ, d.scale, cx, cz, viewScale, mapPaint);
+            }
+            updateDetail(m, r, cx, cz, viewScale);
+            drawShimmer(c, r, m, cx, cz, viewScale);
+            drawUnexplored(c, r, m, cx, cz, viewScale);
 
             // Where you came in (each entrance used in this area this session; the latest brighter).
             java.util.List<float[]> entries = entrances.get(GameState.area());
             if (entries != null) {
-                int saved2 = c.save();
-                c.clipPath(mapClip);
                 for (int i = 0; i < entries.size(); i++) {
                     float[] e = entries.get(i);
                     drawEntrance(c, r.centerX() + (e[0] - cx) * viewScale, r.centerY() + (e[2] - cz) * viewScale,
                         (!mapWhole ? 2.2f : 1.7f) * u, i == entries.size() - 1);
                 }
-                c.restoreToCount(saved2);
+            }
+            // Your own markers.
+            java.util.List<float[]> pins = userMarks(GameState.area());
+            for (float[] pin : pins) {
+                drawPin(c, r.centerX() + (pin[0] - cx) * viewScale, r.centerY() + (pin[1] - cz) * viewScale);
             }
 
             if (here != null) {
@@ -337,10 +347,8 @@ public final class BottomScreenView extends View {
                 float pz = r.centerY() + (here[2] - cz) * viewScale;
                 drawArrow(c, px, pz, shownDegrees, (!mapWhole ? 2.6f : 2.0f) * u);
             }
-            text.setTextSize(2.4f * u);
-            text.setColor(Color.argb(170, 232, 213, 168));
-            text.setTextAlign(Paint.Align.RIGHT);
-            c.drawText("Tap or pinch to zoom", r.right - 2 * u, r.bottom - 1.6f * u, text);
+            c.restoreToCount(saved);
+
             // The area's name, top left (once the game has shown it).
             if (areaLabel != null) {
                 text.setTextAlign(Paint.Align.LEFT);
@@ -358,6 +366,7 @@ public final class BottomScreenView extends View {
                 c.drawText("Lower floor", r.left + 2 * u, r.bottom - 1.6f * u, text);
             }
             text.setTextAlign(Paint.Align.CENTER);
+            drawMapControls(c, r);
         }
         stroke.setColor(Color.argb(200, 206, 162, 70));
         stroke.setStrokeWidth(0.45f * u);
@@ -523,8 +532,18 @@ public final class BottomScreenView extends View {
     private final Paint mapPaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
     private boolean mapWhole = false;
     private float followSpan = 4500f;   // world units across the panel's short side (close-up)
+    // Touch on the map: pinch zooms; a two-finger drag moves the view off Banjo, after which
+    // one finger moves it too until Recenter. Press and hold drops (or removes) a marker.
     private boolean mapTouching, mapPinched;
     private long mapTouchAt;
+    private float panX, panZ;           // world units the view is moved from Banjo / the area's middle
+    private boolean panned;
+    private float dragX = Float.NaN, dragY = Float.NaN;
+    private int dragPointers;
+    private float downX, downY;
+    private boolean downMoved;
+    private float viewCx, viewCz, viewS = 1f;   // the last drawn view, for touches
+    private final RectF zoomInRect = new RectF(), zoomOutRect = new RectF(), recenterRect = new RectF();
     private final android.view.ScaleGestureDetector pinch = new android.view.ScaleGestureDetector(getContext(),
         new android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override
@@ -540,19 +559,390 @@ public final class BottomScreenView extends View {
             }
         });
 
-    /** Tap: close-up -> wider -> whole area -> close-up. */
-    private void cycleZoom() {
+    // Zoom steps for + and - (world units across the panel's short side); past the last, the
+    // whole area.
+    private static final float[] ZOOM_STEPS = { 1800f, 2600f, 3500f, 4500f, 6000f, 8000f, 11000f };
+
+    private void zoom(int dir) {
         if (mapWhole) {
-            mapWhole = false;
-            followSpan = 3500f;
-        } else if (followSpan < 5000f) {
-            followSpan = 7500f;
+            if (dir > 0) {
+                mapWhole = false;
+                followSpan = ZOOM_STEPS[ZOOM_STEPS.length - 1];
+            }
+        } else if (dir > 0) {
+            float next = followSpan;
+            for (int i = ZOOM_STEPS.length - 1; i >= 0; i--) {
+                if (ZOOM_STEPS[i] < followSpan * 0.95f) { next = ZOOM_STEPS[i]; break; }
+            }
+            followSpan = next;
         } else {
-            mapWhole = true;
+            float next = Float.NaN;
+            for (float step : ZOOM_STEPS) {
+                if (step > followSpan * 1.05f) { next = step; break; }
+            }
+            if (Float.isNaN(next)) {
+                mapWhole = true;
+            } else {
+                followSpan = next;
+            }
         }
         Haptics.tap(this);
         invalidate();
     }
+
+    private void recenter() {
+        panX = panZ = 0f;
+        panned = false;
+        Haptics.tap(this);
+        invalidate();
+    }
+
+    /** + and - at the top right; Recenter at the bottom right once the view is moved. */
+    private void drawMapControls(Canvas c, RectF r) {
+        float b = 6.5f * u, gap = 1.2f * u;
+        zoomInRect.set(r.right - 1.5f * u - b, r.top + 1.5f * u, r.right - 1.5f * u, r.top + 1.5f * u + b);
+        zoomOutRect.set(zoomInRect.left, zoomInRect.bottom + gap, zoomInRect.right, zoomInRect.bottom + gap + b);
+        for (int i = 0; i < 2; i++) {
+            RectF k = i == 0 ? zoomInRect : zoomOutRect;
+            fill.setColor(Color.argb(190, 24, 18, 34));
+            c.drawRoundRect(k, 1.8f * u, 1.8f * u, fill);
+            stroke.setColor(Color.argb(200, 206, 162, 70));
+            stroke.setStrokeWidth(0.35f * u);
+            c.drawRoundRect(k, 1.8f * u, 1.8f * u, stroke);
+            stroke.setColor(CREAM);
+            stroke.setStrokeWidth(0.6f * u);
+            float arm = b * 0.26f;
+            c.drawLine(k.centerX() - arm, k.centerY(), k.centerX() + arm, k.centerY(), stroke);
+            if (i == 0) {
+                c.drawLine(k.centerX(), k.centerY() - arm, k.centerX(), k.centerY() + arm, stroke);
+            }
+        }
+        if (panned) {
+            text.setTextSize(2.8f * u);
+            float tw = text.measureText("Recenter");
+            recenterRect.set(r.right - 1.5f * u - tw - 4 * u, r.bottom - 1.5f * u - 6 * u, r.right - 1.5f * u, r.bottom - 1.5f * u);
+            fill.setColor(Color.argb(210, 24, 18, 34));
+            c.drawRoundRect(recenterRect, 3 * u, 3 * u, fill);
+            stroke.setColor(Color.argb(220, 206, 162, 70));
+            stroke.setStrokeWidth(0.35f * u);
+            c.drawRoundRect(recenterRect, 3 * u, 3 * u, stroke);
+            text.setColor(CREAM);
+            drawCentered(c, "Recenter", recenterRect.centerX(), recenterRect.centerY());
+        } else {
+            recenterRect.setEmpty();
+        }
+    }
+
+    /** Draws a picture whose top-left is world (minX, minZ) at `scale` pixels per unit. */
+    private void drawWorldBitmap(Canvas c, RectF r, android.graphics.Bitmap b, float minX, float minZ, float scale,
+                                 float cx, float cz, float viewScale, Paint paint) {
+        int saved = c.save();
+        c.translate(r.centerX() + (minX - cx) * viewScale, r.centerY() + (minZ - cz) * viewScale);
+        float k = viewScale / scale;
+        c.scale(k, k);
+        c.drawBitmap(b, 0, 0, paint);
+        c.restoreToCount(saved);
+    }
+
+    // ---- Sharper close-ups -------------------------------------------------------------
+    // When the view is zoomed in past the area map's own detail, a tile around the view is
+    // drawn again at screen detail (GameState.buildDetail) and shown over it.
+    private volatile GameState.MapImage detail;
+    private boolean detailBuilding;
+    private final java.util.concurrent.ExecutorService detailWorker = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "BT map detail");
+        t.setPriority(Thread.MIN_PRIORITY);
+        return t;
+    });
+
+    private void updateDetail(GameState.MapImage m, RectF r, float cx, float cz, float viewScale) {
+        if (m.key < 0 || viewScale < m.scale * 1.25f) {
+            return;   // the area map is detailed enough here
+        }
+        float halfW = r.width() / 2 / viewScale, halfH = r.height() / 2 / viewScale;
+        GameState.MapImage d = detail;
+        if (d != null && d.key == m.key && d.scale >= viewScale * 0.7f && d.scale <= viewScale * 1.6f
+                && cx - halfW >= d.minX && cz - halfH >= d.minZ
+                && cx + halfW <= d.minX + d.worldW() && cz + halfH <= d.minZ + d.worldH()) {
+            return;   // the tile covers this view
+        }
+        if (detailBuilding) {
+            return;
+        }
+        detailBuilding = true;
+        // One and a half times the view each way, so moving around stays sharp for a while.
+        final float half = Math.max(halfW, halfH) * 1.5f;
+        final int size = Math.min(1600, Math.round(2 * half * viewScale));
+        final float x0 = cx - half, z0 = cz - half, x1 = cx + half, z1 = cz + half;
+        final int key = m.key;
+        detailWorker.execute(() -> {
+            GameState.MapImage built = GameState.buildDetail(key, x0, z0, x1, z1, size);
+            post(() -> {
+                detailBuilding = false;
+                if (built != null && mapImage != null && mapImage.key == key) {
+                    detail = built;
+                    invalidate();
+                }
+            });
+        });
+    }
+
+    // ---- Water shimmer -----------------------------------------------------------------
+    // Two slow layers of soft light ripples, drawn only where the area map has water.
+    private android.graphics.Bitmap shimmerTile;
+    private final Paint shimmerPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final Paint maskPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final android.graphics.Matrix shimmerMatrix = new android.graphics.Matrix();
+    private static final float SHIMMER_WORLD = 700f;   // world units per pattern tile
+
+    private android.graphics.Bitmap shimmerTile() {
+        if (shimmerTile == null) {
+            int n = 128;
+            int[] px = new int[n * n];
+            for (int y = 0; y < n; y++) {
+                for (int x = 0; x < n; x++) {
+                    double a = 2 * Math.PI * x / n, b = 2 * Math.PI * y / n;
+                    double v = Math.sin(2 * a + Math.sin(b) * 1.3) + Math.sin(3 * b + Math.sin(2 * a) * 1.1) + 0.6 * Math.sin(a + 2 * b);
+                    double ridge = Math.max(0, 1.0 - Math.abs(v) * 1.6);   // thin bright lines where the waves cross zero
+                    int alpha = (int) Math.round(255 * Math.pow(ridge, 1.6));
+                    px[y * n + x] = Color.argb(alpha, 235, 248, 255);
+                }
+            }
+            shimmerTile = android.graphics.Bitmap.createBitmap(px, n, n, android.graphics.Bitmap.Config.ARGB_8888);
+            maskPaint.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN));
+        }
+        return shimmerTile;
+    }
+
+    private void drawShimmer(Canvas c, RectF r, GameState.MapImage m, float cx, float cz, float viewScale) {
+        if (m.water == null) {
+            return;
+        }
+        android.graphics.Bitmap tile = shimmerTile();
+        float t = (SystemClock.uptimeMillis() % 600000L) / 1000f;
+        int layer = c.saveLayer(r, null);
+        float k = SHIMMER_WORLD * viewScale / tile.getWidth();
+        for (int i = 0; i < 2; i++) {
+            // Anchored to the world, drifting slowly (two directions, two speeds).
+            float driftX = i == 0 ? t * 35f : -t * 22f, driftZ = i == 0 ? t * 18f : t * 30f;
+            shimmerMatrix.reset();
+            shimmerMatrix.setScale(k * (i == 0 ? 1f : 1.37f), k * (i == 0 ? 1f : 1.37f));
+            shimmerMatrix.postTranslate(r.centerX() + (driftX - cx) * viewScale, r.centerY() + (driftZ - cz) * viewScale);
+            android.graphics.BitmapShader sh = new android.graphics.BitmapShader(tile, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT);
+            sh.setLocalMatrix(shimmerMatrix);
+            shimmerPaint.setShader(sh);
+            shimmerPaint.setAlpha(i == 0 ? 70 : 50);
+            c.drawRect(r, shimmerPaint);
+        }
+        shimmerPaint.setShader(null);
+        drawWorldBitmap(c, r, m.water, m.minX, m.minZ, m.scale, cx, cz, viewScale, maskPaint);
+        c.restoreToCount(layer);
+    }
+
+    // ---- Explored ----------------------------------------------------------------------
+    // Each area remembers the 250-unit cells you've been within 1400 units of (kept in a file
+    // per area); the rest of its map is shown dimmer.
+    private static final float CELL = 250f, SEEN_RADIUS = 1400f;
+    private final java.util.HashMap<Integer, java.util.HashSet<Long>> explored = new java.util.HashMap<>();
+    private boolean exploredDirty;
+    private long exploredSavedAt;
+    private android.graphics.Bitmap dimBitmap;
+    private int dimOriginX, dimOriginZ, dimVersion = -1, exploredVersion;
+    private GameState.MapImage dimFor;
+    private final Paint dimPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private float lastSeenX = Float.NaN, lastSeenZ = Float.NaN;
+
+    private static long cellKey(int x, int z) {
+        return ((long) x << 32) ^ (z & 0xFFFFFFFFL);
+    }
+
+    private java.util.HashSet<Long> exploredCells(int area) {
+        java.util.HashSet<Long> set = explored.get(area);
+        if (set == null) {
+            set = new java.util.HashSet<>();
+            java.io.File f = exploredFile(area);
+            if (f.isFile()) {
+                try (java.io.DataInputStream in = new java.io.DataInputStream(new java.io.BufferedInputStream(new java.io.FileInputStream(f)))) {
+                    int n = in.readInt();
+                    for (int i = 0; i < n; i++) set.add(in.readLong());
+                } catch (java.io.IOException ignored) {
+                }
+            }
+            explored.put(area, set);
+        }
+        return set;
+    }
+
+    private java.io.File exploredFile(int area) {
+        java.io.File dir = new java.io.File(getContext().getFilesDir(), "explored");
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        return new java.io.File(dir, "area-" + Integer.toHexString(area) + ".bin");
+    }
+
+    /** Marks the cells around Banjo as seen (each poll), and saves now and then. */
+    private void markExplored() {
+        int area = GameState.area();
+        float[] p = GameState.position();
+        if (area < 0 || p == null) {
+            return;
+        }
+        float dx = p[0] - lastSeenX, dz = p[2] - lastSeenZ;
+        if (!Float.isNaN(lastSeenX) && dx * dx + dz * dz < 60f * 60f) {
+            return;
+        }
+        lastSeenX = p[0];
+        lastSeenZ = p[2];
+        java.util.HashSet<Long> set = exploredCells(area);
+        int r = (int) Math.ceil(SEEN_RADIUS / CELL);
+        int ix = (int) Math.floor(p[0] / CELL), iz = (int) Math.floor(p[2] / CELL);
+        boolean added = false;
+        for (int z = iz - r; z <= iz + r; z++) {
+            for (int x = ix - r; x <= ix + r; x++) {
+                float wx = (x + 0.5f) * CELL - p[0], wz = (z + 0.5f) * CELL - p[2];
+                if (wx * wx + wz * wz <= SEEN_RADIUS * SEEN_RADIUS && set.add(cellKey(x, z))) {
+                    added = true;
+                }
+            }
+        }
+        if (added) {
+            exploredVersion++;
+            exploredDirty = true;
+        }
+        long now = SystemClock.uptimeMillis();
+        if (exploredDirty && now - exploredSavedAt > 5000) {
+            exploredSavedAt = now;
+            exploredDirty = false;
+            final java.io.File f = exploredFile(area);
+            final long[] cells = new long[set.size()];
+            int i = 0;
+            for (long k : set) cells[i++] = k;
+            mapWorker.execute(() -> {
+                java.io.File tmpFile = new java.io.File(f.getPath() + ".tmp");
+                try (java.io.DataOutputStream out = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(tmpFile)))) {
+                    out.writeInt(cells.length);
+                    for (long k : cells) out.writeLong(k);
+                } catch (java.io.IOException e) {
+                    return;
+                }
+                //noinspection ResultOfMethodCallIgnored
+                tmpFile.renameTo(f);
+            });
+        }
+    }
+
+    private void drawUnexplored(Canvas c, RectF r, GameState.MapImage m, float cx, float cz, float viewScale) {
+        int area = GameState.area();
+        if (area < 0) {
+            return;
+        }
+        if (dimBitmap == null || dimFor != m || dimVersion != exploredVersion) {
+            java.util.HashSet<Long> set = exploredCells(area);
+            int x0 = (int) Math.floor(m.minX / CELL) - 1, z0 = (int) Math.floor(m.minZ / CELL) - 1;
+            int cols = (int) Math.ceil(m.worldW() / CELL) + 3, rows = (int) Math.ceil(m.worldH() / CELL) + 3;
+            if (cols <= 0 || rows <= 0 || cols * rows > 400 * 400) {
+                return;
+            }
+            int[] px = new int[cols * rows];
+            int dim = Color.argb(120, 0, 0, 0);
+            for (int z = 0; z < rows; z++) {
+                for (int x = 0; x < cols; x++) {
+                    px[z * cols + x] = set.contains(cellKey(x0 + x, z0 + z)) ? 0 : dim;
+                }
+            }
+            dimBitmap = android.graphics.Bitmap.createBitmap(px, cols, rows, android.graphics.Bitmap.Config.ARGB_8888);
+            dimOriginX = x0;
+            dimOriginZ = z0;
+            dimFor = m;
+            dimVersion = exploredVersion;
+        }
+        // Cell centres sit at pixel centres: pixel (0, 0) covers world (x0, z0)-(x0+1, z0+1) cells.
+        drawWorldBitmap(c, r, dimBitmap, dimOriginX * CELL, dimOriginZ * CELL, 1f / CELL, cx, cz, viewScale, dimPaint);
+    }
+
+    // ---- Your markers ------------------------------------------------------------------
+    // Press and hold on the map: drop a marker there, or remove the one under your finger.
+    // Kept per area in the app's preferences.
+    private final java.util.HashMap<Integer, java.util.ArrayList<float[]>> marksByArea = new java.util.HashMap<>();
+    private final Runnable longPress = this::onLongPress;
+
+    private java.util.ArrayList<float[]> userMarks(int area) {
+        java.util.ArrayList<float[]> list = marksByArea.get(area);
+        if (list == null) {
+            list = new java.util.ArrayList<>();
+            if (area >= 0) {
+                String v = getContext().getSharedPreferences("map_marks", android.content.Context.MODE_PRIVATE)
+                    .getString(Integer.toHexString(area), "");
+                for (String pair : v.split(";")) {
+                    String[] xz = pair.split(",");
+                    if (xz.length == 2) {
+                        try {
+                            list.add(new float[] { Float.parseFloat(xz[0]), Float.parseFloat(xz[1]) });
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                }
+            }
+            marksByArea.put(area, list);
+        }
+        return list;
+    }
+
+    private void onLongPress() {
+        if (!mapTouching || downMoved || dragPointers > 1) {
+            return;
+        }
+        int area = GameState.area();
+        if (area < 0) {
+            return;
+        }
+        float wx = viewCx + (downX - mapRect.centerX()) / viewS, wz = viewCz + (downY - mapRect.centerY()) / viewS;
+        java.util.ArrayList<float[]> list = userMarks(area);
+        float reach = 5 * u / viewS;   // world units within a finger's width
+        int hit = -1;
+        float best = reach * reach;
+        for (int i = 0; i < list.size(); i++) {
+            // The pin's head is drawn above its point: test against both.
+            float dx = list.get(i)[0] - wx, dz = list.get(i)[1] - wz;
+            float dz2 = list.get(i)[1] - 3 * u / viewS - wz;
+            float d = Math.min(dx * dx + dz * dz, dx * dx + dz2 * dz2);
+            if (d < best) { best = d; hit = i; }
+        }
+        if (hit >= 0) {
+            list.remove(hit);
+        } else {
+            list.add(new float[] { wx, wz });
+        }
+        StringBuilder sb = new StringBuilder();
+        for (float[] pin : list) {
+            if (sb.length() > 0) sb.append(';');
+            sb.append(pin[0]).append(',').append(pin[1]);
+        }
+        getContext().getSharedPreferences("map_marks", android.content.Context.MODE_PRIVATE).edit()
+            .putString(Integer.toHexString(area), sb.toString()).apply();
+        mapPinched = true;   // the touch is used up
+        Haptics.tap(this);
+        invalidate();
+    }
+
+    /** A marker pin with its point at (x, y). */
+    private void drawPin(Canvas c, float x, float y) {
+        float rad = 1.7f * u, headY = y - 3.2f * u;
+        Path pin = new Path();
+        pin.moveTo(x, y);
+        pin.lineTo(x - rad * 0.8f, headY + rad * 0.55f);
+        pin.lineTo(x + rad * 0.8f, headY + rad * 0.55f);
+        pin.close();
+        fill.setColor(HONEY);
+        c.drawPath(pin, fill);
+        c.drawCircle(x, headY, rad, fill);
+        stroke.setColor(Color.rgb(40, 26, 12));
+        stroke.setStrokeWidth(0.3f * u);
+        c.drawCircle(x, headY, rad, stroke);
+        fill.setColor(Color.rgb(40, 26, 12));
+        c.drawCircle(x, headY, rad * 0.4f, fill);
+    }
+
     private volatile GameState.MapImage mapImage;
     private int mapGeometry = 0;
     private long mapGeometryAt;
@@ -581,6 +971,9 @@ public final class BottomScreenView extends View {
             mapGeometryAt = now;
             mapRebuilt = false;
             mapImage = null;
+            detail = null;
+            panX = panZ = 0f;
+            panned = false;
             wantedCap = GameState.WHOLE;
             mapCap = GameState.WHOLE;
             cacheTried = Integer.MIN_VALUE;
@@ -657,7 +1050,7 @@ public final class BottomScreenView extends View {
     // ---- Explored areas ----------------------------------------------------------------
     // Each area's map (and storey) is kept: the last few in memory, all of them as PNG files in
     // the app's cache, by the game's map id. Bump MAP_CACHE_VERSION when the map's look changes.
-    private static final String MAP_CACHE_VERSION = "v3";
+    private static final String MAP_CACHE_VERSION = "v4";
     private int cacheTried = Integer.MIN_VALUE;
     private final java.util.LinkedHashMap<String, GameState.MapImage> mapMemory =
         new java.util.LinkedHashMap<String, GameState.MapImage>(8, 0.75f, true) {
@@ -1300,19 +1693,79 @@ public final class BottomScreenView extends View {
         boolean buttonsOut = slideButtons && (zHeld || buttonSlide > 0.05f);
         if (buttonsOut && mapTouching) {
             mapTouching = false;   // Z came on mid-gesture: drop it
+            handler.removeCallbacks(longPress);
         }
-        // The map: a tap cycles the zoom, a pinch zooms freely.
+        // The map's own buttons: + and -, Recenter.
+        if (!bookOpen && !buttonsOut && mapImage != null && action == MotionEvent.ACTION_DOWN) {
+            if (zoomInRect.contains(x, y)) { zoom(1); return true; }
+            if (zoomOutRect.contains(x, y)) { zoom(-1); return true; }
+            if (!recenterRect.isEmpty() && recenterRect.contains(x, y)) { recenter(); return true; }
+        }
+        // The map: pinch zooms; two fingers drag the view (then one finger does, until Recenter);
+        // press and hold drops or removes a marker.
         if (!bookOpen && !buttonsOut && mapImage != null && (mapTouching || (action == MotionEvent.ACTION_DOWN && mapRect.contains(x, y)))) {
             pinch.onTouchEvent(e);
-            if (action == MotionEvent.ACTION_DOWN) {
-                mapTouching = true;
-                mapPinched = false;
-                mapTouchAt = SystemClock.uptimeMillis();
-            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                if (action == MotionEvent.ACTION_UP && !mapPinched && SystemClock.uptimeMillis() - mapTouchAt < 400) {
-                    cycleZoom();
-                }
-                mapTouching = false;
+            int pointers = e.getPointerCount();
+            if (action == MotionEvent.ACTION_POINTER_UP) {
+                pointers--;   // the lifted finger still counts in this event
+            }
+            float sx = 0, sy = 0;
+            int counted = 0;
+            for (int i = 0; i < e.getPointerCount(); i++) {
+                if (action == MotionEvent.ACTION_POINTER_UP && i == index) continue;
+                sx += e.getX(i);
+                sy += e.getY(i);
+                counted++;
+            }
+            if (counted > 0) { sx /= counted; sy /= counted; }
+            switch (action) {
+                case MotionEvent.ACTION_DOWN:
+                    mapTouching = true;
+                    mapPinched = false;
+                    mapTouchAt = SystemClock.uptimeMillis();
+                    downX = x;
+                    downY = y;
+                    downMoved = false;
+                    dragX = sx;
+                    dragY = sy;
+                    dragPointers = pointers;
+                    handler.postDelayed(longPress, 450);
+                    break;
+                case MotionEvent.ACTION_POINTER_DOWN:
+                case MotionEvent.ACTION_POINTER_UP:
+                    downMoved = true;   // more than one finger: not a press-and-hold
+                    handler.removeCallbacks(longPress);
+                    dragX = sx;         // the centre moved: start the drag again from here
+                    dragY = sy;
+                    dragPointers = pointers;
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    if (Math.hypot(x - downX, y - downY) > 2 * u) {
+                        downMoved = true;
+                        handler.removeCallbacks(longPress);
+                    }
+                    if (!Float.isNaN(dragX) && (pointers >= 2 || panned) && viewS > 0) {
+                        float dx = sx - dragX, dy = sy - dragY;
+                        if (pointers >= 2 || dx * dx + dy * dy > 0) {
+                            panX -= dx / viewS;
+                            panZ -= dy / viewS;
+                            if (Math.abs(panX) + Math.abs(panZ) > 1f) {
+                                panned = true;
+                            }
+                            invalidate();
+                        }
+                    }
+                    dragX = sx;
+                    dragY = sy;
+                    break;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    handler.removeCallbacks(longPress);
+                    mapTouching = false;
+                    dragX = dragY = Float.NaN;
+                    break;
+                default:
+                    break;
             }
             return true;
         }

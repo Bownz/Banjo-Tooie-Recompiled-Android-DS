@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <set>
 #include <tuple>
 #include <vector>
@@ -521,6 +522,70 @@ namespace {
     }
 
     // Max (grow) or min (shrink) of a mask over a square of radius r.
+    // The model's up-facing triangles from above (step 1 of the map), into a W x H raster
+    // whose pixel (0, 0) is world (minX, minZ): textures x vertex colour x a little slope
+    // light; the highest surface wins; see-through texels over the same surface blend in.
+    void rasterTop(const std::vector<Tri>& tris, float minX, float minZ, float scale, int W, int H,
+                   std::vector<float>& R, std::vector<float>& G, std::vector<float>& B, std::vector<float>& top,
+                   std::vector<uint8_t>& drawn, std::vector<uint8_t>& water) {
+        constexpr float lx = -0.47f, ly = 0.71f, lz = -0.52f;
+        for (const Tri& t : tris) {
+            float X[3], Z[3];
+            for (int k = 0; k < 3; k++) { X[k] = (t.v[k].x - minX) * scale; Z[k] = (t.v[k].z - minZ) * scale; }
+            const float ax = t.v[1].x - t.v[0].x, ay = t.v[1].y - t.v[0].y, az = t.v[1].z - t.v[0].z;
+            const float bx = t.v[2].x - t.v[0].x, by = t.v[2].y - t.v[0].y, bz = t.v[2].z - t.v[0].z;
+            const float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+            const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (len <= 0 || ny / len < 0.2f) continue;
+            // A little light by each triangle's slope (gentle: the hill shading does the rest, and
+            // a strong per-triangle light shows the facets in close-ups).
+            const float light = 0.86f + 0.18f * std::max(0.0f, (nx * lx + ny * ly + nz * lz) / len);
+            raster(X, Z, W, H, [&](int i, float l0, float l1, float l2) {
+                const float y = l0 * t.v[0].y + l1 * t.v[1].y + l2 * t.v[2].y;
+                if (y < top[i]) return;
+                float r = 200, g = 200, b = 200, alpha = 1.0f;
+                if (t.tex != nullptr) {
+                    const float s = l0 * t.v[0].s + l1 * t.v[1].s + l2 * t.v[2].s;
+                    const float tt = l0 * t.v[0].t + l1 * t.v[1].t + l2 * t.v[2].t;
+                    // Bilinear between the four nearest texels (as the N64 filters), so
+                    // magnified textures in close-ups are smooth rather than blocky.
+                    const float fs = s - 0.5f, ft = tt - 0.5f;
+                    const float s0 = std::floor(fs), t0 = std::floor(ft);
+                    const float ws = fs - s0, wt = ft - t0;
+                    const int tws = std::min(t.tile.w, t.tex->w), twt = std::min(t.tile.h, t.tex->h);
+                    const int sa = wrapCoord(s0, t.tex->w, t.tile.cms, t.tile.ms, tws), sb = wrapCoord(s0 + 1, t.tex->w, t.tile.cms, t.tile.ms, tws);
+                    const int ta = wrapCoord(t0, t.tex->h, t.tile.cmt, t.tile.mt, twt), tb = wrapCoord(t0 + 1, t.tex->h, t.tile.cmt, t.tile.mt, twt);
+                    const Rgba& c00 = t.tex->px[size_t(ta) * t.tex->w + sa];
+                    const Rgba& c10 = t.tex->px[size_t(ta) * t.tex->w + sb];
+                    const Rgba& c01 = t.tex->px[size_t(tb) * t.tex->w + sa];
+                    const Rgba& c11 = t.tex->px[size_t(tb) * t.tex->w + sb];
+                    const float w00 = (1 - ws) * (1 - wt), w10 = ws * (1 - wt), w01 = (1 - ws) * wt, w11 = ws * wt;
+                    const float ca = c00.a * w00 + c10.a * w10 + c01.a * w01 + c11.a * w11;
+                    if (ca <= 8) return;
+                    r = c00.r * w00 + c10.r * w10 + c01.r * w01 + c11.r * w11;
+                    g = c00.g * w00 + c10.g * w10 + c01.g * w01 + c11.g * w11;
+                    b = c00.b * w00 + c10.b * w10 + c01.b * w01 + c11.b * w11;
+                    alpha = ca / 255.0f;
+                }
+                const float sr = l0 * t.v[0].r + l1 * t.v[1].r + l2 * t.v[2].r;
+                const float sg = l0 * t.v[0].g + l1 * t.v[1].g + l2 * t.v[2].g;
+                const float sb = l0 * t.v[0].b + l1 * t.v[1].b + l2 * t.v[2].b;
+                // A see-through texel over the same surface (Isle o' Hags' soft-edged path overlays,
+                // drawn in several passes over the grass) blends in by its alpha, so where two path
+                // pieces meet in their faded ends they still join up.
+                const bool over = drawn[i] && alpha < 0.98f && y - top[i] < 30.0f;
+                if (!over && alpha <= 0.125f) return;
+                const float k = over ? std::min(1.0f, alpha * 1.6f) : 1.0f;   // a little stronger: paths stay readable small
+                top[i] = std::max(top[i], y);
+                R[i] = R[i] * (1 - k) + r * sr * light * k;
+                G[i] = G[i] * (1 - k) + g * sg * light * k;
+                B[i] = B[i] * (1 - k) + b * sb * light * k;
+                drawn[i] = 1;
+                water[i] = t.water ? 1 : 0;
+            });
+        }
+    }
+
     std::vector<uint8_t> morph(const std::vector<uint8_t>& m, int W, int H, int r, bool grow) {
         std::vector<uint8_t> tmp(m.size()), out(m.size());
         for (int z = 0; z < H; z++)
@@ -543,7 +608,72 @@ namespace {
 
 // Builds the current area's map picture: ARGB pixels (0 = transparent) and meta =
 // { width, height, world x at pixel 0, world z at pixel 0, pixels per world unit }.
-bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int32_t>& out, float meta[5]) {
+namespace {
+    // How each kind of pixel is coloured from its texture colour (shared by the whole-area map
+    // and the close-up detail tiles).
+    constexpr float kWarmR = 235, kWarmG = 190, kWarmB = 120;
+    constexpr float kWarm = 0.12f;         // a light warm tint keeps colours distinct
+    constexpr float kSaturation = 1.22f;
+
+    void waterColour(float tr, float tg, float tb, bool shore, float& r, float& g, float& b) {
+        // Water: its own texture pulled towards a clear blue, no warm tint, a light shoreline.
+        r = tr * 0.5f + 60 * 0.5f;
+        g = tg * 0.5f + 135 * 0.5f;
+        b = tb * 0.5f + 225 * 0.5f;
+        if (shore) {
+            r = r * 0.3f + 205 * 0.7f; g = g * 0.3f + 238 * 0.7f; b = b * 0.3f + 255 * 0.7f;
+        }
+    }
+
+    // Ground and raised scenery: warm tint, more saturation, times the light (height, foot
+    // lines, hill shading); the outline where the map ends.
+    void groundColour(float tr, float tg, float tb, float light, bool outline, float& r, float& g, float& b) {
+        r = tr * (1 - kWarm) + kWarmR * kWarm;
+        g = tg * (1 - kWarm) + kWarmG * kWarm;
+        b = tb * (1 - kWarm) + kWarmB * kWarm;
+        const float grey = (r + g + b) / 3.0f;
+        r = (grey + (r - grey) * kSaturation) * light;
+        g = (grey + (g - grey) * kSaturation) * light;
+        b = (grey + (b - grey) * kSaturation) * light;
+        if (outline) {
+            r = r * 0.1f + 255 * 0.9f; g = g * 0.1f + 236 * 0.9f; b = b * 0.1f + 190 * 0.9f;
+        }
+    }
+
+    // Beyond the area's edge: its own colours, a little greyer, times the light (which
+    // includes the darkening).
+    void beyondColour(float tr, float tg, float tb, float light, float& r, float& g, float& b) {
+        const float wr = tr * (1 - kWarm) + kWarmR * kWarm, wg = tg * (1 - kWarm) + kWarmG * kWarm, wb = tb * (1 - kWarm) + kWarmB * kWarm;
+        const float grey = (wr + wg + wb) / 3.0f;
+        r = (grey * 0.15f + wr * 0.85f) * light;
+        g = (grey * 0.15f + wg * 0.85f) * light;
+        b = (grey * 0.15f + wb * 0.85f) * light;
+    }
+
+    int32_t packPixel(float r, float g, float b, float a, float k) {
+        const int ri = std::clamp(int(r * k), 0, 255), gi = std::clamp(int(g * k), 0, 255), bi = std::clamp(int(b * k), 0, 255);
+        const uint32_t alpha = uint32_t(std::clamp(a, 0.0f, 1.0f) * 255.0f);
+        return int32_t((alpha << 24) | (uint32_t(ri) << 16) | (uint32_t(gi) << 8) | uint32_t(bi));
+    }
+
+    // The last whole-area map, kept so close-up detail tiles can be drawn from it: the
+    // triangles and textures, and per map pixel what kind it is and how it's lit. Detail
+    // tiles redraw only the textures, sharper, and take the rest from here.
+    enum : uint8_t { kNone = 0, kWater = 1, kMain = 2, kSolid = 3, kBeyond = 4 };
+    struct MapCache {
+        bool valid = false;
+        uint32_t key = 0;
+        std::vector<Tri> tris;
+        std::map<std::tuple<uint32_t, int, int, int, int, uint32_t, bool>, Texture> textures;
+        int W = 0, H = 0;
+        float minX = 0, minZ = 0, scale = 1;
+        std::vector<uint8_t> kind, edge, light, alpha, colourK;   // light x 100; alpha, k x 255
+    };
+    MapCache g_cache;
+    std::mutex g_cacheMutex;
+}
+
+bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t key, std::vector<int32_t>& out, float meta[5]) {
     const Ram ram{ rdram };
 
     std::vector<Tri> tris;
@@ -637,47 +767,7 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
     // 1. The model from above, textured.
     std::vector<float> R(N, 0), G(N, 0), B(N, 0), top(N, -1e9f);
     std::vector<uint8_t> drawn(N, 0), water(N, 0);
-    constexpr float lx = -0.47f, ly = 0.71f, lz = -0.52f;
-    for (const Tri& t : tris) {
-        float X[3], Z[3];
-        for (int k = 0; k < 3; k++) { X[k] = (t.v[k].x - minX) * scale; Z[k] = (t.v[k].z - minZ) * scale; }
-        const float ax = t.v[1].x - t.v[0].x, ay = t.v[1].y - t.v[0].y, az = t.v[1].z - t.v[0].z;
-        const float bx = t.v[2].x - t.v[0].x, by = t.v[2].y - t.v[0].y, bz = t.v[2].z - t.v[0].z;
-        const float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
-        const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-        if (len <= 0 || ny / len < 0.2f) continue;
-        const float light = 0.75f + 0.35f * std::max(0.0f, (nx * lx + ny * ly + nz * lz) / len);
-        raster(X, Z, W, H, [&](int i, float l0, float l1, float l2) {
-            const float y = l0 * t.v[0].y + l1 * t.v[1].y + l2 * t.v[2].y;
-            if (y < top[i]) return;
-            float r = 200, g = 200, b = 200, alpha = 1.0f;
-            if (t.tex != nullptr) {
-                const float s = l0 * t.v[0].s + l1 * t.v[1].s + l2 * t.v[2].s;
-                const float tt = l0 * t.v[0].t + l1 * t.v[1].t + l2 * t.v[2].t;
-                const int si = wrapCoord(s, t.tex->w, t.tile.cms, t.tile.ms, std::min(t.tile.w, t.tex->w));
-                const int ti = wrapCoord(tt, t.tex->h, t.tile.cmt, t.tile.mt, std::min(t.tile.h, t.tex->h));
-                const Rgba& c = t.tex->px[size_t(ti) * t.tex->w + si];
-                if (c.a <= 8) return;
-                r = c.r; g = c.g; b = c.b;
-                alpha = c.a / 255.0f;
-            }
-            const float sr = l0 * t.v[0].r + l1 * t.v[1].r + l2 * t.v[2].r;
-            const float sg = l0 * t.v[0].g + l1 * t.v[1].g + l2 * t.v[2].g;
-            const float sb = l0 * t.v[0].b + l1 * t.v[1].b + l2 * t.v[2].b;
-            // A see-through texel over the same surface (Isle o' Hags' soft-edged path overlays,
-            // drawn in several passes over the grass) blends in by its alpha, so where two path
-            // pieces meet in their faded ends they still join up.
-            const bool over = drawn[i] && alpha < 0.98f && y - top[i] < 30.0f;
-            if (!over && alpha <= 0.125f) return;
-            const float k = over ? std::min(1.0f, alpha * 1.6f) : 1.0f;   // a little stronger: paths stay readable small
-            top[i] = std::max(top[i], y);
-            R[i] = R[i] * (1 - k) + r * sr * light * k;
-            G[i] = G[i] * (1 - k) + g * sg * light * k;
-            B[i] = B[i] * (1 - k) + b * sb * light * k;
-            drawn[i] = 1;
-            water[i] = t.water ? 1 : 0;
-        });
-    }
+    rasterTop(tris, minX, minZ, scale, W, H, R, G, B, top, drawn, water);
 
     // 2. Walkable ground: the highest collision floor per pixel.
     std::vector<float> ground(N, -1e9f);
@@ -893,6 +983,30 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
             }
     }
 
+    // Hill shading: light the surface by its slope, as if the sun were low in the north-west
+    // (top left), so hills, ramps and hollows read as 3D. Slopes come from the surface heights
+    // 3 panel pixels apart; sharp jumps (walls, ledges) are left to the foot lines above.
+    std::vector<float> hillShade(N, 1.0f);
+    {
+        std::vector<float> hs(N), hw(N);
+        for (size_t i = 0; i < N; i++) { const bool has = surface[i] > -1e8f; hs[i] = has ? surface[i] : 0; hw[i] = has ? 1.0f : 0.0f; }
+        boxBlur(hs, W, H, px); boxBlur(hw, W, H, px);
+        for (size_t i = 0; i < N; i++) hs[i] = hw[i] > 0.01f ? hs[i] / hw[i] : -1e9f;
+        const int d = 3 * px;
+        const float dist = 2.0f * d / scale;   // world units between the two samples
+        constexpr float sx = -0.55f, sy = 0.62f, sz = -0.55f;   // towards the sun (normalised)
+        for (int z = d; z < H - d; z++)
+            for (int x = d; x < W - d; x++) {
+                const size_t i = size_t(z) * W + x;
+                const float h0 = hs[i - d], h1 = hs[i + d], v0 = hs[i - size_t(d) * W], v1 = hs[i + size_t(d) * W];
+                if (surface[i] <= -1e8f || h0 <= -1e8f || h1 <= -1e8f || v0 <= -1e8f || v1 <= -1e8f) continue;
+                const float gx = std::clamp((h1 - h0) / dist, -1.5f, 1.5f), gz = std::clamp((v1 - v0) / dist, -1.5f, 1.5f);
+                const float len = std::sqrt(gx * gx + 1.0f + gz * gz);
+                const float lit = (-gx * sx + sy - gz * sz) / len;   // normal (-gx, 1, -gz)
+                hillShade[i] = std::clamp(1.0f + 0.85f * (lit - sy), 0.72f, 1.22f);
+            }
+    }
+
     // How far beyond the area's edge a pixel is: 1 at the edge, fading to 0 about 12 panel
     // pixels out (two box blurs of the walkable/water mask).
     std::vector<float> fade(N);
@@ -907,42 +1021,24 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
     boxBlur(shadow, W, H, 5 * px);
     for (float& f : fade) f = std::clamp(f * 2.2f, 0.0f, 1.0f) * 0.85f;
 
-    // 4. Compose.
+    // 4. Compose (and keep what a detail tile needs).
     out.assign(N, 0);
-    constexpr float warmR = 235, warmG = 190, warmB = 120;
-    constexpr float warm = 0.12f;         // a light warm tint keeps colours distinct
-    constexpr float saturation = 1.22f;
+    std::vector<uint8_t> kind(N, kNone), edgeOut(N, 0), lightOut(N, 0), alphaOut(N, 0), kOut(N, 0);
     for (size_t i = 0; i < N; i++) {
-        float r, g, b;
+        float r, g, b, light = 1.0f;
         if (water[i]) {
-            // Water: its own texture pulled towards a clear blue, no warm tint, a light shoreline.
-            r = sR[i] * 0.5f + 60 * 0.5f;
-            g = sG[i] * 0.5f + 135 * 0.5f;
-            b = sB[i] * 0.5f + 225 * 0.5f;
-            if (!waterInner[i]) {
-                r = r * 0.3f + 205 * 0.7f; g = g * 0.3f + 238 * 0.7f; b = b * 0.3f + 255 * 0.7f;
-            }
+            kind[i] = kWater;
+            waterColour(sR[i], sG[i], sB[i], !waterInner[i], r, g, b);
         } else if (main[i] || solid[i]) {
+            kind[i] = main[i] ? kMain : kSolid;
             const float k = std::clamp((ground[i] - lo) / std::max(1.0f, hi - lo), 0.0f, 1.0f);
-            float f = main[i] ? 1.08f - 0.55f * k : 1.0f;   // raised scenery keeps its own colours
-
-            r = sR[i] * (1 - warm) + warmR * warm;
-            g = sG[i] * (1 - warm) + warmG * warm;
-            b = sB[i] * (1 - warm) + warmB * warm;
-            const float grey = (r + g + b) / 3.0f;
-            r = (grey + (r - grey) * saturation) * f * footShade[i];
-            g = (grey + (g - grey) * saturation) * f * footShade[i];
-            b = (grey + (b - grey) * saturation) * f * footShade[i];
-            if (main[i] && !inner[i] && nearEmpty[i]) {   // the outline: only where the map ends
-                r = r * 0.1f + 255 * 0.9f; g = g * 0.1f + 236 * 0.9f; b = b * 0.1f + 190 * 0.9f;
-            }
+            const float f = main[i] ? 1.08f - 0.55f * k : 1.0f;   // raised scenery keeps its own colours
+            light = f * footShade[i] * hillShade[i];
+            groundColour(sR[i], sG[i], sB[i], light, main[i] && !inner[i] && nearEmpty[i], r, g, b);
         } else if ((drawn[i] || walk[i]) && fade[i] > 0.02f) {
-            // Beyond the area's edge: its own colours, darker, fading out with distance.
-            const float wr = sR[i] * (1 - warm) + warmR * warm, wg = sG[i] * (1 - warm) + warmG * warm, wb = sB[i] * (1 - warm) + warmB * warm;
-            const float grey = (wr + wg + wb) / 3.0f;
-            r = (grey * 0.15f + wr * 0.85f) * 0.5f * footShade[i];
-            g = (grey * 0.15f + wg * 0.85f) * 0.5f * footShade[i];
-            b = (grey * 0.15f + wb * 0.85f) * 0.5f * footShade[i];
+            kind[i] = kBeyond;
+            light = 0.5f * footShade[i] * hillShade[i];
+            beyondColour(sR[i], sG[i], sB[i], light, r, g, b);
         } else {
             r = g = b = 0;
             fade[i] = 0;
@@ -952,15 +1048,129 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
         const float a = inside ? 1.0f : std::clamp(fade[i], 0.0f, 1.0f);
         const float sh = inside ? 0.0f : std::clamp(shadow[i] * 0.6f, 0.0f, 0.6f);
         const float total = a + sh * (1.0f - a);
+        edgeOut[i] = nearEmpty[i];
+        lightOut[i] = uint8_t(std::clamp(light * 100.0f, 0.0f, 255.0f));
         if (total < 1.0f / 255.0f) continue;   // transparent
-        const float k = a / total;
-        const int ri = std::clamp(int(r * k), 0, 255), gi = std::clamp(int(g * k), 0, 255), bi = std::clamp(int(b * k), 0, 255);
-        const uint32_t alpha = uint32_t(std::clamp(total, 0.0f, 1.0f) * 255.0f);
-        out[i] = int32_t((alpha << 24) | (uint32_t(ri) << 16) | (uint32_t(gi) << 8) | uint32_t(bi));
+        alphaOut[i] = uint8_t(std::clamp(total, 0.0f, 1.0f) * 255.0f);
+        kOut[i] = uint8_t(std::clamp(a / total, 0.0f, 1.0f) * 255.0f);
+        out[i] = packPixel(r, g, b, total, a / total);
+    }
+
+    {
+        std::lock_guard lock{ g_cacheMutex };
+        g_cache.valid = true;
+        g_cache.key = key;
+        g_cache.tris = std::move(tris);
+        g_cache.textures = std::move(textures);   // std::map nodes stay put: the triangles' texture pointers stay valid
+        g_cache.W = W; g_cache.H = H; g_cache.minX = minX; g_cache.minZ = minZ; g_cache.scale = scale;
+        g_cache.kind = std::move(kind); g_cache.edge = std::move(edgeOut); g_cache.light = std::move(lightOut);
+        g_cache.alpha = std::move(alphaOut); g_cache.colourK = std::move(kOut);
     }
 
     meta[0] = float(W); meta[1] = float(H); meta[2] = minX; meta[3] = minZ; meta[4] = scale;
     return true;
+}
+
+bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int32_t>& out, float meta[5]) {
+    return bt_build_map_keyed(rdram, maxSize, capY, 0, out, meta);
+}
+
+// A close-up tile of the last whole-area map (built with the same key): the world rectangle
+// (x0, z0)-(x1, z1) at up to maxSize pixels across. The textures are drawn again at this
+// detail; what kind each pixel is, its light, fade and outline edges come from the whole-area
+// map (bilinear), so the tile matches it and only gets sharper. False when the last map
+// doesn't match the key.
+bool bt_build_detail(uint32_t key, float x0, float z0, float x1, float z1, int maxSize, std::vector<int32_t>& out, float meta[5]) {
+    std::lock_guard lock{ g_cacheMutex };
+    const MapCache& c = g_cache;
+    if (!c.valid || c.key != key || x1 <= x0 || z1 <= z0) return false;
+    const float scale = float(std::clamp(maxSize, 64, 3072)) / std::max(x1 - x0, z1 - z0);
+    const int W = std::max(1, int((x1 - x0) * scale)), H = std::max(1, int((z1 - z0) * scale));
+    const size_t N = size_t(W) * H;
+    std::vector<float> R(N, 0), G(N, 0), B(N, 0), top(N, -1e9f);
+    std::vector<uint8_t> drawn(N, 0), water(N, 0);
+    rasterTop(c.tris, x0, z0, scale, W, H, R, G, B, top, drawn, water);
+
+    // Bilinear sample of a cached per-pixel byte array at world (x, z).
+    auto sample = [&](const std::vector<uint8_t>& a, float fx, float fz) {
+        const int ix = int(std::floor(fx)), iz = int(std::floor(fz));
+        const float tx = fx - ix, tz = fz - iz;
+        auto at = [&](int x, int z) { x = std::clamp(x, 0, c.W - 1); z = std::clamp(z, 0, c.H - 1); return float(a[size_t(z) * c.W + x]); };
+        return (at(ix, iz) * (1 - tx) + at(ix + 1, iz) * tx) * (1 - tz) + (at(ix, iz + 1) * (1 - tx) + at(ix + 1, iz + 1) * tx) * tz;
+    };
+    auto nearest = [&](const std::vector<uint8_t>& a, float fx, float fz) {
+        const int x = std::clamp(int(fx + 0.5f), 0, c.W - 1), z = std::clamp(int(fz + 0.5f), 0, c.H - 1);
+        return a[size_t(z) * c.W + x];
+    };
+    // How "inside" (water or play area) each base pixel is, and how "main", for smooth edges.
+    std::vector<uint8_t> inside(c.kind.size()), isMain(c.kind.size()), isWater(c.kind.size());
+    for (size_t i = 0; i < c.kind.size(); i++) {
+        inside[i] = (c.kind[i] == kWater || c.kind[i] == kMain || c.kind[i] == kSolid) ? 255 : 0;
+        isMain[i] = c.kind[i] == kMain ? 255 : 0;
+        isWater[i] = c.kind[i] == kWater ? 255 : 0;
+    }
+
+    std::vector<uint8_t> kind(N, kNone), mainMask(N, 0), waterMask(N, 0);
+    std::vector<float> light(N, 1.0f), alpha(N, 0.0f), colourK(N, 0.0f), edge(N, 0.0f);
+    for (int z = 0; z < H; z++)
+        for (int x = 0; x < W; x++) {
+            const size_t i = size_t(z) * W + x;
+            const float wx = x0 + (x + 0.5f) / scale, wz = z0 + (z + 0.5f) / scale;
+            const float fx = (wx - c.minX) * c.scale - 0.5f, fz = (wz - c.minZ) * c.scale - 0.5f;
+            const float in = sample(inside, fx, fz) / 255.0f;
+            const uint8_t near = nearest(c.kind, fx, fz);
+            uint8_t k = kNone;
+            if (water[i] && drawn[i] && (in > 0.3f || near == kWater)) k = kWater;
+            else if (sample(isMain, fx, fz) >= 127.5f) k = kMain;
+            else if (near == kSolid) k = kSolid;
+            else if (near == kWater && in >= 0.5f) k = sample(isWater, fx, fz) >= 127.5f && !drawn[i] ? kWater : kMain;
+            else if (sample(c.alpha, fx, fz) > 2.0f) k = kBeyond;
+            kind[i] = k;
+            mainMask[i] = k == kMain;
+            waterMask[i] = k == kWater;
+            light[i] = sample(c.light, fx, fz) / 100.0f;
+            alpha[i] = sample(c.alpha, fx, fz) / 255.0f;
+            colourK[i] = sample(c.colourK, fx, fz) / 255.0f;
+            edge[i] = sample(c.edge, fx, fz);
+        }
+    // Edges a pixel or two wide at this detail: the outline where the map ends, the shoreline.
+    const int e = std::max(1, int(std::lround(W / 900.0f)));
+    const std::vector<uint8_t> mainInner = morph(mainMask, W, H, e, false);
+    const std::vector<uint8_t> waterInner = morph(waterMask, W, H, e, false);
+
+    out.assign(N, 0);
+    for (size_t i = 0; i < N; i++) {
+        const float tr = drawn[i] ? R[i] : 120.0f, tg = drawn[i] ? G[i] : 120.0f, tb = drawn[i] ? B[i] : 120.0f;
+        float r, g, b, a = 1.0f, k = 1.0f;
+        switch (kind[i]) {
+            case kWater: waterColour(tr, tg, tb, !waterInner[i], r, g, b); break;
+            case kMain: groundColour(tr, tg, tb, light[i], !mainInner[i] && edge[i] >= 0.5f, r, g, b); break;
+            case kSolid: groundColour(tr, tg, tb, light[i], false, r, g, b); break;
+            case kBeyond:
+                beyondColour(tr, tg, tb, light[i], r, g, b);
+                a = alpha[i]; k = colourK[i];
+                break;
+            default:
+                if (alpha[i] < 1.0f / 255.0f) continue;
+                r = g = b = 0; a = alpha[i]; k = 0;   // the shadow only
+                break;
+        }
+        out[i] = packPixel(r, g, b, a, k);
+    }
+    meta[0] = float(W); meta[1] = float(H); meta[2] = x0; meta[3] = z0; meta[4] = scale;
+    return true;
+}
+
+// The last whole-area map's water (1 per map pixel), for the bottom screen's shimmer; empty
+// when it doesn't match the key.
+std::vector<uint8_t> bt_water_mask(uint32_t key, int& W, int& H) {
+    std::lock_guard lock{ g_cacheMutex };
+    W = H = 0;
+    if (!g_cache.valid || g_cache.key != key) return {};
+    W = g_cache.W; H = g_cache.H;
+    std::vector<uint8_t> m(g_cache.kind.size());
+    for (size_t i = 0; i < m.size(); i++) m[i] = g_cache.kind[i] == kWater ? 255 : 0;
+    return m;
 }
 
 // Whether some walkable floor lies directly above (x, z), more than 200 units over y: Banjo is
@@ -1002,17 +1212,43 @@ bool bt_floor_above(const uint8_t* rdram, float x, float y, float z) {
 // GameState.buildMap: runs on a background thread. capY: leave out what's entirely above it
 // (a lower storey's map), or >= 1e8 for the whole area.
 extern "C" JNIEXPORT jintArray JNICALL
-Java_io_github_bownz_btrecomp_GameState_nativeBuildMap(JNIEnv* env, jclass, jint maxSize, jfloat capY, jfloatArray info) {
+Java_io_github_bownz_btrecomp_GameState_nativeBuildMap(JNIEnv* env, jclass, jint maxSize, jfloat capY, jint key, jfloatArray info) {
     uint8_t* rdram = bt_android_running_rdram();
     if (rdram == nullptr || info == nullptr || env->GetArrayLength(info) < 5) return nullptr;
     std::vector<int32_t> out;
     float meta[5];
-    if (!bt_build_map(rdram, maxSize, capY, out, meta)) return nullptr;
+    if (!bt_build_map_keyed(rdram, maxSize, capY, uint32_t(key), out, meta)) return nullptr;
     jintArray pixels = env->NewIntArray(jsize(out.size()));
     if (pixels == nullptr) return nullptr;
     env->SetIntArrayRegion(pixels, 0, jsize(out.size()), reinterpret_cast<const jint*>(out.data()));
     env->SetFloatArrayRegion(info, 0, 5, meta);
     return pixels;
+}
+
+// A sharper close-up tile of the last map built with this key (see bt_build_detail).
+extern "C" JNIEXPORT jintArray JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeBuildDetail(JNIEnv* env, jclass, jint key, jfloat x0, jfloat z0, jfloat x1, jfloat z1, jint maxSize, jfloatArray info) {
+    if (info == nullptr || env->GetArrayLength(info) < 5) return nullptr;
+    std::vector<int32_t> out;
+    float meta[5];
+    if (!bt_build_detail(uint32_t(key), x0, z0, x1, z1, maxSize, out, meta)) return nullptr;
+    jintArray pixels = env->NewIntArray(jsize(out.size()));
+    if (pixels == nullptr) return nullptr;
+    env->SetIntArrayRegion(pixels, 0, jsize(out.size()), reinterpret_cast<const jint*>(out.data()));
+    env->SetFloatArrayRegion(info, 0, 5, meta);
+    return pixels;
+}
+
+// The last map's water mask (one byte per map pixel, 255 = water), or null.
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeWaterMask(JNIEnv* env, jclass, jint key) {
+    int W = 0, H = 0;
+    std::vector<uint8_t> m = bt_water_mask(uint32_t(key), W, H);
+    if (m.empty()) return nullptr;
+    jbyteArray a = env->NewByteArray(jsize(m.size()));
+    if (a == nullptr) return nullptr;
+    env->SetByteArrayRegion(a, 0, jsize(m.size()), reinterpret_cast<const jbyte*>(m.data()));
+    return a;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
