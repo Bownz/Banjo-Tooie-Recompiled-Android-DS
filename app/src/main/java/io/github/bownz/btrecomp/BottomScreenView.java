@@ -279,10 +279,10 @@ public final class BottomScreenView extends View {
      */
     private void drawMap(Canvas c, RectF r) {
         mapRect.set(r);
-        // Slate grey behind the map (what's past the play area's edge), lighter at the top.
+        // Black behind the map (what's past the play area's edge; the user's choice, 12 Nov).
         if (mapBackground == null || mapBackgroundTop != r.top || mapBackgroundBottom != r.bottom) {
             mapBackground = new android.graphics.LinearGradient(0, r.top, 0, r.bottom,
-                Color.rgb(104, 104, 108), Color.rgb(68, 68, 74), android.graphics.Shader.TileMode.CLAMP);
+                Color.rgb(0, 0, 0), Color.rgb(0, 0, 0), android.graphics.Shader.TileMode.CLAMP);
             mapBackgroundTop = r.top;
             mapBackgroundBottom = r.bottom;
         }
