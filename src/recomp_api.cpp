@@ -183,7 +183,12 @@ uint32_t align_up(uint32_t value, uint32_t alignment) {
 // TEMPORARY diagnostics: the overlay traces below fire on every dispatch. A
 // game that enters a dispatch loop turns them into a flood that buries every
 // other message, so cap each site and say once that it stopped reporting.
+#ifdef __ANDROID__
+// Android keeps the session log for Share Log; thousands of trace lines push out everything else.
+constexpr uint32_t kTracePrintLimit = 40U;
+#else
 constexpr uint32_t kTracePrintLimit = 2000U;
+#endif
 
 bool should_trace(uint32_t& counter) {
     const uint32_t index = counter++;
@@ -383,6 +388,12 @@ extern "C" void tooie_probe_record_free(uint8_t* rdram, recomp_context* ctx) {
 // are created and never retired, so the level-load gate never sees a free slot.
 extern "C" void tooie_probe_task_dispatch(uint8_t* rdram, recomp_context* ctx,
                                           uint32_t id) {
+#ifdef __ANDROID__
+    // Per-frame upstream diagnostic (with a host backtrace): off on Android, where it
+    // floods the session log and logcat and costs time every frame.
+    (void)rdram; (void)ctx;
+    return;
+#endif
     (void)rdram;
     // One counter per probe id: sharing a single static across both hooks made
     // the first hook consume the whole print budget and the second look dead.
@@ -497,6 +508,12 @@ extern "C" void tooie_probe_gate(uint8_t* rdram, recomp_context* ctx) {
 // entry arguments and the host call stack, which names the recompiled functions
 // that led here.
 extern "C" void tooie_probe_kseg1_entry(uint8_t* rdram, recomp_context* ctx) {
+#ifdef __ANDROID__
+    // Per-frame upstream diagnostic (with a host backtrace): off on Android, where it
+    // floods the session log and logcat and costs time every frame.
+    (void)rdram; (void)ctx;
+    return;
+#endif
     (void)rdram;
     std::fprintf(stderr,
         "[entry-probe] a0=0x%016llX a1=0x%016llX a2=0x%016llX a3=0x%016llX "

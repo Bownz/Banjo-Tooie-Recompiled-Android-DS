@@ -10,9 +10,11 @@
 // a few candidates. It also looks for positions (for the bottom screen's map): 32-bit floats
 // that moved a fair way, many times, since the previous Mark (walk between two Marks), in the
 // globals and in the structures the player-state slots point to; and 16-bit values that
-// changed once or twice (going through a door: the area number). Logcat tag BTProbe.
+// changed once or twice (going through a door: the area number). Logcat tag BTProbe, and
+// "[BTProbe]" lines in the session log (so Share Log includes them).
 
 #include <android/log.h>
+#include <cstdarg>
 #include <jni.h>
 
 #include <algorithm>
@@ -50,6 +52,17 @@ namespace {
     // ---- TEMPORARY probe ----------------------------------------------------------------
 
     constexpr const char* kProbeTag = "BTProbe";
+
+    // To logcat and to the session log (stderr), so Share Log carries it.
+    __attribute__((format(printf, 1, 2))) void probe_log(const char* format, ...) {
+        char line[256];
+        va_list args;
+        va_start(args, format);
+        std::vsnprintf(line, sizeof(line), format, args);
+        va_end(args);
+        __android_log_write(ANDROID_LOG_INFO, kProbeTag, line);
+        std::fprintf(stderr, "[BTProbe] %s\n", line);
+    }
     std::mutex g_probe_mutex;
     std::vector<uint8_t> g_first, g_prev, g_count;   // per host byte, since the last Mark
     int g_marks = 0;
@@ -114,7 +127,7 @@ namespace {
         std::sort(found.begin(), found.end(), [](const Candidate& a, const Candidate& b) { return a.address < b.address; });
         const uint32_t mode = read_u32(rdram, kGameMode);
         const uint32_t frame = read_u32(rdram, kGameFrameCount);
-        __android_log_print(ANDROID_LOG_INFO, kProbeTag, "MARK %d: %zu candidates (game mode %u, frame %u)",
+        probe_log("MARK %d: %zu candidates (game mode %u, frame %u)",
             mark, found.size(), mode, frame);
         // Globals (below the heap) first: the likeliest home of counters and state.
         int lines = 0;
@@ -124,17 +137,18 @@ namespace {
                 if ((pass == 0) != global || lines >= 400) {
                     continue;
                 }
-                __android_log_print(ANDROID_LOG_INFO, kProbeTag, "M%d %08X %u->%u (%+d, %u changes)%s",
+                probe_log("M%d %08X %u->%u (%+d, %u changes)%s",
                     mark, c.address, c.first, c.now, static_cast<int>(c.now) - static_cast<int>(c.first), c.changes,
                     global ? "" : " heap");
                 lines++;
             }
         }
         if (static_cast<int>(found.size()) > lines) {
-            __android_log_print(ANDROID_LOG_INFO, kProbeTag, "M%d (%zu more not shown)", mark, found.size() - lines);
+            probe_log("M%d (%zu more not shown)", mark, found.size() - lines);
         }
         probe_report_halfwords_locked(rdram, mark);
         probe_report_floats_locked(rdram, mark);
+        std::fflush(stderr);
     }
 
     // How often the 4 bytes at a (word-aligned) host offset changed: the most of any of them.
@@ -158,7 +172,7 @@ namespace {
             if (first == now || now > 0x1000 || first > 0x1000) {
                 continue;
             }
-            __android_log_print(ANDROID_LOG_INFO, kProbeTag, "M%d H %08X 0x%X->0x%X (%u changes)", mark, guest, first, now, n);
+            probe_log("M%d H %08X 0x%X->0x%X (%u changes)", mark, guest, first, now, n);
             lines++;
         }
     }
@@ -185,7 +199,7 @@ namespace {
             if (moved < 20.0f || moved > 6000.0f) {
                 continue;
             }
-            __android_log_print(ANDROID_LOG_INFO, kProbeTag, "M%d F %08X %.1f->%.1f (%u changes) %s",
+            probe_log("M%d F %08X %.1f->%.1f (%u changes) %s",
                 mark, guest, first, now, word_changes(host), where);
             lines++;
         }
@@ -196,7 +210,7 @@ namespace {
         // The player-state slots' structures first.
         for (uint32_t i = 0; i < kPlayerStateSlotCount; i++) {
             const uint32_t ptr = read_u32(rdram, kPlayerStateSlotTable + i * 4);
-            __android_log_print(ANDROID_LOG_INFO, kProbeTag, "M%d slot %u -> %08X", mark, i, ptr);
+            probe_log("M%d slot %u -> %08X", mark, i, ptr);
             if (ptr >= 0x80000000u && ptr < 0x80800000u - 0x800) {
                 char where[32];
                 std::snprintf(where, sizeof(where), "slot%u+%X", i, 0);
@@ -216,8 +230,9 @@ namespace {
             }
             const uint32_t mode = read_u32(rdram, kGameMode);
             if (mode != last_mode) {
-                __android_log_print(ANDROID_LOG_INFO, kProbeTag, "game mode %u -> %u (frame %u)",
+                probe_log("game mode %u -> %u (frame %u)",
                     last_mode, mode, read_u32(rdram, kGameFrameCount));
+                std::fflush(stderr);
                 last_mode = mode;
             }
             if (!g_probe_enabled.load() || !ultramodern::is_game_started()) {
@@ -269,7 +284,8 @@ Java_io_github_bownz_btrecomp_GameState_nativeProbeMark(JNIEnv*, jclass) {
         probe_sample_locked(rdram);
         probe_report_locked(rdram, mark);
     } else {
-        __android_log_print(ANDROID_LOG_INFO, kProbeTag, "MARK %d: start", mark);
+        probe_log("MARK %d: start", mark);
+        std::fflush(stderr);
     }
     probe_reset_locked(rdram);
     return mark;
