@@ -122,11 +122,23 @@ public final class BottomScreenView extends View {
 
     private float u = 1f;     // layout unit: 1% of the shorter side
 
+    // Fredoka (SIL Open Font License; assets/fonts/Fredoka-OFL.txt): the bottom screen's lettering.
+    private Typeface titleFont;
+
+    private static Typeface loadFont(Context context, String asset, Typeface fallback) {
+        try {
+            return Typeface.createFromAsset(context.getAssets(), asset);
+        } catch (RuntimeException e) {
+            return fallback;
+        }
+    }
+
     public BottomScreenView(Context context) {
         super(context);
         stroke.setStyle(Paint.Style.STROKE);
         stroke.setStrokeCap(Paint.Cap.ROUND);
-        text.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        text.setTypeface(loadFont(context, "fonts/Fredoka-SemiBold.ttf", Typeface.create(Typeface.DEFAULT, Typeface.BOLD)));
+        titleFont = loadFont(context, "fonts/Fredoka-Bold.ttf", Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
         text.setTextAlign(Paint.Align.CENTER);
         setContentDescription("Banjo-Tooie bottom screen");
     }
@@ -238,8 +250,9 @@ public final class BottomScreenView extends View {
             drawMoves(c, new RectF(pad, bottom + 3 * u, w - pad, bottom + 3 * u + movesH));
         } else if (slideButtons && buttonSlide > 0f) {
             // Hold Z: a column down the right side of the map, sliding in from the right edge.
-            float colW = Math.min(30 * u, map.width() * 0.34f);
-            RectF col = new RectF(map.right - colW, map.top, map.right, map.bottom);
+            RectF inner = mapRect;
+            float colW = Math.min(30 * u, inner.width() * 0.34f);
+            RectF col = new RectF(inner.right - colW - 1.2f * u, inner.top + 1.2f * u, inner.right - 1.2f * u, inner.bottom - 1.2f * u);
             // A dark band behind them, so they read over the map; fades with the slide.
             float fade = Math.min(1f, buttonSlide * 2.5f);
             fill.setColor(Color.argb((int) (185 * fade), 14, 12, 26));
@@ -252,18 +265,37 @@ public final class BottomScreenView extends View {
     }
 
     private void drawStrip(Canvas c, RectF r) {
+        // This world's Jiggies and notes, top right (the area's name is on the map's banner).
         text.setTextSize(3.4f * u);
-        text.setTextAlign(Paint.Align.LEFT);
-        text.setColor(TAN);
-        String where = world >= 0 ? GameState.WORLDS[world] : (areaLabel != null ? areaLabel : "Banjo-Tooie");
-        c.drawText(where, r.left, r.centerY() - (text.descent() + text.ascent()) / 2f, text);
         text.setTextAlign(Paint.Align.RIGHT);
         text.setColor(HONEY);
         int jiggies = GameState.count(GameState.JIGGIES, world);
         int notes = GameState.count(GameState.NOTES, world);
-        String right = (jiggies >= 0 ? jiggies + "/" + JIGGIES_PER_WORLD : "–") + " Jiggies  ·  " + value(notes) + " ♪";
-        c.drawText(right, r.right, r.centerY() - (text.descent() + text.ascent()) / 2f, text);
+        float baseline = r.centerY() - (text.descent() + text.ascent()) / 2f;
+        float noteW = 2.6f * u;
+        String right = (jiggies >= 0 ? jiggies + "/" + JIGGIES_PER_WORLD : "–") + " Jiggies  ·  " + value(notes) + " ";
+        c.drawText(right, r.right - noteW, baseline, text);
+        drawNote(c, r.right - noteW * 0.55f, r.centerY(), noteW, HONEY);
         text.setTextAlign(Paint.Align.CENTER);
+    }
+
+    /** A music note (the font has none), centred at (x, y), about size tall. */
+    private void drawNote(Canvas c, float x, float y, float size, int colour) {
+        fill.setColor(colour);
+        float head = size * 0.26f;
+        float hx = x - size * 0.12f, hy = y + size * 0.28f;
+        c.save();
+        c.rotate(-20f, hx, hy);
+        c.drawOval(hx - head * 1.25f, hy - head * 0.9f, hx + head * 1.25f, hy + head * 0.9f, fill);
+        c.restore();
+        float sx = hx + head * 1.05f;
+        c.drawRect(sx - size * 0.06f, y - size * 0.5f, sx + size * 0.06f, hy, fill);
+        path.reset();
+        path.moveTo(sx, y - size * 0.5f);
+        path.cubicTo(sx + size * 0.35f, y - size * 0.35f, sx + size * 0.4f, y - size * 0.15f, sx + size * 0.22f, y + size * 0.02f);
+        path.cubicTo(sx + size * 0.28f, y - size * 0.18f, sx + size * 0.18f, y - size * 0.28f, sx, y - size * 0.3f);
+        path.close();
+        c.drawPath(path, fill);
     }
 
     // ------------------------------------------------------------------------------
@@ -277,98 +309,406 @@ public final class BottomScreenView extends View {
      * places it and draws Banjo's arrow. Close-up following Banjo by default; a tap on the map
      * switches to the whole area and back.
      */
-    private void drawMap(Canvas c, RectF r) {
+    private void drawMap(Canvas c, RectF frame) {
+        long now = SystemClock.uptimeMillis();
+        float dt = lastMapDraw == 0 ? 0f : Math.min(100f, now - lastMapDraw);
+        lastMapDraw = now;
+        boolean animating = false;
+
+        // The wood frame; the map sits inside it.
+        float bw = 2.2f * u;
+        RectF r = new RectF(frame.left + bw, frame.top + bw, frame.right - bw, frame.bottom - bw);
         mapRect.set(r);
-        // Black behind the map (what's past the play area's edge; the user's choice, 12 Nov).
-        if (mapBackground == null || mapBackgroundTop != r.top || mapBackgroundBottom != r.bottom) {
-            mapBackground = new android.graphics.LinearGradient(0, r.top, 0, r.bottom,
-                Color.rgb(0, 0, 0), Color.rgb(0, 0, 0), android.graphics.Shader.TileMode.CLAMP);
-            mapBackgroundTop = r.top;
-            mapBackgroundBottom = r.bottom;
-        }
-        mapBackgroundPaint.setShader(mapBackground);
-        c.drawRoundRect(r, 3 * u, 3 * u, mapBackgroundPaint);
+        float inner = 2.4f * u;
+        drawFrame(c, frame, r, inner);
+        mapClip.reset();
+        mapClip.addRoundRect(r, inner, inner, Path.Direction.CW);
 
         float[] here = GameState.position();
         GameState.MapImage m = mapImage;
-        if (m == null) {
-            text.setColor(CREAM);
-            text.setTextSize(3.6f * u);
-            drawCentered(c, here == null ? "Waiting for the game" : "Drawing the map…", r.centerX(), r.centerY());
-        } else {
-            // View: world units -> screen. Close-up: followSpan units across the panel's short
-            // side, centred on Banjo; whole: the area fitted. Both moved by the pan.
-            float worldW = m.worldW(), worldH = m.worldH();
-            float viewScale, cx, cz;
-            if (!mapWhole && here != null) {
-                viewScale = Math.min(r.width(), r.height()) / followSpan;
-                cx = here[0] + panX;
-                cz = here[2] + panZ;
+        int saved = c.save();
+        c.clipPath(mapClip);
+        c.drawColor(Color.BLACK);
+
+        // The area we just left, fading out where it was.
+        GameState.MapImage old = leavingMap;
+        if (old != null) {
+            float t = (now - leavingAt) / 300f;
+            if (t >= 1f) {
+                leavingMap = null;
             } else {
-                viewScale = Math.min(r.width() / worldW, r.height() / worldH) * 0.96f;
-                cx = m.minX + worldW / 2 + panX;
-                cz = m.minZ + worldH / 2 + panZ;
+                mapPaint.setAlpha(Math.round(255 * (1f - t)));
+                drawWorldBitmap(c, r, old.bitmap, old.minX, old.minZ, old.scale, leavingCx, leavingCz, leavingS, mapPaint);
+                mapPaint.setAlpha(255);
+                animating = true;
             }
+        }
+
+        if (m == null) {
+            if (old == null) {
+                drawLoading(c, r, here == null ? "Waiting for the game" : "Drawing the map", now);
+                animating = true;
+            }
+        } else {
+            if (m != fadingInFor) {   // a new picture: fade it in (an area's first one from black)
+                fadingInFor = m;
+                fadeInAt = now;
+                fadeFrom = shownBefore ? 1f : 0f;
+                shownBefore = true;
+            }
+            float fadeIn = Math.min(1f, fadeFrom + (now - fadeInAt) / 400f);
+            if (fadeIn < 1f) animating = true;
+            boolean viewMoving = false;
+
+            // The view eases towards what was asked (zoom steps, close-up <-> whole, Recenter).
+            float ease = 1f - (float) Math.exp(-dt / 90f);
+            float wholeTarget = mapWhole || here == null ? 1f : 0f;
+            if (Float.isNaN(shownSpan)) shownSpan = followSpan;
+            if (Math.abs(shownSpan - followSpan) > followSpan * 0.002f) {
+                shownSpan = (float) Math.exp(Math.log(shownSpan) + (Math.log(followSpan) - Math.log(shownSpan)) * ease);
+                animating = viewMoving = true;
+            } else {
+                shownSpan = followSpan;
+            }
+            if (Math.abs(wholeBlend - wholeTarget) > 0.002f) {
+                wholeBlend += (wholeTarget - wholeBlend) * ease;
+                animating = viewMoving = true;
+            } else {
+                wholeBlend = wholeTarget;
+            }
+            if (recentering) {
+                panX -= panX * ease;
+                panZ -= panZ * ease;
+                if (Math.abs(panX) + Math.abs(panZ) < 2f) {
+                    panX = panZ = 0f;
+                    recentering = false;
+                    panned = false;
+                } else {
+                    animating = viewMoving = true;
+                }
+            }
+
+            float worldW = m.worldW(), worldH = m.worldH();
+            float wholeScale = Math.min(r.width() / worldW, r.height() / worldH) * 0.96f;
+            float wholeCx = m.minX + worldW / 2, wholeCz = m.minZ + worldH / 2;
+            float followScale = Math.min(r.width(), r.height()) / shownSpan;
+            float fcx = here != null ? here[0] : wholeCx, fcz = here != null ? here[2] : wholeCz;
+            float bl = wholeBlend * wholeBlend * (3 - 2 * wholeBlend);   // smoothstep
+            float viewScale = (float) Math.exp(Math.log(followScale) * (1 - bl) + Math.log(wholeScale) * bl);
+            float cx = fcx * (1 - bl) + wholeCx * bl + panX;
+            float cz = fcz * (1 - bl) + wholeCz * bl + panZ;
             viewCx = cx;
             viewCz = cz;
             viewS = viewScale;
-            int saved = c.save();
-            mapClip.reset();
-            mapClip.addRoundRect(r, 3 * u, 3 * u, Path.Direction.CW);
-            c.clipPath(mapClip);
+
+            mapPaint.setAlpha(Math.round(255 * fadeIn));
             drawWorldBitmap(c, r, m.bitmap, m.minX, m.minZ, m.scale, cx, cz, viewScale, mapPaint);
             // The sharper close-up tile over it, when there is one for this view.
             GameState.MapImage d = detail;
             if (d != null && d.key == m.key) {
                 drawWorldBitmap(c, r, d.bitmap, d.minX, d.minZ, d.scale, cx, cz, viewScale, mapPaint);
             }
-            updateDetail(m, r, cx, cz, viewScale);
-            drawShimmer(c, r, m, cx, cz, viewScale);
+            mapPaint.setAlpha(255);
+            if (!viewMoving) {
+                updateDetail(m, r, cx, cz, viewScale);   // not while zooming: the tile would be out of date at once
+            }
+            if (fadeIn >= 1f) {
+                drawShimmer(c, r, m, cx, cz, viewScale);
+            }
 
             // Where you came in (each entrance used in this area this session; the latest brighter).
+            float iconScale = 0.75f + 0.25f * (1 - bl);
             java.util.List<float[]> entries = entrances.get(GameState.area());
             if (entries != null) {
                 for (int i = 0; i < entries.size(); i++) {
                     float[] e = entries.get(i);
                     drawEntrance(c, r.centerX() + (e[0] - cx) * viewScale, r.centerY() + (e[2] - cz) * viewScale,
-                        (!mapWhole ? 2.2f : 1.7f) * u, i == entries.size() - 1);
+                        2.2f * iconScale * u, i == entries.size() - 1);
                 }
             }
             // Your own markers.
-            java.util.List<float[]> pins = userMarks(GameState.area());
-            for (float[] pin : pins) {
+            for (float[] pin : userMarks(GameState.area())) {
                 drawPin(c, r.centerX() + (pin[0] - cx) * viewScale, r.centerY() + (pin[1] - cz) * viewScale);
             }
-
             if (here != null) {
                 float px = r.centerX() + (here[0] - cx) * viewScale;
                 float pz = r.centerY() + (here[2] - cz) * viewScale;
-                drawArrow(c, px, pz, shownDegrees, (!mapWhole ? 2.6f : 2.0f) * u);
+                drawPlayer(c, px, pz, shownDegrees, 2.6f * iconScale * u, now);   // its pulse updates with the 30 Hz poll
             }
-            c.restoreToCount(saved);
+        }
+        // A soft shadow inside the frame's edge.
+        drawInnerShadow(c, r, inner);
+        c.restoreToCount(saved);
 
-            // The area's name, top left (once the game has shown it).
-            if (areaLabel != null) {
-                text.setTextAlign(Paint.Align.LEFT);
-                text.setTextSize(3.0f * u);
-                float tw = text.measureText(areaLabel);
-                fill.setColor(Color.argb(170, 18, 13, 26));
-                c.drawRoundRect(r.left + 1.5f * u, r.top + 1.5f * u, r.left + 4.5f * u + tw, r.top + 6.5f * u, 2 * u, 2 * u, fill);
-                text.setColor(CREAM);
-                c.drawText(areaLabel, r.left + 3 * u, r.top + 5.1f * u, text);
-            }
+        if (m != null) {
+            drawMapControls(c, r);
             if (mapCap < GameState.WHOLE) {
                 text.setTextAlign(Paint.Align.LEFT);
-                text.setTextSize(2.4f * u);
-                text.setColor(Color.argb(200, 232, 213, 168));
-                c.drawText("Lower floor", r.left + 2 * u, r.bottom - 1.6f * u, text);
+                text.setTextSize(2.6f * u);
+                text.setColor(Color.argb(220, 255, 236, 170));
+                c.drawText("Lower floor", r.left + 11.5f * u, r.bottom - 3.2f * u, text);
+                text.setTextAlign(Paint.Align.CENTER);
             }
-            text.setTextAlign(Paint.Align.CENTER);
-            drawMapControls(c, r);
         }
-        stroke.setColor(Color.argb(200, 206, 162, 70));
-        stroke.setStrokeWidth(0.45f * u);
-        c.drawRoundRect(r, 3 * u, 3 * u, stroke);
+        if (drawBanner(c, frame, now)) animating = true;
+        if (animating) {
+            postInvalidateOnAnimation();
+        }
+    }
+
+    // ---- The look: frame, banner, loading, player marker --------------------------------
+
+    private long lastMapDraw;
+    private float shownSpan = Float.NaN, wholeBlend = 0f;   // the view as shown, easing towards followSpan / mapWhole
+    private boolean recentering;
+    private GameState.MapImage leavingMap, fadingInFor;
+    private float leavingCx, leavingCz, leavingS;
+    private long leavingAt, fadeInAt;
+    private float fadeFrom;
+    private boolean shownBefore;
+    private final Paint woodPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private android.graphics.Shader woodShader;
+    private float woodTop = Float.NaN, woodBottom = Float.NaN;
+    private final Paint shadowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private static final int FRAME_DARK = Color.rgb(46, 24, 8);
+    private static final int FRAME_LIGHT = Color.rgb(196, 140, 74);
+    private static final int TRIM = Color.rgb(236, 186, 80);
+    private static final int HONEY_DEEP = Color.rgb(242, 170, 40);
+    private static final int HONEY_LIGHT = Color.rgb(255, 224, 130);
+    private static final int INK = Color.rgb(74, 38, 8);
+
+    private static Path hexagon(float cx, float cy, float r, float rotDeg) {
+        Path p = new Path();
+        for (int i = 0; i < 6; i++) {
+            double a = Math.toRadians(60 * i + rotDeg);
+            float x = cx + r * (float) Math.cos(a), y = cy + r * (float) Math.sin(a);
+            if (i == 0) p.moveTo(x, y); else p.lineTo(x, y);
+        }
+        p.close();
+        return p;
+    }
+
+    /** Carved wood around the map: grain, a dark outer edge, a light bevel, a gold trim, honey studs. */
+    private void drawFrame(Canvas c, RectF frame, RectF r, float inner) {
+        float outer = inner + 2.2f * u;
+        if (woodShader == null || woodTop != frame.top || woodBottom != frame.bottom) {
+            woodShader = new LinearGradient(0, frame.top, 0, frame.bottom, Color.rgb(132, 82, 38), Color.rgb(84, 48, 20), Shader.TileMode.CLAMP);
+            woodTop = frame.top;
+            woodBottom = frame.bottom;
+        }
+        woodPaint.setShader(woodShader);
+        c.drawRoundRect(frame, outer, outer, woodPaint);
+        // Grain: faint horizontal streaks.
+        stroke.setStrokeWidth(0.18f * u);
+        stroke.setColor(Color.argb(40, 40, 18, 4));
+        for (float y = frame.top + 0.9f * u; y < frame.bottom; y += 1.1f * u) {
+            c.drawLine(frame.left + outer * 0.3f, y, frame.right - outer * 0.3f, y + 0.25f * u, stroke);
+        }
+        stroke.setStrokeWidth(0.4f * u);
+        stroke.setColor(FRAME_DARK);
+        c.drawRoundRect(frame, outer, outer, stroke);
+        RectF bevel = new RectF(frame.left + 0.5f * u, frame.top + 0.5f * u, frame.right - 0.5f * u, frame.bottom - 0.5f * u);
+        stroke.setStrokeWidth(0.25f * u);
+        stroke.setColor(FRAME_LIGHT);
+        c.drawRoundRect(bevel, outer - 0.5f * u, outer - 0.5f * u, stroke);
+        RectF trim = new RectF(r.left - 0.3f * u, r.top - 0.3f * u, r.right + 0.3f * u, r.bottom + 0.3f * u);
+        stroke.setStrokeWidth(0.4f * u);
+        stroke.setColor(TRIM);
+        c.drawRoundRect(trim, inner + 0.3f * u, inner + 0.3f * u, stroke);
+        float sx = (frame.left + r.left) / 2f + 0.15f * u, sy = (frame.top + r.top) / 2f + 0.15f * u;
+        float ex = (frame.right + r.right) / 2f - 0.15f * u, ey = (frame.bottom + r.bottom) / 2f - 0.15f * u;
+        float[][] corners = { { sx, sy }, { ex, sy }, { sx, ey }, { ex, ey } };
+        for (float[] k : corners) {
+            fill.setColor(HONEY_DEEP);
+            c.drawPath(hexagon(k[0], k[1], 1.5f * u, 30), fill);
+            stroke.setStrokeWidth(0.22f * u);
+            stroke.setColor(Color.rgb(70, 36, 6));
+            c.drawPath(hexagon(k[0], k[1], 1.5f * u, 30), stroke);
+            fill.setColor(HONEY_LIGHT);
+            c.drawPath(hexagon(k[0] - 0.2f * u, k[1] - 0.2f * u, 0.7f * u, 30), fill);
+        }
+    }
+
+    /** A dark band just inside the frame, fading inwards. */
+    private void drawInnerShadow(Canvas c, RectF r, float inner) {
+        float depth = 2.6f * u;
+        int dark = Color.argb(150, 10, 6, 2), clear = Color.argb(0, 10, 6, 2);
+        shadowPaint.setShader(new LinearGradient(0, r.top, 0, r.top + depth, dark, clear, Shader.TileMode.CLAMP));
+        c.drawRect(r.left, r.top, r.right, r.top + depth, shadowPaint);
+        shadowPaint.setShader(new LinearGradient(0, r.bottom, 0, r.bottom - depth, dark, clear, Shader.TileMode.CLAMP));
+        c.drawRect(r.left, r.bottom - depth, r.right, r.bottom, shadowPaint);
+        shadowPaint.setShader(new LinearGradient(r.left, 0, r.left + depth, 0, dark, clear, Shader.TileMode.CLAMP));
+        c.drawRect(r.left, r.top, r.left + depth, r.bottom, shadowPaint);
+        shadowPaint.setShader(new LinearGradient(r.right, 0, r.right - depth, 0, dark, clear, Shader.TileMode.CLAMP));
+        c.drawRect(r.right - depth, r.top, r.right, r.bottom, shadowPaint);
+        shadowPaint.setShader(null);
+    }
+
+    // The area's name on a ribbon across the top of the frame; it drops in when the name changes.
+    private String bannerText, bannerWorld;
+    private long bannerAt;
+
+    private boolean drawBanner(Canvas c, RectF frame, long now) {
+        String title = areaLabel;
+        String worldName = areaWorld >= 0 ? GameState.WORLDS[areaWorld] : null;
+        if (title == null) {
+            title = worldName;
+        }
+        if (title == null) {
+            bannerText = null;
+            return false;
+        }
+        if (!title.equals(bannerText)) {
+            bannerText = title;
+            bannerWorld = worldName != null && !worldName.equalsIgnoreCase(title) ? worldName : null;
+            bannerAt = now;
+        }
+        float t = Math.min(1f, (now - bannerAt) / 450f);
+        float k = 1.6f, q = t - 1f;
+        float drop = 1f + (k + 1f) * q * q * q + k * q * q;   // ease-out with a small bounce
+
+        text.setTypeface(titleFont);
+        text.setTextSize(4.2f * u);
+        float maxW = frame.width() * 0.5f;
+        float tw = Math.min(maxW, text.measureText(title));
+        if (text.measureText(title) > maxW) {
+            text.setTextSize(4.2f * u * maxW / text.measureText(title));
+        }
+        float bh = 6.6f * u, bw = tw + 9 * u;
+        float cx = frame.centerX();
+        float by0 = frame.top - 2.8f * u - (1f - drop) * 9f * u, by1 = by0 + bh;
+        float bx0 = cx - bw / 2, bx1 = cx + bw / 2;
+        int alpha = Math.round(255 * Math.min(1f, t * 3f));
+        int layer = c.saveLayerAlpha(frame.left - 6 * u, by0 - 4 * u, frame.right + 6 * u, by1 + 3 * u, alpha);
+        // Folded tails.
+        for (int side = -1; side <= 1; side += 2) {
+            float ex = side < 0 ? bx0 : bx1;
+            path.reset();
+            path.moveTo(ex, by0 + 1.5f * u);
+            path.lineTo(ex + side * 4.6f * u, by0 + 1.5f * u);
+            path.lineTo(ex + side * 3.2f * u, by0 + 1.5f * u + (bh - 1.5f * u) / 2f + 0.6f * u);
+            path.lineTo(ex + side * 4.6f * u, by1 + 1.2f * u);
+            path.lineTo(ex, by1 + 1.2f * u);
+            path.close();
+            fill.setColor(Color.rgb(176, 104, 18));
+            c.drawPath(path, fill);
+            stroke.setStrokeWidth(0.22f * u);
+            stroke.setColor(Color.rgb(70, 36, 6));
+            c.drawPath(path, stroke);
+        }
+        RectF band = new RectF(bx0, by0, bx1, by1);
+        fill.setShader(new LinearGradient(0, by0, 0, by1, Color.rgb(255, 214, 110), Color.rgb(226, 150, 30), Shader.TileMode.CLAMP));
+        c.drawRoundRect(band, 1.2f * u, 1.2f * u, fill);
+        fill.setShader(null);
+        stroke.setStrokeWidth(0.32f * u);
+        stroke.setColor(Color.rgb(70, 36, 6));
+        c.drawRoundRect(band, 1.2f * u, 1.2f * u, stroke);
+        stroke.setStrokeWidth(0.2f * u);
+        stroke.setColor(Color.rgb(255, 236, 170));
+        c.drawRoundRect(new RectF(bx0 + 0.5f * u, by0 + 0.5f * u, bx1 - 0.5f * u, by1 - 0.5f * u), 0.8f * u, 0.8f * u, stroke);
+        float base = band.centerY() - (text.descent() + text.ascent()) / 2f;
+        if (bannerWorld != null) {
+            base += 0.9f * u;
+        }
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setColor(Color.rgb(255, 236, 170));
+        c.drawText(title, cx + 0.2f * u, base + 0.25f * u, text);
+        text.setColor(INK);
+        c.drawText(title, cx, base, text);
+        if (bannerWorld != null) {
+            text.setTextSize(2.1f * u);
+            text.setColor(Color.rgb(120, 66, 12));
+            c.drawText(bannerWorld, cx, by0 + 2.2f * u, text);
+        }
+        text.setTypeface(textFont());
+        c.restoreToCount(layer);
+        return t < 1f;
+    }
+
+    private Typeface regularFont;
+
+    private Typeface textFont() {
+        if (regularFont == null) {
+            regularFont = loadFont(getContext(), "fonts/Fredoka-SemiBold.ttf", Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        }
+        return regularFont;
+    }
+
+    /** Six honeycomb cells lighting up in turn, and what's happening. */
+    private void drawLoading(Canvas c, RectF r, String what, long now) {
+        float cx = r.centerX(), cy = r.centerY() - 2 * u, ring = 3.6f * u, cell = 1.9f * u;
+        int lit = (int) ((now / 110) % 6);
+        for (int i = 0; i < 6; i++) {
+            double a = Math.toRadians(60 * i - 90);
+            float x = cx + ring * (float) Math.cos(a), y = cy + ring * (float) Math.sin(a);
+            int age = (lit - i + 6) % 6;
+            fill.setColor(Color.argb(255 - age * 36, 242, 170, 40));
+            c.drawPath(hexagon(x, y, cell, 30), fill);
+        }
+        text.setColor(CREAM);
+        text.setTextSize(3.2f * u);
+        text.setTextAlign(Paint.Align.CENTER);
+        c.drawText(what, cx, cy + ring + cell + 4.4f * u, text);
+    }
+
+    /**
+     * Banjo's marker: a honey hexagon with a red pointer the way he's going, a white outline
+     * and a soft shadow; a faint cone ahead; a slow pulse ring while he stands still. (An
+     * original design: nothing from the game's art.)
+     */
+    private void drawPlayer(Canvas c, float x, float y, float degrees, float size, long now) {
+        float hex = size * 1.15f;
+        boolean still = now - lastMovedAt > 600;
+        if (!Float.isNaN(degrees)) {
+            double a = Math.toRadians(degrees);
+            float dx = (float) Math.sin(a), dy = (float) Math.cos(a);
+            // View cone.
+            path.reset();
+            path.moveTo(x, y);
+            for (int i = -26; i <= 26; i += 4) {
+                double b = a + Math.toRadians(i);
+                path.lineTo(x + (float) Math.sin(b) * size * 7.5f, y + (float) Math.cos(b) * size * 7.5f);
+            }
+            path.close();
+            fill.setShader(new android.graphics.RadialGradient(x, y, size * 7.5f, Color.argb(90, 255, 244, 200), Color.argb(0, 255, 244, 200), Shader.TileMode.CLAMP));
+            c.drawPath(path, fill);
+            fill.setShader(null);
+            // Shadow, outline, pointer.
+            fill.setColor(Color.argb(110, 0, 0, 0));
+            c.drawPath(hexagon(x + 0.25f * size, y + 0.35f * size, hex * 1.08f, 30), fill);
+            float lx = -dy, ly = dx;
+            path.reset();
+            path.moveTo(x + dx * size * 2.3f, y + dy * size * 2.3f);
+            path.lineTo(x + dx * hex * 0.75f + lx * hex * 0.95f, y + dy * hex * 0.75f + ly * hex * 0.95f);
+            path.lineTo(x + dx * hex * 0.75f - lx * hex * 0.95f, y + dy * hex * 0.75f - ly * hex * 0.95f);
+            path.close();
+            fill.setColor(Color.WHITE);
+            c.drawPath(path, fill);
+            c.drawPath(hexagon(x, y, hex * 1.17f, 30), fill);
+            path.reset();
+            path.moveTo(x + dx * size * 1.95f, y + dy * size * 1.95f);
+            path.lineTo(x + dx * hex * 0.7f + lx * hex * 0.72f, y + dy * hex * 0.7f + ly * hex * 0.72f);
+            path.lineTo(x + dx * hex * 0.7f - lx * hex * 0.72f, y + dy * hex * 0.7f - ly * hex * 0.72f);
+            path.close();
+            fill.setColor(Color.rgb(214, 52, 40));
+            c.drawPath(path, fill);
+        } else {
+            fill.setColor(Color.WHITE);
+            c.drawPath(hexagon(x, y, hex * 1.17f, 30), fill);
+        }
+        fill.setColor(HONEY_DEEP);
+        c.drawPath(hexagon(x, y, hex, 30), fill);
+        stroke.setStrokeWidth(0.18f * u);
+        stroke.setColor(Color.rgb(160, 96, 12));
+        c.drawPath(hexagon(x, y, hex, 30), stroke);
+        fill.setColor(HONEY_LIGHT);
+        c.drawPath(hexagon(x - 0.1f * size, y - 0.13f * size, hex * 0.43f, 30), fill);
+        if (still) {
+            float p = ((now - lastMovedAt) % 1600L) / 1600f;
+            stroke.setStrokeWidth(0.35f * u);
+            stroke.setColor(Color.argb(Math.round(170 * (1 - p)), 255, 214, 102));
+            c.drawCircle(x, y, hex * (1.3f + 1.6f * p), stroke);
+        }
     }
 
     // The arrow's direction. While Banjo moves it's the way he's moving; standing still it's the
@@ -378,6 +718,7 @@ public final class BottomScreenView extends View {
     private float lastX = Float.NaN, lastZ = Float.NaN;
     private boolean facingFlipped;
     private float stoppedFacing = Float.NaN;   // the game's facing when he stopped moving
+    private long lastMovedAt;
     private boolean turningInPlace;
 
     // What the arrow shows: eases towards arrowDegrees the short way round (~30 times a second).
@@ -408,6 +749,7 @@ public final class BottomScreenView extends View {
             if (dx * dx + dz * dz > 6f * 6f && dx * dx + dz * dz < 400f * 400f) {   // moving (not a warp)
                 float moving = (float) Math.toDegrees(Math.atan2(dx, dz));
                 arrowDegrees = moving;
+                lastMovedAt = SystemClock.uptimeMillis();
                 if (!Float.isNaN(facing)) {
                     float diff = angleBetween(facing, moving);   // 0 = same way, 180 = opposite
                     if (diff < 50f) {
@@ -496,31 +838,6 @@ public final class BottomScreenView extends View {
     }
 
     /** Banjo: a red arrow pointing the way he faces (0 degrees = +z = down the map), or a dot. */
-    private void drawArrow(Canvas c, float x, float z, float degrees, float size) {
-        if (Float.isNaN(degrees)) {
-            fill.setColor(MAP_DOT);
-            c.drawCircle(x, z, size * 0.7f, fill);
-            stroke.setColor(CREAM);
-            stroke.setStrokeWidth(0.35f * u);
-            c.drawCircle(x, z, size * 0.7f, stroke);
-            return;
-        }
-        double a = Math.toRadians(degrees);
-        float dx = (float) Math.sin(a), dz = (float) Math.cos(a);   // screen x right, y down = +z
-        float lx = -dz, lz = dx;
-        path.reset();
-        path.moveTo(x + dx * size * 1.6f, z + dz * size * 1.6f);
-        path.lineTo(x - dx * size * 0.9f + lx * size * 0.9f, z - dz * size * 0.9f + lz * size * 0.9f);
-        path.lineTo(x - dx * size * 0.4f, z - dz * size * 0.4f);
-        path.lineTo(x - dx * size * 0.9f - lx * size * 0.9f, z - dz * size * 0.9f - lz * size * 0.9f);
-        path.close();
-        fill.setColor(MAP_DOT);
-        c.drawPath(path, fill);
-        stroke.setColor(CREAM);
-        stroke.setStrokeWidth(0.35f * u);
-        c.drawPath(path, stroke);
-    }
-
     // The map picture for the current area, built in the background.
     private final RectF mapRect = new RectF();
     private final Paint mapBackgroundPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -546,11 +863,22 @@ public final class BottomScreenView extends View {
         new android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override
             public boolean onScale(android.view.ScaleGestureDetector d) {
-                if (mapWhole) {
+                if (mapWhole || wholeBlend > 0f) {
+                    // From the whole area (or on the way there): carry on from the view as shown,
+                    // moved so the middle stays put.
+                    float[] here = GameState.position();
+                    followSpan = Math.min(mapRect.width(), mapRect.height()) / Math.max(1e-6f, viewS);
                     mapWhole = false;
-                    followSpan = 12000f;
+                    wholeBlend = 0f;
+                    if (here != null) {
+                        panX = viewCx - here[0];
+                        panZ = viewCz - here[2];
+                        panned = Math.abs(panX) + Math.abs(panZ) > 1f;
+                    }
+                    recentering = false;
                 }
                 followSpan = Math.max(1200f, Math.min(30000f, followSpan / d.getScaleFactor()));
+                shownSpan = followSpan;   // pinching follows the fingers at once
                 mapPinched = true;
                 invalidate();
                 return true;
@@ -589,45 +917,103 @@ public final class BottomScreenView extends View {
     }
 
     private void recenter() {
-        panX = panZ = 0f;
-        panned = false;
+        recentering = true;   // glides back (drawMap)
         Haptics.tap(this);
         invalidate();
     }
 
-    /** + and - at the top right; Recenter at the bottom right once the view is moved. */
+    /** + and - (honeycomb buttons) at the top right, a compass bottom left, Recenter bottom right once moved. */
     private void drawMapControls(Canvas c, RectF r) {
-        float b = 6.5f * u, gap = 1.2f * u;
-        zoomInRect.set(r.right - 1.5f * u - b, r.top + 1.5f * u, r.right - 1.5f * u, r.top + 1.5f * u + b);
-        zoomOutRect.set(zoomInRect.left, zoomInRect.bottom + gap, zoomInRect.right, zoomInRect.bottom + gap + b);
-        for (int i = 0; i < 2; i++) {
-            RectF k = i == 0 ? zoomInRect : zoomOutRect;
-            fill.setColor(Color.argb(190, 24, 18, 34));
-            c.drawRoundRect(k, 1.8f * u, 1.8f * u, fill);
-            stroke.setColor(Color.argb(200, 206, 162, 70));
-            stroke.setStrokeWidth(0.35f * u);
-            c.drawRoundRect(k, 1.8f * u, 1.8f * u, stroke);
-            stroke.setColor(CREAM);
-            stroke.setStrokeWidth(0.6f * u);
-            float arm = b * 0.26f;
-            c.drawLine(k.centerX() - arm, k.centerY(), k.centerX() + arm, k.centerY(), stroke);
-            if (i == 0) {
-                c.drawLine(k.centerX(), k.centerY() - arm, k.centerX(), k.centerY() + arm, stroke);
-            }
-        }
-        if (panned) {
+        float hr = 3.4f * u;
+        float bx = r.right - 1.8f * u - hr;
+        float y1 = r.top + 1.8f * u + hr, y2 = y1 + 2 * hr + 0.6f * u;
+        zoomInRect.set(bx - hr, y1 - hr, bx + hr, y1 + hr);
+        zoomOutRect.set(bx - hr, y2 - hr, bx + hr, y2 + hr);
+        hexButton(c, bx, y1, hr, true);
+        hexButton(c, bx, y2, hr, false);
+
+        // Compass (north is up on this map).
+        float cr = 3.6f * u, ccx = r.left + 1.8f * u + cr, ccy = r.bottom - 1.8f * u - cr;
+        fill.setColor(Color.rgb(92, 54, 22));
+        c.drawCircle(ccx, ccy, cr, fill);
+        stroke.setStrokeWidth(0.3f * u);
+        stroke.setColor(FRAME_DARK);
+        c.drawCircle(ccx, ccy, cr, stroke);
+        fill.setColor(Color.rgb(250, 232, 186));
+        c.drawCircle(ccx, ccy, cr * 0.82f, fill);
+        stroke.setStrokeWidth(0.2f * u);
+        stroke.setColor(TRIM);
+        c.drawCircle(ccx, ccy, cr * 0.82f, stroke);
+        path.reset();
+        path.moveTo(ccx, ccy - cr * 0.66f);
+        path.lineTo(ccx - cr * 0.18f, ccy);
+        path.lineTo(ccx + cr * 0.18f, ccy);
+        path.close();
+        fill.setColor(Color.rgb(214, 52, 40));
+        c.drawPath(path, fill);
+        path.reset();
+        path.moveTo(ccx, ccy + cr * 0.66f);
+        path.lineTo(ccx - cr * 0.18f, ccy);
+        path.lineTo(ccx + cr * 0.18f, ccy);
+        path.close();
+        fill.setColor(Color.rgb(90, 70, 50));
+        c.drawPath(path, fill);
+        fill.setColor(INK);
+        c.drawCircle(ccx, ccy, cr * 0.1f, fill);
+        text.setTypeface(titleFont);
+        text.setTextSize(2.2f * u);
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setColor(INK);
+        c.drawText("N", ccx, ccy - cr * 0.7f + 2.2f * u * 0.0f - 0.2f * u, text);
+        text.setTypeface(textFont());
+
+        if (panned || recentering) {
             text.setTextSize(2.8f * u);
             float tw = text.measureText("Recenter");
-            recenterRect.set(r.right - 1.5f * u - tw - 4 * u, r.bottom - 1.5f * u - 6 * u, r.right - 1.5f * u, r.bottom - 1.5f * u);
-            fill.setColor(Color.argb(210, 24, 18, 34));
-            c.drawRoundRect(recenterRect, 3 * u, 3 * u, fill);
-            stroke.setColor(Color.argb(220, 206, 162, 70));
-            stroke.setStrokeWidth(0.35f * u);
-            c.drawRoundRect(recenterRect, 3 * u, 3 * u, stroke);
-            text.setColor(CREAM);
-            drawCentered(c, "Recenter", recenterRect.centerX(), recenterRect.centerY());
+            float h2 = 5.6f * u;
+            recenterRect.set(r.right - 1.8f * u - tw - 7.5f * u, r.bottom - 1.8f * u - h2, r.right - 1.8f * u, r.bottom - 1.8f * u);
+            fill.setColor(Color.rgb(92, 54, 22));
+            c.drawRoundRect(recenterRect, h2 / 2, h2 / 2, fill);
+            stroke.setStrokeWidth(0.3f * u);
+            stroke.setColor(FRAME_DARK);
+            c.drawRoundRect(recenterRect, h2 / 2, h2 / 2, stroke);
+            RectF in = new RectF(recenterRect.left + 0.55f * u, recenterRect.top + 0.55f * u, recenterRect.right - 0.55f * u, recenterRect.bottom - 0.55f * u);
+            fill.setColor(HONEY_DEEP);
+            c.drawRoundRect(in, in.height() / 2, in.height() / 2, fill);
+            stroke.setStrokeWidth(0.2f * u);
+            stroke.setColor(HONEY_LIGHT);
+            c.drawRoundRect(in, in.height() / 2, in.height() / 2, stroke);
+            fill.setColor(INK);
+            c.drawPath(hexagon(in.left + 2.6f * u, in.centerY(), 1.0f * u, 30), fill);
+            text.setColor(INK);
+            text.setTextAlign(Paint.Align.LEFT);
+            c.drawText("Recenter", in.left + 4.4f * u, in.centerY() - (text.descent() + text.ascent()) / 2f, text);
+            text.setTextAlign(Paint.Align.CENTER);
         } else {
             recenterRect.setEmpty();
+        }
+    }
+
+    /** A honeycomb button with + or -. */
+    private void hexButton(Canvas c, float x, float y, float r, boolean plus) {
+        fill.setColor(Color.argb(120, 0, 0, 0));
+        c.drawPath(hexagon(x + 0.3f * u, y + 0.5f * u, r, 0), fill);
+        fill.setColor(Color.rgb(92, 54, 22));
+        c.drawPath(hexagon(x, y, r, 0), fill);
+        stroke.setStrokeWidth(0.3f * u);
+        stroke.setColor(FRAME_DARK);
+        c.drawPath(hexagon(x, y, r, 0), stroke);
+        fill.setColor(HONEY_DEEP);
+        c.drawPath(hexagon(x, y, r * 0.82f, 0), fill);
+        stroke.setStrokeWidth(0.2f * u);
+        stroke.setColor(HONEY_LIGHT);
+        c.drawPath(hexagon(x, y, r * 0.82f, 0), stroke);
+        stroke.setStrokeWidth(0.6f * u);
+        stroke.setColor(INK);
+        float arm = r * 0.34f;
+        c.drawLine(x - arm, y, x + arm, y, stroke);
+        if (plus) {
+            c.drawLine(x, y - arm, x, y + arm, stroke);
         }
     }
 
@@ -844,6 +1230,15 @@ public final class BottomScreenView extends View {
         int id = GameState.mapGeometryId();
         long now = SystemClock.uptimeMillis();
         if (id != mapGeometry) {
+            if (mapImage != null) {   // fade the area we're leaving out where it was
+                leavingMap = mapImage;
+                leavingCx = viewCx;
+                leavingCz = viewCz;
+                leavingS = viewS;
+                leavingAt = now;
+                shownBefore = false;  // the next area's map fades in from black
+                invalidate();
+            }
             mapGeometry = id;
             mapGeometryAt = now;
             mapRebuilt = false;
@@ -851,6 +1246,7 @@ public final class BottomScreenView extends View {
             detail = null;
             panX = panZ = 0f;
             panned = false;
+            recentering = false;
             wantedCap = GameState.WHOLE;
             mapCap = GameState.WHOLE;
             cacheTried = Integer.MIN_VALUE;
@@ -1624,6 +2020,7 @@ public final class BottomScreenView extends View {
                     if (!Float.isNaN(dragX) && (pointers >= 2 || panned) && viewS > 0) {
                         float dx = sx - dragX, dy = sy - dragY;
                         if (pointers >= 2 || dx * dx + dy * dy > 0) {
+                            recentering = false;
                             panX -= dx / viewS;
                             panZ -= dy / viewS;
                             if (Math.abs(panX) + Math.abs(panZ) > 1f) {
