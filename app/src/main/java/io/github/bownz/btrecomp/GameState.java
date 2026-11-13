@@ -26,6 +26,7 @@ final class GameState {
     private static native byte[] nativeWaterMask(int key);
     private static native int[] nativeBackdrop(int key, float[] info);
     private static native boolean nativeMapWantsSeed(int key, float x, float y, float z);
+    private static native int nativeAreaObjects(float[] out);
     private static native boolean nativeFloorAbove(float x, float y, float z);
     private static native String nativeAreaName();
     private static native int nativeN64Buttons();
@@ -294,6 +295,27 @@ final class GameState {
             return nativeMapWantsSeed(key, x, y, z);
         } catch (UnsatisfiedLinkError e) {
             return false;
+        }
+    }
+
+    // Kinds of things on the map (areaObjects), as the native side numbers them.
+    static final int OBJ_JIGGY = 1, OBJ_NOTES = 2, OBJ_CLEF = 3, OBJ_JINJO = 4, OBJ_GLOWBO = 5,
+        OBJ_HONEYCOMB = 6, OBJ_EGGS = 7, OBJ_FEATHERS = 8, OBJ_MUMBO_PAD = 9, OBJ_JAMJARS = 10;
+
+    private static final float[] objectBuffer = new float[4 * 512];
+
+    /**
+     * The current area's collectibles and landmarks from the game's list of what's placed in
+     * it: x, y, z, kind (OBJ_*) per thing. Things already collected are still listed.
+     */
+    static float[] areaObjects() {
+        try {
+            synchronized (objectBuffer) {
+                int n = nativeAreaObjects(objectBuffer);
+                return java.util.Arrays.copyOf(objectBuffer, Math.max(0, n) * 4);
+            }
+        } catch (UnsatisfiedLinkError e) {
+            return new float[0];
         }
     }
 

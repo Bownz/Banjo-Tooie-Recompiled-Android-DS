@@ -420,6 +420,8 @@ public final class BottomScreenView extends View {
 
             // Where you came in (each entrance used in this area this session; the latest brighter).
             float iconScale = 0.75f + 0.25f * (1 - bl);
+            // Collectibles and landmarks placed in the area (the game's own list).
+            drawObjects(c, r, cx, cz, viewScale, iconScale, bl);
             java.util.List<float[]> entries = entrances.get(GameState.area());
             if (entries != null) {
                 for (int i = 0; i < entries.size(); i++) {
@@ -1196,6 +1198,186 @@ public final class BottomScreenView extends View {
         mapPinched = true;   // the touch is used up
         Haptics.tap(this);
         invalidate();
+    }
+
+    // ---- Collectibles on the map ------------------------------------------------------
+
+    private float[] areaObjects = new float[0];
+    private int objectsArea = Integer.MIN_VALUE;
+    private long objectsAt;
+
+    /** The area's object list, read again every 2 s (cheap) and at once on a new area. */
+    private float[] currentObjects() {
+        int area = GameState.area();
+        long now = SystemClock.uptimeMillis();
+        if (area != objectsArea || now - objectsAt > 2000) {
+            objectsArea = area;
+            objectsAt = now;
+            areaObjects = area >= 0 ? GameState.areaObjects() : new float[0];
+        }
+        return areaObjects;
+    }
+
+    /**
+     * Jiggies, notes, Jinjos, Glowbos, honeycombs, pads and Jamjars as small icons (original
+     * shapes, nothing from the game's art). Refills only close up; on a lower storey only
+     * what's below the floor above.
+     */
+    private void drawObjects(Canvas c, RectF r, float cx, float cz, float viewScale, float iconScale, float whole) {
+        float[] o = currentObjects();
+        if (o.length == 0) return;
+        float s = (1.0f + 0.35f * (1 - whole)) * u;
+        for (int pass = 0; pass < 2; pass++) {   // small things first, collectibles on top
+            for (int i = 0; i + 3 < o.length; i += 4) {
+                int kind = (int) o[i + 3];
+                boolean minor = kind == GameState.OBJ_EGGS || kind == GameState.OBJ_FEATHERS || kind == GameState.OBJ_HONEYCOMB;
+                if ((pass == 0) != minor) continue;
+                if (minor && whole > 0.5f) continue;
+                if (mapCap < GameState.WHOLE && o[i + 1] > mapCap) continue;
+                float x = r.centerX() + (o[i] - cx) * viewScale, y = r.centerY() + (o[i + 2] - cz) * viewScale;
+                if (x < r.left - 4 * u || x > r.right + 4 * u || y < r.top - 4 * u || y > r.bottom + 4 * u) continue;
+                drawObject(c, kind, x, y, s);
+            }
+        }
+    }
+
+    private static final int OUTLINE = Color.rgb(40, 26, 12);
+
+    private void drawObject(Canvas c, int kind, float x, float y, float s) {
+        stroke.setColor(OUTLINE);
+        stroke.setStrokeWidth(0.28f * s);
+        switch (kind) {
+            case GameState.OBJ_JIGGY: {
+                // A plain jigsaw piece: a square with a knob on top and one on the right.
+                float h = 1.25f * s, k = 0.42f * s;
+                Path p = new Path();
+                p.addRect(x - h, y - h, x + h, y + h, Path.Direction.CW);
+                p.addCircle(x, y - h - k * 0.55f, k, Path.Direction.CW);
+                p.addCircle(x + h + k * 0.55f, y, k, Path.Direction.CW);
+                p.setFillType(Path.FillType.WINDING);
+                fill.setColor(Color.rgb(250, 196, 40));
+                c.drawPath(p, fill);
+                c.drawPath(simplify(p), stroke);
+                fill.setColor(Color.argb(150, 255, 248, 200));
+                c.drawCircle(x - 0.45f * h, y - 0.45f * h, 0.28f * h, fill);
+                break;
+            }
+            case GameState.OBJ_NOTES:
+            case GameState.OBJ_CLEF: {
+                // A music note (a beamed pair for the big one).
+                boolean big = kind == GameState.OBJ_CLEF;
+                float hs = (big ? 1.25f : 0.95f) * s;
+                fill.setColor(big ? Color.rgb(255, 214, 70) : Color.rgb(255, 180, 60));
+                float[] heads = big ? new float[] { x - 0.9f * hs, x + 0.9f * hs } : new float[] { x };
+                Path stems = new Path();
+                for (float hx : heads) {
+                    c.save();
+                    c.rotate(-20, hx, y + 0.6f * hs);
+                    RectF head = new RectF(hx - 0.75f * hs, y + 0.15f * hs, hx + 0.75f * hs, y + 1.05f * hs);
+                    c.drawOval(head, fill);
+                    c.drawOval(head, stroke);
+                    c.restore();
+                    stems.moveTo(hx + 0.62f * hs, y + 0.45f * hs);
+                    stems.lineTo(hx + 0.62f * hs, y - 1.6f * hs);
+                }
+                if (big) {
+                    stems.moveTo(heads[0] + 0.62f * hs, y - 1.6f * hs);
+                    stems.lineTo(heads[1] + 0.62f * hs, y - 1.6f * hs);
+                } else {
+                    stems.moveTo(x + 0.62f * hs, y - 1.6f * hs);
+                    stems.quadTo(x + 1.6f * hs, y - 1.0f * hs, x + 1.2f * hs, y - 0.3f * hs);
+                }
+                stroke.setStrokeWidth(0.62f * s);
+                c.drawPath(stems, stroke);
+                stroke.setColor(fill.getColor());
+                stroke.setStrokeWidth(0.3f * s);
+                c.drawPath(stems, stroke);
+                break;
+            }
+            case GameState.OBJ_JINJO: {
+                // A little round figure: head with two eyes.
+                float rr = 1.0f * s;
+                fill.setColor(Color.rgb(176, 96, 220));
+                c.drawCircle(x, y, rr, fill);
+                c.drawCircle(x, y, rr, stroke);
+                fill.setColor(Color.WHITE);
+                c.drawCircle(x - 0.38f * rr, y - 0.15f * rr, 0.26f * rr, fill);
+                c.drawCircle(x + 0.38f * rr, y - 0.15f * rr, 0.26f * rr, fill);
+                fill.setColor(OUTLINE);
+                c.drawCircle(x - 0.38f * rr, y - 0.12f * rr, 0.12f * rr, fill);
+                c.drawCircle(x + 0.38f * rr, y - 0.12f * rr, 0.12f * rr, fill);
+                break;
+            }
+            case GameState.OBJ_GLOWBO: {
+                // A glowing orb.
+                float rr = 0.9f * s;
+                fill.setColor(Color.argb(90, 220, 140, 255));
+                c.drawCircle(x, y, rr * 1.8f, fill);
+                fill.setColor(Color.rgb(200, 110, 255));
+                c.drawCircle(x, y, rr, fill);
+                c.drawCircle(x, y, rr, stroke);
+                fill.setColor(Color.argb(200, 255, 255, 255));
+                c.drawCircle(x - 0.3f * rr, y - 0.3f * rr, 0.3f * rr, fill);
+                break;
+            }
+            case GameState.OBJ_HONEYCOMB: {
+                fill.setColor(Color.rgb(242, 160, 40));
+                Path h = hexagon(x, y, 0.75f * s, 0f);
+                c.drawPath(h, fill);
+                c.drawPath(h, stroke);
+                break;
+            }
+            case GameState.OBJ_EGGS: {
+                fill.setColor(Color.rgb(90, 150, 240));
+                RectF e = new RectF(x - 0.5f * s, y - 0.7f * s, x + 0.5f * s, y + 0.7f * s);
+                c.drawOval(e, fill);
+                c.drawOval(e, stroke);
+                break;
+            }
+            case GameState.OBJ_FEATHERS: {
+                fill.setColor(Color.rgb(230, 70, 60));
+                Path f = new Path();
+                f.moveTo(x, y - 0.9f * s);
+                f.quadTo(x + 0.7f * s, y, x, y + 0.9f * s);
+                f.quadTo(x - 0.7f * s, y, x, y - 0.9f * s);
+                c.drawPath(f, fill);
+                c.drawPath(f, stroke);
+                break;
+            }
+            case GameState.OBJ_MUMBO_PAD: {
+                // A pad: purple ring with a star dot.
+                stroke.setColor(Color.rgb(150, 80, 200));
+                stroke.setStrokeWidth(0.45f * s);
+                c.drawCircle(x, y, 1.0f * s, stroke);
+                fill.setColor(Color.rgb(255, 230, 120));
+                c.drawCircle(x, y, 0.35f * s, fill);
+                break;
+            }
+            case GameState.OBJ_JAMJARS: {
+                // His silo: an olive-green diamond with a dot.
+                Path d = new Path();
+                d.moveTo(x, y - 1.1f * s);
+                d.lineTo(x + 1.1f * s, y);
+                d.lineTo(x, y + 1.1f * s);
+                d.lineTo(x - 1.1f * s, y);
+                d.close();
+                fill.setColor(Color.rgb(120, 140, 60));
+                c.drawPath(d, fill);
+                c.drawPath(d, stroke);
+                fill.setColor(Color.rgb(250, 230, 150));
+                c.drawCircle(x, y, 0.3f * s, fill);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    /** The outline of a shape made of several overlapping parts. */
+    private static Path simplify(Path p) {
+        Path out = new Path();
+        out.op(p, new Path(), Path.Op.UNION);
+        return out;
     }
 
     /** A marker pin with its point at (x, y). */

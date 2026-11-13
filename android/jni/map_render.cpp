@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -1548,6 +1549,60 @@ Java_io_github_bownz_btrecomp_GameState_nativeBuildMap(JNIEnv* env, jclass, jint
     env->SetIntArrayRegion(pixels, 0, jsize(out.size()), reinterpret_cast<const jint*>(out.data()));
     env->SetFloatArrayRegion(info, 0, 5, meta);
     return pixels;
+}
+
+#endif   // BT_MAP_TEST (the reader below is also used by the test harness)
+
+// The current area's collectibles and landmarks, from its object list (setup data; pointer at
+// 0x80132DB0, found 13 Nov in a live session, see bt-android-ram-probe.md): up to max entries
+// of x, y, z, kind into out (4 floats each). Returns how many. Kinds: 1 Jiggy, 2 note nest,
+// 3 treble clef, 4 Jinjo, 5 Glowbo, 6 honeycomb, 7 egg refill, 8 red feather refill,
+// 9 Mumbo pad, 10 Jamjars. The list doesn't change when something is collected: where the
+// game keeps that isn't found yet, so collected things still show.
+int bt_area_objects(const uint8_t* rdram, float* out, int max) {
+    const Ram ram{ rdram };
+    const uint32_t base = ram.u32(0x80132DB0u);
+    if (!ram.ok(base, 0x18)) return 0;
+    const int size = ram.u16(base), count = ram.u16(base + 2);
+    if (size != 0x14 || count <= 0 || count > 4000 || !ram.ok(base + 0x18, uint32_t(count) * size)) return 0;
+    int n = 0;
+    for (int k = 0; k < count && n < max; k++) {
+        const uint32_t a = base + 0x18 + uint32_t(k) * size;
+        const int x = ram.s16(a), y = ram.s16(a + 2), z = ram.s16(a + 4);
+        const uint16_t word = ram.u16(a + 6), id = ram.u16(a + 8), zero = ram.u16(a + 10), scale = ram.u16(a + 14);
+        if ((word & 0x7F) != 0x0C || zero != 0 || scale == 0 || scale > 1000) continue;
+        if (std::abs(x) > 20000 || std::abs(y) > 20000 || std::abs(z) > 20000) continue;
+        int kind = 0;
+        switch (id) {
+            case 0x01F6: kind = 1; break;
+            case 0x01D7: kind = 2; break;
+            case 0x01D8: kind = 3; break;
+            case 0x01F5: kind = 4; break;
+            case 0x01F8: kind = 5; break;
+            case 0x0229: kind = 6; break;
+            case 0x01E9: kind = 7; break;
+            case 0x01CE: kind = 8; break;
+            case 0x02B0: kind = 9; break;
+            case 0x0309: case 0x030B: kind = 10; break;
+            default: break;
+        }
+        if (kind == 0) continue;
+        out[4 * n] = float(x); out[4 * n + 1] = float(y); out[4 * n + 2] = float(z); out[4 * n + 3] = float(kind);
+        n++;
+    }
+    return n;
+}
+
+#ifndef BT_MAP_TEST
+extern "C" JNIEXPORT jint JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeAreaObjects(JNIEnv* env, jclass, jfloatArray out) {
+    uint8_t* rdram = bt_android_running_rdram();
+    if (rdram == nullptr || out == nullptr) return 0;
+    const jsize len = env->GetArrayLength(out);
+    std::vector<float> buf(size_t(len));
+    const int n = bt_area_objects(rdram, buf.data(), int(len / 4));
+    if (n > 0) env->SetFloatArrayRegion(out, 0, n * 4, buf.data());
+    return n;
 }
 
 // See bt_map_wants_seed.
