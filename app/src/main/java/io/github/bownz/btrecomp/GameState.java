@@ -25,6 +25,7 @@ final class GameState {
     private static native int[] nativeBuildDetail(int key, float x0, float z0, float x1, float z1, int maxSize, float[] info);
     private static native byte[] nativeWaterMask(int key);
     private static native int[] nativeBackdrop(int key, float[] info);
+    private static native boolean nativeMapWantsSeed(int key, float x, float y, float z);
     private static native boolean nativeFloorAbove(float x, float y, float z);
     private static native String nativeAreaName();
     private static native int nativeN64Buttons();
@@ -280,6 +281,19 @@ final class GameState {
             return nativeMapGeometryId();
         } catch (UnsatisfiedLinkError e) {
             return 0;
+        }
+    }
+
+    /**
+     * Whether Banjo stands on ground the map built with this key left out (ground well above
+     * the area's main level). The point is remembered for the area: build the map again and
+     * that ground joins the play area.
+     */
+    static boolean mapWantsSeed(int key, float x, float y, float z) {
+        try {
+            return nativeMapWantsSeed(key, x, y, z);
+        } catch (UnsatisfiedLinkError e) {
+            return false;
         }
     }
 

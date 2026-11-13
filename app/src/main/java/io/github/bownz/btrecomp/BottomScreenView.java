@@ -1236,6 +1236,8 @@ public final class BottomScreenView extends View {
      * Builds a new area's map (and once more 1.5 s later, in case the area was still loading),
      * and a lower storey's when Banjo is under another floor (checked twice a second).
      */
+    private long seedCheckedAt;
+
     private void refreshMap() {
         int id = GameState.mapGeometryId();
         long now = SystemClock.uptimeMillis();
@@ -1285,6 +1287,16 @@ public final class BottomScreenView extends View {
         }
         if (mapBuilding) {
             return;
+        }
+        // Standing on ground the map left out (a high tier above the area's main level): build
+        // again with it included. Checked once a second.
+        if (mapImage != null && wantedCap == GameState.WHOLE && now - seedCheckedAt > 1000) {
+            seedCheckedAt = now;
+            float[] p = GameState.position();
+            if (p != null && !paused && !cutscene && GameState.mapWantsSeed(mapImage.key, p[0], p[1], p[2])) {
+                buildMap(id, wantedCap);
+                return;
+            }
         }
         if (wantedCap != mapCap) {
             if (area >= 0) {

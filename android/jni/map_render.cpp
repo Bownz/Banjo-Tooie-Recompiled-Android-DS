@@ -54,6 +54,7 @@ namespace {
         uint16_t u16(uint32_t a) const { return static_cast<uint16_t>((u8(a) << 8) | u8(a + 1)); }
         int16_t s16(uint32_t a) const { return static_cast<int16_t>(u16(a)); }
         uint32_t u32(uint32_t a) const { return *reinterpret_cast<const uint32_t*>(rdram + (a - 0x80000000u)); }
+        float f32(uint32_t a) const { const uint32_t v = u32(a); float f; std::memcpy(&f, &v, 4); return f; }
     };
 
     struct Rgba { float r, g, b, a; };
@@ -696,9 +697,16 @@ namespace {
         std::vector<int32_t> backdrop;   // the glow behind the map (bt_backdrop)
         int bdW = 0, bdH = 0;
         float bdMinX = 0, bdMinZ = 0, bdScale = 1;
+        std::vector<int16_t> groundY;    // walkable ground height per pixel; kNoGround where none
+        uint16_t mapId = 0;
     };
+    constexpr int16_t kNoGround = INT16_MIN;
     MapCache g_cache;
     std::mutex g_cacheMutex;
+    // Places Banjo has stood on that the play area rule left out (ground well above the main
+    // level: the top tier of Mayahem Temple). Per map id, for this run of the app; each map
+    // built adds the ground around them back (see bt_map_wants_seed).
+    std::map<uint16_t, std::vector<std::array<float, 3>>> g_seeds;
 }
 
 bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t key, std::vector<int32_t>& out, float meta[5]) {
@@ -1056,6 +1064,39 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
         for (size_t i = 0; i < N; i++)
             if (main[i] && sizes[size_t(label[i])] < biggest / 25) main[i] = 0;
     }
+    // Ground Banjo stands on (now, or earlier in this area) is always part of the area: from
+    // each such point, the walkable ground joined to it by gentle steps joins the play area.
+    {
+        const uint16_t mapId = ram.u16(0x80132DC2u);
+        std::vector<std::array<float, 3>> seeds;
+        {
+            std::lock_guard lock{ g_cacheMutex };
+            auto it = g_seeds.find(mapId);
+            if (it != g_seeds.end()) seeds = it->second;
+        }
+        seeds.push_back({ ram.f32(0x80136F50u), ram.f32(0x80136F54u), ram.f32(0x80136F58u) });
+        const float tol = std::max(60.0f, 2.5f / scale);
+        std::vector<int> stack;
+        for (const auto& p : seeds) {
+            const int x0 = int((p[0] - minX) * scale), z0 = int((p[2] - minZ) * scale);
+            if (x0 < 0 || z0 < 0 || x0 >= W || z0 >= H) continue;
+            const size_t s0 = size_t(z0) * W + x0;
+            if (main[s0] || water[s0] || !walk[s0] || std::fabs(ground[s0] - p[1]) > 150.0f) continue;
+            main[s0] = 1;
+            stack.assign(1, int(s0));
+            while (!stack.empty()) {
+                const int i = stack.back();
+                stack.pop_back();
+                const int x = i % W, z = i / W;
+                const int next[4][2] = { { x - 1, z }, { x + 1, z }, { x, z - 1 }, { x, z + 1 } };
+                for (const auto& n : next) {
+                    if (n[0] < 0 || n[1] < 0 || n[0] >= W || n[1] >= H) continue;
+                    const size_t j = size_t(n[1]) * W + n[0];
+                    if (!main[j] && walk[j] && !water[j] && std::fabs(ground[j] - ground[i]) < tol) { main[j] = 1; stack.push_back(int(j)); }
+                }
+            }
+        }
+    }
     const std::vector<uint8_t> inner = morph(main, W, H, px, false);
     const std::vector<uint8_t> waterInner = morph(water, W, H, px, false);
     // Raised scenery standing in the play area (Spiral Mountain's lair roof, above the play
@@ -1315,9 +1356,32 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
         g_cache.W = W; g_cache.H = H; g_cache.minX = minX; g_cache.minZ = minZ; g_cache.scale = scale;
         g_cache.kind = std::move(kind); g_cache.edge = std::move(edgeOut); g_cache.light = std::move(lightOut);
         g_cache.alpha = std::move(alphaOut); g_cache.colourK = std::move(kOut);
+        g_cache.groundY.assign(N, kNoGround);
+        for (size_t i = 0; i < N; i++)
+            if (walk[i] && ground[i] > -30000.0f && ground[i] < 30000.0f) g_cache.groundY[i] = int16_t(std::lround(ground[i]));
+        g_cache.mapId = ram.u16(0x80132DC2u);
     }
 
     meta[0] = float(W); meta[1] = float(H); meta[2] = minX; meta[3] = minZ; meta[4] = scale;
+    return true;
+}
+
+// Whether Banjo, at (x, y, z), stands on walkable ground the last map (with this key) left out
+// of the play area. If so the point is remembered for this area and true is returned: the
+// caller builds the map again, and the ground he's on joins the area.
+bool bt_map_wants_seed(uint32_t key, float x, float y, float z) {
+    std::lock_guard lock{ g_cacheMutex };
+    const MapCache& c = g_cache;
+    if (!c.valid || c.key != key || c.groundY.empty()) return false;
+    const int px = int((x - c.minX) * c.scale), pz = int((z - c.minZ) * c.scale);
+    if (px < 0 || pz < 0 || px >= c.W || pz >= c.H) return false;
+    const size_t i = size_t(pz) * c.W + px;
+    if (c.kind[i] == kMain || c.kind[i] == kWater || c.kind[i] == kSolid) return false;
+    if (c.groundY[i] == kNoGround || std::fabs(float(c.groundY[i]) - y) > 60.0f) return false;   // on it, not jumping over it
+    auto& seeds = g_seeds[c.mapId];
+    for (const auto& p : seeds)
+        if (std::fabs(p[0] - x) < 300.0f && std::fabs(p[2] - z) < 300.0f && std::fabs(p[1] - y) < 150.0f) return false;
+    seeds.push_back({ x, y, z });
     return true;
 }
 
@@ -1484,6 +1548,12 @@ Java_io_github_bownz_btrecomp_GameState_nativeBuildMap(JNIEnv* env, jclass, jint
     env->SetIntArrayRegion(pixels, 0, jsize(out.size()), reinterpret_cast<const jint*>(out.data()));
     env->SetFloatArrayRegion(info, 0, 5, meta);
     return pixels;
+}
+
+// See bt_map_wants_seed.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeMapWantsSeed(JNIEnv*, jclass, jint key, jfloat x, jfloat y, jfloat z) {
+    return bt_map_wants_seed(uint32_t(key), x, y, z) ? JNI_TRUE : JNI_FALSE;
 }
 
 // A sharper close-up tile of the last map built with this key (see bt_build_detail).
