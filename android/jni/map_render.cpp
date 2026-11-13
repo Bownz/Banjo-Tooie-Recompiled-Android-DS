@@ -766,16 +766,11 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
         }
     }
 
-    // A floor layer (Banjo under another floor): leave out everything entirely above capY.
-    if (capY < 1e8f) {
-        tris.erase(std::remove_if(tris.begin(), tris.end(), [&](const Tri& t) {
-            return std::min({ t.v[0].y, t.v[1].y, t.v[2].y }) > capY;
-        }), tris.end());
-        floors.erase(std::remove_if(floors.begin(), floors.end(), [&](const Floor& f) {
-            return std::min({ f.p[0][1], f.p[1][1], f.p[2][1] }) > capY;
-        }), floors.end());
-        if (floors.empty()) return false;
-    }
+    // A floor layer (Banjo under another floor, capY < 1e8): handled per pixel below, where
+    // the floors are rastered. 0.9.12 left out everything above capY across the whole area, so
+    // in Spiral Mountain a small nook under the mountain's slope took the lake island's top,
+    // the ruined lair and the high ledges with it (a hole in the middle of the map, 13 Nov).
+    const bool layer = capY < 1e8f;
     // The second (see-through) model: only its water is drawn: bluish textures at about the
     // ground's height. In Spiral Mountain that's the moat, river and pool; Jinjo Village's is
     // grey mist/scenery from far below the island to far above it (not drawn).
@@ -813,6 +808,7 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
 
     // 2. Walkable ground: the highest collision floor per pixel.
     std::vector<float> ground(N, -1e9f), lowest(N, 1e9f);   // highest and lowest floor per pixel
+    std::vector<float> groundLow(layer ? N : 0, -1e9f);     // a floor layer: highest floor <= capY
     for (const Floor& f : floors) {
         float X[3], Z[3];
         for (int k = 0; k < 3; k++) { X[k] = (f.p[k][0] - minX) * scale; Z[k] = (f.p[k][2] - minZ) * scale; }
@@ -820,7 +816,30 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
             const float y = l0 * f.p[0][1] + l1 * f.p[1][1] + l2 * f.p[2][1];
             if (y > ground[i]) ground[i] = y;
             if (y < lowest[i]) lowest[i] = y;
+            if (layer && y <= capY && y > groundLow[i]) groundLow[i] = y;
         });
+    }
+    // A floor layer: only where a floor at or below capY lies under something well above it
+    // (the floor or roof over Banjo) is the map drawn at that floor; everywhere else it's the
+    // whole-area map.
+    std::vector<float> layerLimit;
+    if (layer) {
+        layerLimit.assign(N, 1e9f);
+        size_t n = 0;
+        for (size_t i = 0; i < N; i++)
+            if (groundLow[i] > -1e8f && !water[i] && (ground[i] - groundLow[i] > 300.0f || (drawn[i] && top[i] - groundLow[i] > 300.0f))) {
+                ground[i] = groundLow[i];
+                layerLimit[i] = capY;
+                n++;
+            }
+        if (n == 0) return false;
+        std::vector<float> R2(N, 0), G2(N, 0), B2(N, 0), top2(N, -1e9f);
+        std::vector<uint8_t> drawn2(N, 0), water2(N, 0);
+        rasterTop(tris, minX, minZ, scale, W, H, R2, G2, B2, top2, drawn2, water2, &layerLimit);
+        for (size_t i = 0; i < N; i++)
+            if (layerLimit[i] < 1e8f) {
+                R[i] = R2[i]; G[i] = G2[i]; B[i] = B2[i]; top[i] = top2[i]; water[i] = water2[i]; drawn[i] = drawn2[i];
+            }
     }
     std::vector<uint8_t> walk(N);
     for (size_t i = 0; i < N; i++) walk[i] = ground[i] > -1e8f;
@@ -905,6 +924,9 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
     // with nothing walkable on top (a tunnel through a hill, a path under a rock arch: the
     // passage under Jinjo Village), draw what's at the floor's level instead of the roof.
     std::vector<int16_t> roofCap(N, kNoGround);
+    if (layer)
+        for (size_t i = 0; i < N; i++)
+            if (layerLimit[i] < 1e8f) roofCap[i] = int16_t(std::clamp(layerLimit[i], -32000.0f, 32000.0f));
     {
         std::vector<float> limit(N, 1e9f);
         size_t roofed = 0;
@@ -1755,6 +1777,8 @@ int bt_area_objects(const uint8_t* rdram, float* out, int max) {
             case 0x04A6: kind = 8; break;   // feather nest switching between red and gold
             case 0x02B0: kind = 9; break;
             case 0x0309: case 0x030B: kind = 10; break;
+            case 0x0234: kind = 11; break;   // flight pad (Spiral Mountain's island top, 13 Nov)
+            case 0x0210: kind = 12; break;   // shock jump pad (Spiral Mountain, 13 Nov)
             default: break;
         }
         if (kind == 0) continue;

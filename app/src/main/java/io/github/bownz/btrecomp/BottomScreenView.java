@@ -1207,6 +1207,14 @@ public final class BottomScreenView extends View {
     private long objectsAt;
 
     /** The area's object list, read again every 2 s (cheap) and at once on a new area. */
+    /** Within 1500 units of Banjo across the ground. */
+    private static boolean nearBanjo(float x, float z) {
+        float[] p = GameState.position();
+        if (p == null) return false;
+        float dx = x - p[0], dz = z - p[2];
+        return dx * dx + dz * dz < 1500f * 1500f;
+    }
+
     private float[] currentObjects() {
         int area = GameState.area();
         long now = SystemClock.uptimeMillis();
@@ -1233,7 +1241,9 @@ public final class BottomScreenView extends View {
                 boolean minor = kind == GameState.OBJ_EGGS || kind == GameState.OBJ_FEATHERS || kind == GameState.OBJ_HONEYCOMB;
                 if ((pass == 0) != minor) continue;
                 if (minor && whole > 0.5f) continue;
-                if (mapCap < GameState.WHOLE && o[i + 1] > mapCap) continue;
+                // A lower floor's map still shows the rest of the area (0.9.15), so things up
+                // there stay; only those right over Banjo's floor are left out.
+                if (mapCap < GameState.WHOLE && o[i + 1] > mapCap && nearBanjo(o[i], o[i + 2])) continue;
                 float x = r.centerX() + (o[i] - cx) * viewScale, y = r.centerY() + (o[i + 2] - cz) * viewScale;
                 if (x < r.left - 4 * u || x > r.right + 4 * u || y < r.top - 4 * u || y > r.bottom + 4 * u) continue;
                 drawObject(c, kind, x, y, s);
@@ -1351,6 +1361,37 @@ public final class BottomScreenView extends View {
                 c.drawCircle(x, y, 1.0f * s, stroke);
                 fill.setColor(Color.rgb(255, 230, 120));
                 c.drawCircle(x, y, 0.35f * s, fill);
+                break;
+            }
+            case GameState.OBJ_FLIGHT_PAD: {
+                // A flight pad: red ring with a gold feather across it.
+                stroke.setColor(Color.rgb(200, 50, 40));
+                stroke.setStrokeWidth(0.4f * s);
+                c.drawCircle(x, y, 1.0f * s, stroke);
+                Path q = new Path();
+                q.moveTo(x - 0.6f * s, y + 0.6f * s);
+                q.quadTo(x - 0.5f * s, y - 0.4f * s, x + 0.6f * s, y - 0.6f * s);
+                q.quadTo(x + 0.5f * s, y + 0.4f * s, x - 0.6f * s, y + 0.6f * s);
+                q.close();
+                fill.setColor(Color.rgb(250, 200, 60));
+                c.drawPath(q, fill);
+                stroke.setColor(OUTLINE);
+                stroke.setStrokeWidth(0.18f * s);
+                c.drawPath(q, stroke);
+                break;
+            }
+            case GameState.OBJ_JUMP_PAD: {
+                // A shock jump pad: green disc with an up chevron.
+                fill.setColor(Color.rgb(90, 170, 60));
+                c.drawCircle(x, y, 1.0f * s, fill);
+                c.drawCircle(x, y, 1.0f * s, stroke);
+                Path v = new Path();
+                v.moveTo(x - 0.5f * s, y + 0.3f * s);
+                v.lineTo(x, y - 0.35f * s);
+                v.lineTo(x + 0.5f * s, y + 0.3f * s);
+                stroke.setColor(Color.rgb(255, 245, 200));
+                stroke.setStrokeWidth(0.25f * s);
+                c.drawPath(v, stroke);
                 break;
             }
             case GameState.OBJ_JAMJARS: {
