@@ -1268,6 +1268,7 @@ public final class BottomScreenView extends View {
             case GameState.OBJ_JINJO: return 0x0BD0;
             case GameState.OBJ_GLOWBO: return 0x0BBB;
             case GameState.OBJ_HONEYCOMB: return 0x0B4D;
+            case GameState.OBJ_EMPTY_HONEYCOMB: return 0x0BEA;
             case GameState.OBJ_EGGS: return 0x0B81;
             case GameState.OBJ_FEATHERS: case GameState.OBJ_FLIGHT_PAD: return 0x0B4A;
             case GameState.OBJ_GOLD_FEATHERS: return 0x0B4B;
@@ -1307,6 +1308,7 @@ public final class BottomScreenView extends View {
             if (drawSprite(c, kind, x, y, size)) return;
         }
         if (kind == GameState.OBJ_GOLD_FEATHERS) kind = GameState.OBJ_FEATHERS;
+        if (kind == GameState.OBJ_EMPTY_HONEYCOMB) kind = GameState.OBJ_HONEYCOMB;
         stroke.setColor(OUTLINE);
         stroke.setStrokeWidth(0.28f * s);
         switch (kind) {
