@@ -1494,14 +1494,31 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
         g_cache.kind = std::move(kind); g_cache.edge = std::move(edgeOut); g_cache.light = std::move(lightOut);
         g_cache.alpha = std::move(alphaOut); g_cache.colourK = std::move(kOut);
         g_cache.groundY.assign(N, kNoGround);
-        for (size_t i = 0; i < N; i++)
-            if (walk[i] && ground[i] > -30000.0f && ground[i] < 30000.0f) g_cache.groundY[i] = int16_t(std::lround(ground[i]));
+        for (size_t i = 0; i < N; i++) {
+            const float g = lower[i] ? lowest[i] : ground[i];   // the level the map shows there
+            if (walk[i] && g > -30000.0f && g < 30000.0f) g_cache.groundY[i] = int16_t(std::lround(g));
+        }
         g_cache.mapId = ram.u16(0x80132DC2u);
         g_cache.roofCap = std::move(roofCap);
     }
 
     meta[0] = float(W); meta[1] = float(H); meta[2] = minX; meta[3] = minZ; meta[4] = scale;
     return true;
+}
+
+// Whether the last map (with this key) shows, where Banjo is, a level well above him: he's
+// under it (at the foot of a cliff under its overhang, in a passage under a hill) and the map
+// should switch to the level he's on. Catches what bt_floor_above's 7-of-9 test misses at the
+// edge of what's above (user, 13 Nov: by Bottles' house under the cliff of Jiggywiggy's temple).
+bool bt_map_shows_level_above(uint32_t key, float x, float y, float z) {
+    std::lock_guard lock{ g_cacheMutex };
+    const MapCache& c = g_cache;
+    if (!c.valid || c.key != key || c.groundY.empty()) return false;
+    const int px = int((x - c.minX) * c.scale), pz = int((z - c.minZ) * c.scale);
+    if (px < 0 || pz < 0 || px >= c.W || pz >= c.H) return false;
+    const size_t i = size_t(pz) * c.W + px;
+    if (c.kind[i] != kMain && c.kind[i] != kSolid) return false;
+    return c.groundY[i] != kNoGround && float(c.groundY[i]) - y > 300.0f;
 }
 
 // Whether Banjo, at (x, y, z), stands on walkable ground the last map (with this key) left out
@@ -1757,6 +1774,12 @@ Java_io_github_bownz_btrecomp_GameState_nativeAreaObjects(JNIEnv* env, jclass, j
     const int n = bt_area_objects(rdram, buf.data(), int(len / 4));
     if (n > 0) env->SetFloatArrayRegion(out, 0, n * 4, buf.data());
     return n;
+}
+
+// See bt_map_shows_level_above.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeMapShowsLevelAbove(JNIEnv*, jclass, jint key, jfloat x, jfloat y, jfloat z) {
+    return bt_map_shows_level_above(uint32_t(key), x, y, z) ? JNI_TRUE : JNI_FALSE;
 }
 
 // See bt_map_wants_seed.

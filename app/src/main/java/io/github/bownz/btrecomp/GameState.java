@@ -28,6 +28,7 @@ final class GameState {
     private static native int[] nativeBackdrop(int key, float[] info);
     private static native boolean nativeMapWantsSeed(int key, float x, float y, float z);
     private static native int nativeAreaObjects(float[] out);
+    private static native boolean nativeMapShowsLevelAbove(int key, float x, float y, float z);
     private static native boolean nativeFloorAbove(float x, float y, float z);
     private static native String nativeAreaName();
     private static native int nativeN64Buttons();
@@ -324,6 +325,15 @@ final class GameState {
     static boolean onMenu() {
         try {
             return nativeOnMenu();
+        } catch (UnsatisfiedLinkError e) {
+            return false;
+        }
+    }
+
+    /** Whether the map built with this key shows, at Banjo's spot, a level well above him. */
+    static boolean mapShowsLevelAbove(int key, float x, float y, float z) {
+        try {
+            return nativeMapShowsLevelAbove(key, x, y, z);
         } catch (UnsatisfiedLinkError e) {
             return false;
         }

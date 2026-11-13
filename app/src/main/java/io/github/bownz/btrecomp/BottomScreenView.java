@@ -1419,6 +1419,7 @@ public final class BottomScreenView extends View {
      * and a lower storey's when Banjo is under another floor (checked twice a second).
      */
     private long seedCheckedAt, seedBuiltAt;
+    private float[] belowAt;   // where the map last switched to a lower level because it showed one above
 
     private boolean onMenu;
 
@@ -1446,6 +1447,7 @@ public final class BottomScreenView extends View {
             recentering = false;
             wantedCap = GameState.WHOLE;
             mapCap = GameState.WHOLE;
+            belowAt = null;
             cacheTried = Integer.MIN_VALUE;
             if (id != 0) {
                 buildMap(id, wantedCap);
@@ -1466,6 +1468,19 @@ public final class BottomScreenView extends View {
             float[] p = GameState.position();
             if (p != null) {
                 boolean under = GameState.floorAbove(p[0], p[1], p[2]);
+                // Or the whole-area map shows a level well above him right where he is (checked
+                // against the last build, which is the whole area while it's shown). Once that
+                // switched to the lower level, stay there while he keeps near that spot and height.
+                if (!under && mapCap == GameState.WHOLE && mapImage != null && mapImage.key >= 0 && !paused && !cutscene
+                        && GameState.mapShowsLevelAbove(mapImage.key, p[0], p[1], p[2])) {
+                    under = true;
+                    belowAt = new float[] { p[0], p[1], p[2] };
+                }
+                if (!under && belowAt != null && mapCap != GameState.WHOLE) {
+                    float dx = p[0] - belowAt[0], dz = p[2] - belowAt[2];
+                    under = dx * dx + dz * dz < 1500f * 1500f && Math.abs(p[1] - belowAt[1]) < 300f;
+                }
+                if (!under) belowAt = null;
                 // Round the cap so small height changes on one storey don't redraw the map.
                 wantedCap = under ? (float) (Math.ceil((p[1] + 250f) / 500f) * 500f) : GameState.WHOLE;
             }
