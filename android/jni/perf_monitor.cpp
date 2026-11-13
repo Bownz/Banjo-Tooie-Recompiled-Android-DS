@@ -4,6 +4,10 @@
 // code, the renderer's CPU work, the GPU, or the device clocking down.
 //
 // Reads only /proc/self and /sys; it wakes once every 5 seconds and costs nothing in between.
+//
+// Live debug log (setting "Live Debug Log", 0.9.2): also a "BTLive" line every second with
+// frames shown and game frames per second, CPU total, clocks, memory, battery temperature and
+// the game's state, for following a session in real time with adb logcat (bt-live.bat).
 
 #include <android/log.h>
 #include <dirent.h>
@@ -21,9 +25,14 @@
 #include <thread>
 #include <vector>
 
+extern "C" uint32_t rt64_android_presented_frames();
+extern "C" bool bt_android_live_state(char* buf, size_t size, uint32_t* frames);
+
 namespace {
     constexpr const char* log_tag = "BTRecomp";
+    constexpr const char* live_tag = "BTLive";
     std::atomic<bool> started{false};
+    std::atomic<bool> live{false};
 
     struct ThreadTimes {
         std::string name;
@@ -89,13 +98,72 @@ namespace {
         return v;
     }
 
+    long read_rss_mb() {
+        std::ifstream f("/proc/self/status");
+        std::string key;
+        while (f >> key) {
+            if (key == "VmRSS:") {
+                long kb = 0;
+                f >> kb;
+                return kb / 1024;
+            }
+            std::string rest;
+            std::getline(f, rest);
+        }
+        return -1;
+    }
+
+    long long total_ticks(const std::map<int, ThreadTimes>& threads) {
+        long long t = 0;
+        for (const auto& [tid, th] : threads) t += th.ticks;
+        return t;
+    }
+
     void run() {
         const long ticks_per_second = sysconf(_SC_CLK_TCK);
         const long cpus = sysconf(_SC_NPROCESSORS_CONF);
         auto before = read_threads();
         auto last = std::chrono::steady_clock::now();
+        // Per-second live line state.
+        auto liveLast = std::chrono::steady_clock::now();
+        uint32_t presentedBefore = rt64_android_presented_frames();
+        uint32_t gameBefore = 0;
+        bool gameKnown = false;
+        long long ticksBefore = total_ticks(before);
         while (true) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+            // Every second while the live log is on, every 5 seconds otherwise.
+            for (int i = 0; i < 5; i++) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                if (!live.load()) {
+                    continue;
+                }
+                const auto t = std::chrono::steady_clock::now();
+                const double dt = std::chrono::duration<double>(t - liveLast).count();
+                liveLast = t;
+                const uint32_t presented = rt64_android_presented_frames();
+                const double fps = (presented - presentedBefore) / dt;
+                presentedBefore = presented;
+                char state[160] = "game not running";
+                uint32_t game = 0;
+                double gameFps = -1;
+                if (bt_android_live_state(state, sizeof(state), &game)) {
+                    if (gameKnown) gameFps = (game - gameBefore) / dt;
+                    gameBefore = game;
+                    gameKnown = true;
+                }
+                const long long ticks = total_ticks(read_threads());
+                const double cpu = 100.0 * (ticks - ticksBefore) / ticks_per_second / dt;
+                ticksBefore = ticks;
+                const long gpu = read_long("/sys/class/kgsl/kgsl-3d0/gpuclk");
+                const long gpuBusy = read_long("/sys/class/kgsl/kgsl-3d0/devfreq/gpu_load");
+                const long battery = read_long("/sys/class/power_supply/battery/temp");
+                long topCpu = -1;
+                for (long c = 0; c < cpus; c++) topCpu = std::max(topCpu, read_long("/sys/devices/system/cpu/cpu" + std::to_string(c) + "/cpufreq/scaling_cur_freq"));
+                __android_log_print(ANDROID_LOG_INFO, live_tag,
+                    "fps %.1f | game %.1f/s | CPU %.0f%% (top core %ld MHz) | GPU %ld MHz %ld%% busy | RAM %ld MB | battery %.1f C | %s",
+                    fps, gameFps, cpu, topCpu > 0 ? topCpu / 1000 : -1, gpu > 0 ? gpu / 1000000 : -1, gpuBusy, read_rss_mb(),
+                    battery > 0 ? battery / 10.0 : -1.0, state);
+            }
             const auto now = std::chrono::steady_clock::now();
             const double seconds = std::chrono::duration<double>(now - last).count();
             last = now;
@@ -168,4 +236,12 @@ extern "C" void bt_android_start_perf_monitor() {
         pthread_setname_np(pthread_self(), "Perf monitor");
         run();
     }).detach();
+}
+
+// The "Live Debug Log" setting (src/android_config.cpp).
+extern "C" void bt_android_set_live_log(int on) {
+    const bool was = live.exchange(on != 0);
+    if (was != (on != 0)) {
+        __android_log_print(ANDROID_LOG_INFO, live_tag, "Live debug log %s", on ? "on" : "off");
+    }
 }

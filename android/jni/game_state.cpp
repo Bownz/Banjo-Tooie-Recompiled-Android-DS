@@ -538,3 +538,22 @@ Java_io_github_bownz_btrecomp_GameState_nativeProbeMark(JNIEnv* env, jclass, jst
 }
 
 } // extern "C"
+
+// One line of the game's state for the live debug log (perf_monitor.cpp): game frame counter,
+// game mode, map id, Banjo's position, pause. False before the game runs.
+extern "C" bool bt_android_live_state(char* buf, size_t size, uint32_t* frames) {
+    uint8_t* rdram = running_rdram();
+    if (rdram == nullptr || size == 0) {
+        return false;
+    }
+    *frames = read_u32(rdram, kGameFrameCount);
+    bool paused = true;
+    for (uint32_t flag : kPauseFlags) {
+        if (read_u8(rdram, flag) != 1) paused = false;
+    }
+    snprintf(buf, size, "mode 0x%X map 0x%X pos %.0f,%.0f,%.0f%s",
+        read_u32(rdram, kGameMode), read_u16(rdram, kMapId),
+        read_f32(rdram, kPlayerPosition), read_f32(rdram, kPlayerPosition + 4), read_f32(rdram, kPlayerPosition + 8),
+        paused ? " paused" : "");
+    return true;
+}

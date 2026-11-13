@@ -38,6 +38,7 @@ extern "C" void bt_android_edit_touch_layout();                  // android/jni/
 extern "C" void bt_android_set_bottom_screen(int enabled);        // android/jni/touch_controller.cpp
 extern "C" void rt64_android_set_ram_copy_mode(int mode);  // rt64-android.patch
 extern "C" void rt64_android_set_auto_framerate(int enabled);  // rt64-android.patch
+extern "C" void bt_android_set_live_log(int on);              // android/jni/perf_monitor.cpp
 
 
 namespace {
@@ -58,6 +59,11 @@ namespace {
         std::printf("Frame Copy: %s\n", mode == 1u ? "Wait" : mode == 2u ? "Off" : "Late");
         std::fflush(stdout);
     }
+    // Video > Live Debug Log: a once-a-second status line for adb logcat (perf_monitor.cpp).
+    void apply_live_log(uint32_t mode) {
+        bt_android_set_live_log(mode == 1u ? 1 : 0);
+    }
+
     // Video > 60 FPS Mode: Auto drops to a steady 30 while the device can't keep 60.
     void apply_auto_framerate(uint32_t mode) {
         rt64_android_set_auto_framerate(mode == 0u ? 1 : 0);
@@ -490,6 +496,24 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
                 apply_auto_framerate(std::get<uint32_t>(cur));
             });
+        static EnumOptionVector live_options = {
+            {0u, "Off", "Off"},
+            {1u, "On", "On"},
+        };
+        graphics_config.add_enum_option(
+            "android_live_log",
+            "Live Debug Log",
+            "For testing: once a second, writes the frame rate, CPU and GPU load, clocks, memory, "
+            "temperature and where you are in the game to the Android log (tag BTLive), so a computer "
+            "connected with adb can follow it live (bt-live.bat). Costs almost nothing; leave it off "
+            "when you're not testing.",
+            live_options,
+            0u
+        );
+        graphics_config.add_option_change_callback("android_live_log",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+                apply_live_log(std::get<uint32_t>(cur));
+            });
     }
 
     auto& touch_config = recompui::config::create_config_tab("Touch", touch_config_id, false);
@@ -590,6 +614,12 @@ void bt::android::after_config_loaded() {
         const recomp::config::ConfigValueVariant mode = recompui::config::get_graphics_config().get_option_value("android_auto_framerate");
         if (const uint32_t* value = std::get_if<uint32_t>(&mode)) {
             apply_auto_framerate(*value);
+        }
+    }
+    {
+        const recomp::config::ConfigValueVariant mode = recompui::config::get_graphics_config().get_option_value("android_live_log");
+        if (const uint32_t* value = std::get_if<uint32_t>(&mode)) {
+            apply_live_log(*value);
         }
     }
     // Once: set-ups made before B backed out of menus get Back (Menu) on B.
