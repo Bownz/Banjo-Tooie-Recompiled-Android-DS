@@ -19,6 +19,7 @@ final class GameState {
     private static native int nativeBottomSettings();
     private static native int nativePlayer(float[] out);
     private static native boolean nativePaused();
+    private static native boolean nativeCutscene();
     private static native boolean nativeEntryPoint(float[] out);
     private static native int[] nativeBuildMap(int maxSize, float capY, int key, float[] info);
     private static native int[] nativeBuildDetail(int key, float x0, float z0, float x1, float z1, int maxSize, float[] info);
@@ -82,7 +83,7 @@ final class GameState {
     /** Index into {@link #WORLDS}, or UNKNOWN. */
     static int world() { return UNKNOWN; }
 
-    /** Whether the game is paused. Provisional: verified against pausing, not yet cutscenes. */
+    /** Whether the game is paused (instant; stays off in dialogue and cutscenes). */
     static boolean paused() {
         try {
             return nativePaused();
@@ -282,7 +283,14 @@ final class GameState {
         }
     }
 
-    static boolean cutscene() { return false; }
+    /** Whether a cutscene is playing (the player has no control; see game_state.cpp). */
+    static boolean cutscene() {
+        try {
+            return nativeCutscene();
+        } catch (UnsatisfiedLinkError e) {
+            return false;
+        }
+    }
 
     /** A collectible's count in a world (or the total for world -1), or UNKNOWN. */
     static int count(int item, int world) { return UNKNOWN; }

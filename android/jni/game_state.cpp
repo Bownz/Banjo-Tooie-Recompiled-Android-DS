@@ -107,6 +107,15 @@ namespace {
         return read_u8(rdram, 0x80135A11u) == 1 && read_u8(rdram, 0x80132DCBu) == 0;
     }
 
+    // Cutscene: the u32 at 0x80135A80 holds a pointer (0x8013....) all through play, pausing
+    // included, and is 0 during cutscenes (live session, 13 Nov: 0 in two cutscenes, Jiggywiggy
+    // showing his temple and the next one; set in all 22 other marks across Spiral Mountain,
+    // Isle o' Hags and the pause screen). Probably "who has control"; maybe 0 while loading too.
+    constexpr uint32_t kControlPointer = 0x80135A80u;
+    bool is_cutscene(const uint8_t* rdram) {
+        return read_u32(rdram, kControlPointer) == 0 && read_u32(rdram, kGameMode) == 1;
+    }
+
     // ---- TEMPORARY probe ----------------------------------------------------------------
 
     constexpr const char* kProbeTag = "BTProbe";
@@ -493,6 +502,13 @@ Java_io_github_bownz_btrecomp_GameState_nativeEntryPoint(JNIEnv* env, jclass, jf
     return JNI_TRUE;
 }
 
+// Whether a cutscene is playing (see is_cutscene).
+JNIEXPORT jboolean JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeCutscene(JNIEnv*, jclass) {
+    uint8_t* rdram = running_rdram();
+    return rdram != nullptr && is_cutscene(rdram) ? JNI_TRUE : JNI_FALSE;
+}
+
 // Whether the game is paused (see is_paused).
 JNIEXPORT jboolean JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativePaused(JNIEnv*, jclass) {
@@ -550,9 +566,9 @@ extern "C" bool bt_android_live_state(char* buf, size_t size, uint32_t* frames) 
     }
     *frames = read_u32(rdram, kGameFrameCount);
     const bool paused = is_paused(rdram);
-    snprintf(buf, size, "mode 0x%X map 0x%X pos %.0f,%.0f,%.0f%s",
+    snprintf(buf, size, "mode 0x%X map 0x%X pos %.0f,%.0f,%.0f cam %.0f%s%s",
         read_u32(rdram, kGameMode), read_u16(rdram, kMapId),
         read_f32(rdram, kPlayerPosition), read_f32(rdram, kPlayerPosition + 4), read_f32(rdram, kPlayerPosition + 8),
-        paused ? " paused" : "");
+        read_f32(rdram, 0x8012CEACu), paused ? " paused" : "", is_cutscene(rdram) ? " cutscene" : "");
     return true;
 }

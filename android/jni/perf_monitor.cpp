@@ -147,7 +147,8 @@ namespace {
                 uint32_t game = 0;
                 double gameFps = -1;
                 if (bt_android_live_state(state, sizeof(state), &game)) {
-                    if (gameKnown) gameFps = (game - gameBefore) / dt;
+                    // The counter restarts on some area changes: skip that second.
+                    if (gameKnown && game >= gameBefore) gameFps = (game - gameBefore) / dt;
                     gameBefore = game;
                     gameKnown = true;
                 }
