@@ -1446,27 +1446,85 @@ public final class BottomScreenView extends View {
     private long nameAreaSince;
     private String nameBefore;
 
+    // The name is learnt when the game writes a new one within 8 s of entering an area. Guards
+    // (0.9.1): Jinjo Village was labelled Spiral Mountain and Spiral Mountain had no label. The
+    // game writes the name a moment before the area id changes: loading a save from the title
+    // screen (whose demo runs in Jinjo Village) wrote "SPIRAL MOUNTAIN" while the id still said
+    // Jinjo Village, so it was learnt for the wrong area, and Spiral Mountain then saw no change.
+    // Now a new name waits 1.5 s: if the area changes meanwhile, it belongs to the new area. A
+    // name already known for another area is never taken, the compared name is the last valid
+    // one seen, and names learnt before 0.9.1 were dropped (new preferences file).
+    private String lastValidName;
+    private String pendingName;
+    private long pendingAt;
+
+    private static final String AREA_NAMES = "area_names2";
+
+    /** Areas whose names are known from the snapshots, until the game shows its own. */
+    private static String builtInName(int area) {
+        switch (area) {
+            case 0xAF: return "SPIRAL MOUNTAIN";
+            case 0x142: return "ISLE O' HAGS ( JINJO VILLAGE )";
+            default: return null;
+        }
+    }
+
     private void refreshAreaName() {
         int area = GameState.area();
         long now = SystemClock.uptimeMillis();
-        android.content.SharedPreferences names = getContext().getSharedPreferences("area_names", android.content.Context.MODE_PRIVATE);
+        android.content.SharedPreferences names = getContext().getSharedPreferences(AREA_NAMES, android.content.Context.MODE_PRIVATE);
+        String current = GameState.areaName();
         if (area != nameArea) {
             nameArea = area;
             nameAreaSince = now;
-            nameBefore = GameState.areaName();
-            String known = area >= 0 ? names.getString(Integer.toString(area), null) : null;
+            String known = area >= 0 ? names.getString(Integer.toString(area), builtInName(area)) : null;
             setAreaName(known);
+            // A name written just before the change is this area's.
+            String fresh = pendingName != null && now - pendingAt < 1500 ? pendingName : null;
+            pendingName = null;
+            if (current != null) lastValidName = current;
+            nameBefore = lastValidName;
+            if (fresh != null && area >= 0) learnName(names, area, fresh);
             return;
         }
-        if (area < 0 || now - nameAreaSince > 8000) {
+        if (current != null && !current.equals(lastValidName)) {
+            pendingName = current;   // a new name: whose it is is decided in 1.5 s
+            pendingAt = now;
+        }
+        if (current != null) {
+            lastValidName = current;
+        }
+        if (pendingName != null && now - pendingAt >= 1500) {
+            String name = pendingName;
+            pendingName = null;
+            if (area >= 0 && now - nameAreaSince <= 9500 && !name.equals(nameBefore)) {
+                learnName(names, area, name);
+            }
+        }
+    }
+
+    private void learnName(android.content.SharedPreferences names, int area, String name) {
+        if (namedElsewhere(names, area, name)) {
             return;
         }
-        String seen = GameState.areaName();
-        if (seen != null && !seen.equals(nameBefore)) {
-            names.edit().putString(Integer.toString(area), seen).apply();
-            setAreaName(seen);
-            nameBefore = seen;
+        names.edit().putString(Integer.toString(area), name).apply();
+        setAreaName(name);
+        nameBefore = name;
+    }
+
+    /** Whether this name already belongs to a different area (learnt, or built in). */
+    private static boolean namedElsewhere(android.content.SharedPreferences names, int area, String name) {
+        for (java.util.Map.Entry<String, ?> e : names.getAll().entrySet()) {
+            if (name.equals(e.getValue()) && !e.getKey().equals(Integer.toString(area))) {
+                return true;
+            }
         }
+        for (int other : new int[] { 0xAF, 0x142 }) {
+            if (other != area && name.equals(builtInName(other))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** "ISLE O' HAGS ( JINJO VILLAGE )" -> label "Jinjo Village", world Isle o' Hags. */
