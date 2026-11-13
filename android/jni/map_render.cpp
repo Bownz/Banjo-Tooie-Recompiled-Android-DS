@@ -537,7 +537,7 @@ namespace {
     // light; the highest surface wins; see-through texels over the same surface blend in.
     void rasterTop(const std::vector<Tri>& tris, float minX, float minZ, float scale, int W, int H,
                    std::vector<float>& R, std::vector<float>& G, std::vector<float>& B, std::vector<float>& top,
-                   std::vector<uint8_t>& drawn, std::vector<uint8_t>& water) {
+                   std::vector<uint8_t>& drawn, std::vector<uint8_t>& water, const std::vector<float>* limit = nullptr) {
         constexpr float lx = -0.47f, ly = 0.71f, lz = -0.52f;
         for (const Tri& t : tris) {
             float X[3], Z[3];
@@ -557,7 +557,7 @@ namespace {
             const float light = 0.86f + 0.18f * std::max(0.0f, (nx * lx + ny * ly + nz * lz) / len);
             raster(X, Z, W, H, [&](int i, float l0, float l1, float l2) {
                 const float y = l0 * t.v[0].y + l1 * t.v[1].y + l2 * t.v[2].y;
-                if (y < top[i]) return;
+                if (y < top[i] || (limit != nullptr && y > (*limit)[i])) return;
                 float r = 200, g = 200, b = 200, alpha = 1.0f;
                 if (t.tex != nullptr) {
                     const float s = l0 * t.v[0].s + l1 * t.v[1].s + l2 * t.v[2].s;
@@ -703,6 +703,7 @@ namespace {
         int bdW = 0, bdH = 0;
         float bdMinX = 0, bdMinZ = 0, bdScale = 1;
         std::vector<int16_t> groundY;    // walkable ground height per pixel; kNoGround where none
+        std::vector<int16_t> roofCap;    // under a roof: draw nothing above this; kNoGround elsewhere
         uint16_t mapId = 0;
     };
     constexpr int16_t kNoGround = INT16_MIN;
@@ -898,6 +899,29 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
             }
         ground.swap(next);
         if (!any) break;
+    }
+    // Ground under a roof: where the surface seen from above is far above the walkable floor
+    // with nothing walkable on top (a tunnel through a hill, a path under a rock arch: the
+    // passage under Jinjo Village), draw what's at the floor's level instead of the roof.
+    std::vector<int16_t> roofCap(N, kNoGround);
+    {
+        std::vector<float> limit(N, 1e9f);
+        size_t roofed = 0;
+        for (size_t i = 0; i < N; i++)
+            if (walk[i] && !water[i] && ground[i] > -1e8f && top[i] - ground[i] > 600.0f) {
+                limit[i] = ground[i] + 250.0f;
+                roofCap[i] = int16_t(std::clamp(limit[i], -32000.0f, 32000.0f));
+                roofed++;
+            }
+        if (roofed > 0) {
+            std::vector<float> R2(N, 0), G2(N, 0), B2(N, 0), top2(N, -1e9f);
+            std::vector<uint8_t> drawn2(N, 0), water2(N, 0);
+            rasterTop(tris, minX, minZ, scale, W, H, R2, G2, B2, top2, drawn2, water2, &limit);
+            for (size_t i = 0; i < N; i++)
+                if (limit[i] < 1e8f && drawn2[i]) {
+                    R[i] = R2[i]; G[i] = G2[i]; B[i] = B2[i]; top[i] = top2[i]; water[i] = water2[i];
+                }
+        }
     }
     std::vector<float> heights;
     for (size_t i = 0; i < N; i += 7) if (walk[i] && ground[i] > -1e8f) heights.push_back(ground[i]);
@@ -1415,6 +1439,7 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
         for (size_t i = 0; i < N; i++)
             if (walk[i] && ground[i] > -30000.0f && ground[i] < 30000.0f) g_cache.groundY[i] = int16_t(std::lround(ground[i]));
         g_cache.mapId = ram.u16(0x80132DC2u);
+        g_cache.roofCap = std::move(roofCap);
     }
 
     meta[0] = float(W); meta[1] = float(H); meta[2] = minX; meta[3] = minZ; meta[4] = scale;
@@ -1458,7 +1483,21 @@ bool bt_build_detail(uint32_t key, float x0, float z0, float x1, float z1, int m
     const size_t N = size_t(W) * H;
     std::vector<float> R(N, 0), G(N, 0), B(N, 0), top(N, -1e9f);
     std::vector<uint8_t> drawn(N, 0), water(N, 0);
-    rasterTop(c.tris, x0, z0, scale, W, H, R, G, B, top, drawn, water);
+    // Under a roof (see the whole-area build): the same cap, from the nearest base pixel.
+    std::vector<float> limit;
+    if (!c.roofCap.empty()) {
+        bool any = false;
+        limit.assign(N, 1e9f);
+        for (int z = 0; z < H; z++)
+            for (int x = 0; x < W; x++) {
+                const float wx = x0 + (x + 0.5f) / scale, wz = z0 + (z + 0.5f) / scale;
+                const int bx = std::clamp(int((wx - c.minX) * c.scale), 0, c.W - 1), bz = std::clamp(int((wz - c.minZ) * c.scale), 0, c.H - 1);
+                const int16_t cap = c.roofCap[size_t(bz) * c.W + bx];
+                if (cap != kNoGround) { limit[size_t(z) * W + x] = float(cap); any = true; }
+            }
+        if (!any) limit.clear();
+    }
+    rasterTop(c.tris, x0, z0, scale, W, H, R, G, B, top, drawn, water, limit.empty() ? nullptr : &limit);
 
     // Bilinear sample of a cached per-pixel byte array at world (x, z).
     auto sample = [&](const std::vector<uint8_t>& a, float fx, float fz) {

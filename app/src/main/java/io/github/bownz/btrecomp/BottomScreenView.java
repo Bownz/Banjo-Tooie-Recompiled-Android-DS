@@ -1418,7 +1418,7 @@ public final class BottomScreenView extends View {
      * Builds a new area's map (and once more 1.5 s later, in case the area was still loading),
      * and a lower storey's when Banjo is under another floor (checked twice a second).
      */
-    private long seedCheckedAt;
+    private long seedCheckedAt, seedBuiltAt;
 
     private boolean onMenu;
 
@@ -1475,10 +1475,14 @@ public final class BottomScreenView extends View {
         }
         // Standing on ground the map left out (a high tier above the area's main level): build
         // again with it included. Checked once a second.
-        if (mapImage != null && wantedCap == GameState.WHOLE && now - seedCheckedAt > 1000) {
+        // At most one such rebuild every 15 s: a build costs a second or two of a core, and
+        // walking up a long slope the map had left out asked for one every second (0.9.9: a big
+        // slowdown on Isle o' Hags' west side, 13 Nov).
+        if (mapImage != null && wantedCap == GameState.WHOLE && now - seedCheckedAt > 1000 && now - seedBuiltAt > 15000) {
             seedCheckedAt = now;
             float[] p = GameState.position();
             if (p != null && !paused && !cutscene && GameState.mapWantsSeed(mapImage.key, p[0], p[1], p[2])) {
+                seedBuiltAt = now;
                 buildMap(id, wantedCap);
                 return;
             }
@@ -1530,7 +1534,7 @@ public final class BottomScreenView extends View {
     // ---- Explored areas ----------------------------------------------------------------
     // Each area's map (and storey) is kept: the last few in memory, all of them as PNG files in
     // the app's cache, by the game's map id. Bump MAP_CACHE_VERSION when the map's look changes.
-    private static final String MAP_CACHE_VERSION = "v11";
+    private static final String MAP_CACHE_VERSION = "v12";
     private int cacheTried = Integer.MIN_VALUE;
     private final java.util.LinkedHashMap<String, GameState.MapImage> mapMemory =
         new java.util.LinkedHashMap<String, GameState.MapImage>(8, 0.75f, true) {
