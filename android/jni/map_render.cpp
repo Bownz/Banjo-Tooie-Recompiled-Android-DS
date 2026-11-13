@@ -812,13 +812,14 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
     rasterTop(tris, minX, minZ, scale, W, H, R, G, B, top, drawn, water);
 
     // 2. Walkable ground: the highest collision floor per pixel.
-    std::vector<float> ground(N, -1e9f);
+    std::vector<float> ground(N, -1e9f), lowest(N, 1e9f);   // highest and lowest floor per pixel
     for (const Floor& f : floors) {
         float X[3], Z[3];
         for (int k = 0; k < 3; k++) { X[k] = (f.p[k][0] - minX) * scale; Z[k] = (f.p[k][2] - minZ) * scale; }
         raster(X, Z, W, H, [&](int i, float l0, float l1, float l2) {
             const float y = l0 * f.p[0][1] + l1 * f.p[1][1] + l2 * f.p[2][1];
             if (y > ground[i]) ground[i] = y;
+            if (y < lowest[i]) lowest[i] = y;
         });
     }
     std::vector<uint8_t> walk(N);
@@ -1342,6 +1343,58 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
         bdR[j] += r; bdG[j] += g; bdB[j] += b; bdA[j] += 1.0f;
     };
 
+    // Lower levels under the gaps: where the map shows nothing (ground left out, or not drawn)
+    // but there's a walkable floor well below what's on top (a path or cave under a hill or a
+    // ledge), that floor is drawn instead, darker (user, 13 Nov). Pieces under 0.2% of the area
+    // are left out (specks under scenery).
+    std::vector<uint8_t> lower(N, 0);
+    std::vector<float> lR, lG, lB;
+    {
+        size_t mainCount = 0;
+        for (size_t i = 0; i < N; i++) mainCount += main[i];
+        std::vector<uint8_t> cand(N, 0);
+        for (size_t i = 0; i < N; i++)
+            cand[i] = !main[i] && !water[i] && !solid[i] && lowest[i] < 1e8f && lowest[i] <= ceiling &&
+                      (!drawn[i] || top[i] - lowest[i] > 300.0f) && (ground[i] - lowest[i] > 300.0f || !drawn[i]);
+        std::vector<int> part, stack;
+        std::vector<uint8_t> seen(N, 0);
+        for (size_t start = 0; start < N; start++) {
+            if (!cand[start] || seen[start]) continue;
+            part.clear();
+            stack.assign(1, int(start));
+            seen[start] = 1;
+            while (!stack.empty()) {
+                const int i = stack.back();
+                stack.pop_back();
+                part.push_back(i);
+                const int x = i % W, z = i / W;
+                const int next[4][2] = { { x - 1, z }, { x + 1, z }, { x, z - 1 }, { x, z + 1 } };
+                for (const auto& n : next) {
+                    if (n[0] < 0 || n[1] < 0 || n[0] >= W || n[1] >= H) continue;
+                    const size_t j = size_t(n[1]) * W + n[0];
+                    if (cand[j] && !seen[j]) { seen[j] = 1; stack.push_back(int(j)); }
+                }
+            }
+            if (part.size() * 500 >= mainCount)
+                for (int i : part) lower[i] = 1;
+        }
+        std::vector<float> limit(N, 1e9f);
+        bool any = false;
+        for (size_t i = 0; i < N; i++)
+            if (lower[i]) { limit[i] = lowest[i] + 250.0f; any = true; }
+        if (any) {
+            lR.assign(N, 0); lG.assign(N, 0); lB.assign(N, 0);
+            std::vector<float> lTop(N, -1e9f);
+            std::vector<uint8_t> lDrawn(N, 0), lWater(N, 0);
+            rasterTop(tris, minX, minZ, scale, W, H, lR, lG, lB, lTop, lDrawn, lWater, &limit);
+            for (size_t i = 0; i < N; i++) {
+                if (!lower[i]) continue;
+                if (!lDrawn[i]) { lower[i] = 0; continue; }
+                roofCap[i] = int16_t(std::clamp(limit[i], -32000.0f, 32000.0f));   // close-up tiles too
+            }
+        }
+    }
+
     // 4. Compose (and keep what a detail tile needs).
     out.assign(N, 0);
     std::vector<uint8_t> kind(N, kNone), edgeOut(N, 0), lightOut(N, 0), alphaOut(N, 0), kOut(N, 0);
@@ -1350,6 +1403,11 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
         if (water[i]) {
             kind[i] = kWater;
             waterColour(sR[i], sG[i], sB[i], !waterInner[i], r, g, b);
+        } else if (lower[i]) {
+            // A lower level under a gap: like the play area, darker, no outline.
+            kind[i] = kMain;
+            light = 0.62f;
+            groundColour(lR[i], lG[i], lB[i], light, false, r, g, b);
         } else if (main[i] || solid[i]) {
             kind[i] = main[i] ? kMain : kSolid;
             const float k = std::clamp((ground[i] - lo) / std::max(1.0f, hi - lo), 0.0f, 1.0f);
@@ -1367,7 +1425,7 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
             fade[i] = 0;
         }
         // Over the shadow (black): a = content alpha, s = shadow alpha.
-        const bool inside = water[i] || main[i] || solid[i];
+        const bool inside = water[i] || main[i] || solid[i] || lower[i];
         if (inside || kind[i] == kBeyond) {
             gather(i, r, g, b);
         } else if (drawn[i] || walk[i]) {
