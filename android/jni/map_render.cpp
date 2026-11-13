@@ -1098,6 +1098,56 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
             }
         }
     }
+    // Raised ground inside the area is part of it: walkable pieces left out by the height limit
+    // that don't reach the area's outside (nothing drawn, reachable from the map's border) are
+    // enclosed by it, like Mayahem Temple's central temple and the ground around it (checked
+    // against a printed guide map, 13 Nov: the middle of the area came out black). Pieces at
+    // the edge (hedge and tree tops, outer hills) touch the outside and stay out.
+    {
+        std::vector<uint8_t> outside(N, 0);
+        std::vector<int> stack;
+        auto open = [&](int x, int z) {
+            const size_t j = size_t(z) * W + x;
+            if (!drawn[j] && !walk[j] && !water[j] && !outside[j]) { outside[j] = 1; stack.push_back(int(j)); }
+        };
+        for (int x = 0; x < W; x++) { open(x, 0); open(x, H - 1); }
+        for (int z = 0; z < H; z++) { open(0, z); open(W - 1, z); }
+        while (!stack.empty()) {
+            const int i = stack.back();
+            stack.pop_back();
+            const int x = i % W, z = i / W;
+            if (x > 0) open(x - 1, z);
+            if (x + 1 < W) open(x + 1, z);
+            if (z > 0) open(x, z - 1);
+            if (z + 1 < H) open(x, z + 1);
+        }
+        size_t mainCount = 0;
+        for (size_t i = 0; i < N; i++) mainCount += main[i];
+        const float tol = std::max(60.0f, 2.5f / scale);
+        std::vector<int> part, seen(N, 0);
+        for (size_t start = 0; start < N; start++) {
+            if (main[start] || !walk[start] || water[start] || seen[start]) continue;
+            part.clear();
+            bool touches = false;
+            stack.assign(1, int(start));
+            seen[start] = 1;
+            while (!stack.empty()) {
+                const int i = stack.back();
+                stack.pop_back();
+                part.push_back(i);
+                const int x = i % W, z = i / W;
+                const int next[4][2] = { { x - 1, z }, { x + 1, z }, { x, z - 1 }, { x, z + 1 } };
+                for (const auto& n : next) {
+                    if (n[0] < 0 || n[1] < 0 || n[0] >= W || n[1] >= H) { touches = true; continue; }
+                    const size_t j = size_t(n[1]) * W + n[0];
+                    if (outside[j]) touches = true;
+                    if (!main[j] && walk[j] && !water[j] && !seen[j] && std::fabs(ground[j] - ground[i]) < tol) { seen[j] = 1; stack.push_back(int(j)); }
+                }
+            }
+            if (!touches && part.size() * 200 >= mainCount)   // at least 0.5% of the area
+                for (int i : part) main[i] = 1;
+        }
+    }
     const std::vector<uint8_t> inner = morph(main, W, H, px, false);
     const std::vector<uint8_t> waterInner = morph(water, W, H, px, false);
     // Raised scenery standing in the play area (Spiral Mountain's lair roof, above the play
