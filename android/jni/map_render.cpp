@@ -1757,6 +1757,8 @@ int bt_area_objects(const uint8_t* rdram, float* out, int max) {
     if (!ram.ok(base, 0x18)) return 0;
     const int size = ram.u16(base), count = ram.u16(base + 2);
     if (size != 0x14 || count <= 0 || count > 4000 || !ram.ok(base + 0x18, uint32_t(count) * size)) return 0;
+    uint32_t flags = ram.u32(0x8012C770u);
+    if (!ram.ok(flags, 0xC0)) flags = 0;
     int n = 0;
     for (int k = 0; k < count && n < max; k++) {
         const uint32_t a = base + 0x18 + uint32_t(k) * size;
@@ -1785,6 +1787,25 @@ int bt_area_objects(const uint8_t* rdram, float* out, int max) {
             default: break;
         }
         if (kind == 0) continue;
+        // Already collected: the game's progress flags (a bit array; pointer at 0x8012C770,
+        // the same bits the save file keeps). Jiggies, Jinjos, Glowbos and empty honeycombs carry
+        // their number in the field after the zero (number << 7); each kind's bits run on from a
+        // base. Found 13 Nov from live marks: Jiggy 9 -> bit 560, Jinjo 5 -> 464, Glowbo 1 ->
+        // 535, empty honeycomb 1 -> 506 (ranges: Jinjos 460-504, honeycombs 506-530, Glowbos
+        // 535-551, Jiggies 552-641). Note nests take bits in the order they're collected, so
+        // they can't be matched to a nest this way.
+        if (flags != 0) {
+            const int number = (ram.u16(a + 12) >> 7) & 0x1FF;
+            int base = -1;
+            if (id == 0x01F6) base = 551;
+            else if (id == 0x01F5) base = 459;
+            else if (id == 0x01F8) base = 534;
+            else if (id == 0x01F7) base = 505;
+            if (base >= 0 && number > 0) {
+                const int bit = base + number;
+                if ((ram.u8(flags + uint32_t(bit >> 3)) >> (bit & 7)) & 1) continue;
+            }
+        }
         out[4 * n] = float(x); out[4 * n + 1] = float(y); out[4 * n + 2] = float(z); out[4 * n + 3] = float(kind);
         n++;
     }
