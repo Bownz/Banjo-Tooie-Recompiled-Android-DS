@@ -1238,7 +1238,8 @@ public final class BottomScreenView extends View {
         for (int pass = 0; pass < 2; pass++) {   // small things first, collectibles on top
             for (int i = 0; i + 3 < o.length; i += 4) {
                 int kind = (int) o[i + 3];
-                boolean minor = kind == GameState.OBJ_EGGS || kind == GameState.OBJ_FEATHERS || kind == GameState.OBJ_HONEYCOMB;
+                boolean minor = kind == GameState.OBJ_EGGS || kind == GameState.OBJ_FEATHERS || kind == GameState.OBJ_GOLD_FEATHERS
+                        || kind == GameState.OBJ_HONEYCOMB;
                 if ((pass == 0) != minor) continue;
                 if (minor && whole > 0.5f) continue;
                 // A lower floor's map still shows the rest of the area (0.9.15), so things up
@@ -1253,7 +1254,59 @@ public final class BottomScreenView extends View {
 
     private static final int OUTLINE = Color.rgb(40, 26, 12);
 
+    private final Paint spritePaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
+    private final RectF spriteRect = new RectF();
+
+    /**
+     * The game's own picture for a kind of thing (asset index in the ROM's table), or -1.
+     * Read from the player's ROM on the device (GameState.sprite); nothing is stored in the app.
+     */
+    private static int spriteFor(int kind) {
+        switch (kind) {
+            case GameState.OBJ_JIGGY: return 0x0BE6;
+            case GameState.OBJ_NOTES: case GameState.OBJ_CLEF: return 0x0BE9;
+            case GameState.OBJ_JINJO: return 0x0BD0;
+            case GameState.OBJ_GLOWBO: return 0x0BBB;
+            case GameState.OBJ_HONEYCOMB: return 0x0B4D;
+            case GameState.OBJ_EGGS: return 0x0B81;
+            case GameState.OBJ_FEATHERS: case GameState.OBJ_FLIGHT_PAD: return 0x0B4A;
+            case GameState.OBJ_GOLD_FEATHERS: return 0x0B4B;
+            case GameState.OBJ_MUMBO_PAD: return 0x0B9D;
+            case GameState.OBJ_JAMJARS: return 0x0BF7;
+            default: return -1;
+        }
+    }
+
+    /** Draws the game's sprite for this kind, `size` across; false if there isn't one. */
+    private boolean drawSprite(Canvas c, int kind, float x, float y, float size) {
+        int index = spriteFor(kind);
+        if (index < 0) return false;
+        android.graphics.Bitmap b = GameState.sprite(index);
+        if (b == null) return false;
+        float h = size / 2;
+        spriteRect.set(x - h, y - h, x + h, y + h);
+        c.drawBitmap(b, null, spriteRect, spritePaint);
+        return true;
+    }
+
     private void drawObject(Canvas c, int kind, float x, float y, float s) {
+        if (kind == GameState.OBJ_FLIGHT_PAD) {   // the pad's red ring, the feather in it
+            stroke.setColor(Color.rgb(200, 50, 40));
+            stroke.setStrokeWidth(0.4f * s);
+            c.drawCircle(x, y, 1.2f * s, stroke);
+            if (drawSprite(c, kind, x, y, 2.2f * s)) return;
+        } else if (kind == GameState.OBJ_MUMBO_PAD) {   // the pad's purple ring, Mumbo in it
+            stroke.setColor(Color.rgb(150, 80, 200));
+            stroke.setStrokeWidth(0.4f * s);
+            c.drawCircle(x, y, 1.4f * s, stroke);
+            if (drawSprite(c, kind, x, y, 2.6f * s)) return;
+        } else {
+            boolean minor = kind == GameState.OBJ_EGGS || kind == GameState.OBJ_FEATHERS
+                    || kind == GameState.OBJ_GOLD_FEATHERS || kind == GameState.OBJ_HONEYCOMB;
+            float size = kind == GameState.OBJ_CLEF ? 4.0f * s : minor ? 2.4f * s : 3.0f * s;
+            if (drawSprite(c, kind, x, y, size)) return;
+        }
+        if (kind == GameState.OBJ_GOLD_FEATHERS) kind = GameState.OBJ_FEATHERS;
         stroke.setColor(OUTLINE);
         stroke.setStrokeWidth(0.28f * s);
         switch (kind) {

@@ -302,7 +302,32 @@ final class GameState {
 
     // Kinds of things on the map (areaObjects), as the native side numbers them.
     static final int OBJ_JIGGY = 1, OBJ_NOTES = 2, OBJ_CLEF = 3, OBJ_JINJO = 4, OBJ_GLOWBO = 5,
-        OBJ_HONEYCOMB = 6, OBJ_EGGS = 7, OBJ_FEATHERS = 8, OBJ_MUMBO_PAD = 9, OBJ_JAMJARS = 10, OBJ_FLIGHT_PAD = 11, OBJ_JUMP_PAD = 12;
+        OBJ_HONEYCOMB = 6, OBJ_EGGS = 7, OBJ_FEATHERS = 8, OBJ_MUMBO_PAD = 9, OBJ_JAMJARS = 10, OBJ_FLIGHT_PAD = 11, OBJ_JUMP_PAD = 12, OBJ_GOLD_FEATHERS = 13;
+
+    private static native int[] nativeSprite(int index, int frame);
+
+    private static final java.util.HashMap<Integer, android.graphics.Bitmap> sprites = new java.util.HashMap<>();
+
+    /**
+     * One of the game's own sprites (the HUD's icons), decoded from the player's ROM on the
+     * device; null if it can't be read. Cached: the ROM doesn't change while the app runs.
+     */
+    static android.graphics.Bitmap sprite(int index) {
+        synchronized (sprites) {
+            if (sprites.containsKey(index)) return sprites.get(index);
+            android.graphics.Bitmap b = null;
+            try {
+                int[] d = nativeSprite(index, 0);
+                if (d != null && d.length > 2 && d[0] > 0 && d[1] > 0 && d.length == 2 + d[0] * d[1]) {
+                    b = android.graphics.Bitmap.createBitmap(d, 2, d[0], d[0], d[1], android.graphics.Bitmap.Config.ARGB_8888);
+                }
+            } catch (UnsatisfiedLinkError | IllegalArgumentException e) {
+                b = null;
+            }
+            sprites.put(index, b);
+            return b;
+        }
+    }
 
     private static final float[] objectBuffer = new float[4 * 512];
 
