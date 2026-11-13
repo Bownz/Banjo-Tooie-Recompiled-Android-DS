@@ -1655,7 +1655,7 @@ Java_io_github_bownz_btrecomp_GameState_nativeAreaObjects(JNIEnv* env, jclass, j
     uint8_t* rdram = bt_android_running_rdram();
     if (rdram == nullptr || out == nullptr) return 0;
     const jsize len = env->GetArrayLength(out);
-    std::vector<float> buf(size_t(len));
+    std::vector<float> buf(static_cast<size_t>(len));
     const int n = bt_area_objects(rdram, buf.data(), int(len / 4));
     if (n > 0) env->SetFloatArrayRegion(out, 0, n * 4, buf.data());
     return n;
