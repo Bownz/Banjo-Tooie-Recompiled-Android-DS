@@ -186,7 +186,7 @@ def ensureSdlPatch = {
 }
 
 // App version for testers' reports: the release number plus the commit it was built from.
-def appVersion = '0.8.8-beta'
+def appVersion = '0.8.9-beta'
 def gitCommit = {
     def sha = System.getenv('GITHUB_SHA')
     if (sha) {
