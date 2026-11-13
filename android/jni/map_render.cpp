@@ -1638,6 +1638,7 @@ int bt_area_objects(const uint8_t* rdram, float* out, int max) {
             case 0x0229: kind = 6; break;
             case 0x01E9: kind = 7; break;
             case 0x01CE: kind = 8; break;
+            case 0x04A6: kind = 8; break;   // feather nest switching between red and gold
             case 0x02B0: kind = 9; break;
             case 0x0309: case 0x030B: kind = 10; break;
             default: break;
