@@ -1779,6 +1779,7 @@ int bt_area_objects(const uint8_t* rdram, float* out, int max) {
             case 0x02B0: kind = 9; break;
             case 0x0309: case 0x030B: kind = 10; break;
             case 0x0234: kind = 11; break;   // flight pad (Spiral Mountain's island top, 13 Nov)
+            case 0x01E5: kind = 15; break;   // warp pad (Mayahem Temple, 13 Nov)
             case 0x01F7: kind = 14; break;   // empty honeycomb (Mayahem Temple, 13 Nov)
             case 0x0210: kind = 12; break;   // shock jump pad (Spiral Mountain, 13 Nov)
             default: break;

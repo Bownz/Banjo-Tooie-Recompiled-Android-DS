@@ -302,7 +302,7 @@ final class GameState {
 
     // Kinds of things on the map (areaObjects), as the native side numbers them.
     static final int OBJ_JIGGY = 1, OBJ_NOTES = 2, OBJ_CLEF = 3, OBJ_JINJO = 4, OBJ_GLOWBO = 5,
-        OBJ_HONEYCOMB = 6, OBJ_EGGS = 7, OBJ_FEATHERS = 8, OBJ_MUMBO_PAD = 9, OBJ_JAMJARS = 10, OBJ_FLIGHT_PAD = 11, OBJ_JUMP_PAD = 12, OBJ_GOLD_FEATHERS = 13, OBJ_EMPTY_HONEYCOMB = 14;
+        OBJ_HONEYCOMB = 6, OBJ_EGGS = 7, OBJ_FEATHERS = 8, OBJ_MUMBO_PAD = 9, OBJ_JAMJARS = 10, OBJ_FLIGHT_PAD = 11, OBJ_JUMP_PAD = 12, OBJ_GOLD_FEATHERS = 13, OBJ_EMPTY_HONEYCOMB = 14, OBJ_WARP_PAD = 15;
 
     private static native int[] nativeSprite(int index, int frame);
 

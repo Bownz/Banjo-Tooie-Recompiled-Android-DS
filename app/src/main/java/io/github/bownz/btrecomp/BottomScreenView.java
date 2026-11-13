@@ -1435,6 +1435,15 @@ public final class BottomScreenView extends View {
                 c.drawPath(q, stroke);
                 break;
             }
+            case GameState.OBJ_WARP_PAD: {
+                // A warp pad: blue ring, pale blue centre.
+                fill.setColor(Color.rgb(170, 220, 255));
+                c.drawCircle(x, y, 0.9f * s, fill);
+                stroke.setColor(Color.rgb(40, 110, 220));
+                stroke.setStrokeWidth(0.45f * s);
+                c.drawCircle(x, y, 1.1f * s, stroke);
+                break;
+            }
             case GameState.OBJ_JUMP_PAD: {
                 // A shock jump pad: green disc with an up chevron.
                 fill.setColor(Color.rgb(90, 170, 60));
