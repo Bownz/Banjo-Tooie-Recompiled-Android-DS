@@ -55,9 +55,12 @@ namespace {
     // area, new on each entry (Spiral Mountain from the game start (4200, -259, 6258) and from
     // Banjo's house (3958, -410, 6879) by its door; the house (0, 97, 523); Jinjo Village).
     constexpr uint32_t kEntryPoint = 0x80137320u;           // u16: Spiral Mountain 0xAF, Banjo's house 0x173, Jinjo Village 0x142
-    // PROVISIONAL pause flags: each was 1 only while paused (and 0 walking, first person, eggs,
-    // indoors, another area); all three must agree. Not yet checked against cutscenes.
-    constexpr uint32_t kPauseFlags[] = { 0x8007A217u, 0x8007ADF3u, 0x80135A11u };
+    // Pause: 0x80135A11 goes 0 -> 1 and 0x80132DCB 1 -> 0 on the very frame the game pauses
+    // (the game frame counter stops there) and back on the frame it resumes (live session,
+    // 13 Nov: 9 Marks over 4 pauses, plus the probe's timing lines). The flags used before
+    // (0x8007A217 with these) waited ~1.7 s for the pause screen to load. Both must agree; they
+    // sit in different structures. Not yet checked against cutscenes and dialogue.
+    bool is_paused(const uint8_t* rdram);
 
     // The current area's map model: the game keeps pointers to its collision list and vertex
     // list side by side (found 11 Nov; same in Spiral Mountain, Banjo's house, Jinjo Village).
@@ -98,6 +101,10 @@ namespace {
     uint8_t* running_rdram() {
         uint8_t* rdram = g_rdram.load();
         return rdram != nullptr && ultramodern::is_game_started() ? rdram : nullptr;
+    }
+
+    bool is_paused(const uint8_t* rdram) {
+        return read_u8(rdram, 0x80135A11u) == 1 && read_u8(rdram, 0x80132DCBu) == 0;
     }
 
     // ---- TEMPORARY probe ----------------------------------------------------------------
@@ -486,19 +493,14 @@ Java_io_github_bownz_btrecomp_GameState_nativeEntryPoint(JNIEnv* env, jclass, jf
     return JNI_TRUE;
 }
 
-// Whether the game is paused (provisional, see kPauseFlags).
+// Whether the game is paused (see is_paused).
 JNIEXPORT jboolean JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativePaused(JNIEnv*, jclass) {
     uint8_t* rdram = running_rdram();
     if (rdram == nullptr) {
         return JNI_FALSE;
     }
-    for (uint32_t flag : kPauseFlags) {
-        if (read_u8(rdram, flag) != 1) {
-            return JNI_FALSE;
-        }
-    }
-    return JNI_TRUE;
+    return is_paused(rdram) ? JNI_TRUE : JNI_FALSE;
 }
 
 // Mark on the bottom screen: logs what changed since the previous Mark, then starts over.
@@ -547,10 +549,7 @@ extern "C" bool bt_android_live_state(char* buf, size_t size, uint32_t* frames) 
         return false;
     }
     *frames = read_u32(rdram, kGameFrameCount);
-    bool paused = true;
-    for (uint32_t flag : kPauseFlags) {
-        if (read_u8(rdram, flag) != 1) paused = false;
-    }
+    const bool paused = is_paused(rdram);
     snprintf(buf, size, "mode 0x%X map 0x%X pos %.0f,%.0f,%.0f%s",
         read_u32(rdram, kGameMode), read_u16(rdram, kMapId),
         read_f32(rdram, kPlayerPosition), read_f32(rdram, kPlayerPosition + 4), read_f32(rdram, kPlayerPosition + 8),
