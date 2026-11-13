@@ -42,6 +42,13 @@ try {
         Write-Both $line
         if ($line -match "MARK (\d+) saved to (\S+\.bin\.gz)") {
             $n = $Matches[1]; $remote = $Matches[2]
+            # A new run of Marks (the game restarted, numbering from 1 again): a new folder, so
+            # the earlier run's snapshots aren't overwritten.
+            if ($script:lastMark -and [int]$n -le $script:lastMark) {
+                $markDir = Join-Path $liveDir (Get-Date -Format "yyyyMMdd-HHmmss")
+                Write-Both ("# PC: new run of marks, now saving to {0}" -f $markDir)
+            }
+            $script:lastMark = [int]$n
             New-Item -ItemType Directory -Force -Path $markDir | Out-Null
             $local = Join-Path $markDir ("mark-{0:D2}.bin.gz" -f [int]$n)
             & $adb -s $serial pull $remote $local 2>&1 | Out-Null
