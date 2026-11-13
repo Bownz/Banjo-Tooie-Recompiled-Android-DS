@@ -338,6 +338,7 @@ public final class BottomScreenView extends View {
                 leavingMap = null;
             } else {
                 mapPaint.setAlpha(Math.round(255 * (1f - t)));
+                drawBackdrop(c, r, old, leavingCx, leavingCz, leavingS, mapPaint);
                 drawWorldBitmap(c, r, old.bitmap, old.minX, old.minZ, old.scale, leavingCx, leavingCz, leavingS, mapPaint);
                 mapPaint.setAlpha(255);
                 animating = true;
@@ -402,6 +403,7 @@ public final class BottomScreenView extends View {
             viewS = viewScale;
 
             mapPaint.setAlpha(Math.round(255 * fadeIn));
+            drawBackdrop(c, r, m, cx, cz, viewScale, mapPaint);
             drawWorldBitmap(c, r, m.bitmap, m.minX, m.minZ, m.scale, cx, cz, viewScale, mapPaint);
             // The sharper close-up tile over it, when there is one for this view.
             GameState.MapImage d = detail;
@@ -1018,6 +1020,14 @@ public final class BottomScreenView extends View {
     }
 
     /** Draws a picture whose top-left is world (minX, minZ) at `scale` pixels per unit. */
+    /** The soft glow of the area's surroundings under its map (instead of plain black), if it has one. */
+    private void drawBackdrop(Canvas c, RectF r, GameState.MapImage m, float cx, float cz, float viewScale, Paint paint) {
+        GameState.MapImage bd = m.backdrop;
+        if (bd != null) {
+            drawWorldBitmap(c, r, bd.bitmap, bd.minX, bd.minZ, bd.scale, cx, cz, viewScale, paint);
+        }
+    }
+
     private void drawWorldBitmap(Canvas c, RectF r, android.graphics.Bitmap b, float minX, float minZ, float scale,
                                  float cx, float cz, float viewScale, Paint paint) {
         int saved = c.save();
@@ -1323,7 +1333,7 @@ public final class BottomScreenView extends View {
     // ---- Explored areas ----------------------------------------------------------------
     // Each area's map (and storey) is kept: the last few in memory, all of them as PNG files in
     // the app's cache, by the game's map id. Bump MAP_CACHE_VERSION when the map's look changes.
-    private static final String MAP_CACHE_VERSION = "v7";
+    private static final String MAP_CACHE_VERSION = "v8";
     private int cacheTried = Integer.MIN_VALUE;
     private final java.util.LinkedHashMap<String, GameState.MapImage> mapMemory =
         new java.util.LinkedHashMap<String, GameState.MapImage>(8, 0.75f, true) {
@@ -1379,7 +1389,17 @@ public final class BottomScreenView extends View {
             if (b == null || v.length < 3) {
                 return null;
             }
-            return new GameState.MapImage(b, Float.parseFloat(v[0]), Float.parseFloat(v[1]), Float.parseFloat(v[2]));
+            GameState.MapImage m = new GameState.MapImage(b, Float.parseFloat(v[0]), Float.parseFloat(v[1]), Float.parseFloat(v[2]));
+            String line = r.readLine();   // the backdrop's place, when saved
+            java.io.File bdPng = mapFile(key, "-bd.png");
+            if (line != null && bdPng.isFile()) {
+                String[] bv = line.trim().split(" ");
+                android.graphics.Bitmap bb = android.graphics.BitmapFactory.decodeFile(bdPng.getPath());
+                if (bb != null && bv.length >= 3) {
+                    m.backdrop = new GameState.MapImage(bb, Float.parseFloat(bv[0]), Float.parseFloat(bv[1]), Float.parseFloat(bv[2]));
+                }
+            }
+            return m;
         } catch (Exception e) {
             return null;
         }
@@ -1397,8 +1417,20 @@ public final class BottomScreenView extends View {
         } catch (java.io.IOException e) {
             return;
         }
+        GameState.MapImage bd = m.backdrop;
+        boolean bdSaved = false;
+        if (bd != null) {
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(mapFile(key, "-bd.png"))) {
+                bdSaved = bd.bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out);
+            } catch (java.io.IOException e) {
+                bdSaved = false;
+            }
+        }
         try (java.io.FileWriter w = new java.io.FileWriter(meta)) {
             w.write(m.minX + " " + m.minZ + " " + m.scale + "\n");
+            if (bdSaved) {
+                w.write(bd.minX + " " + bd.minZ + " " + bd.scale + "\n");
+            }
         } catch (java.io.IOException e) {
             return;
         }

@@ -693,6 +693,9 @@ namespace {
         int W = 0, H = 0;
         float minX = 0, minZ = 0, scale = 1;
         std::vector<uint8_t> kind, edge, light, alpha, colourK;   // light x 100; alpha, k x 255
+        std::vector<int32_t> backdrop;   // the glow behind the map (bt_backdrop)
+        int bdW = 0, bdH = 0;
+        float bdMinX = 0, bdMinZ = 0, bdScale = 1;
     };
     MapCache g_cache;
     std::mutex g_cacheMutex;
@@ -1199,6 +1202,22 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
             if (!inside(i) && !keep[i]) fade[i] = 0.0f;
     }
 
+    // The backdrop behind the map (drawn under it on the bottom screen): the whole level, play
+    // area and surroundings, gathered into a coarse grid with a margin all round, then blurred
+    // into a soft glow in the area's own colours that fades to black away from it. The
+    // surroundings stay out of the map itself (sharp, they looked unfinished); blurred, they
+    // fill the black around it.
+    const int S = std::max(W, H);
+    const int cell = std::max(1, S / 160);
+    const int pad = (S * 6 / 10) / cell;
+    const int BW = (W + cell - 1) / cell + 2 * pad, BH = (H + cell - 1) / cell + 2 * pad;
+    std::vector<float> bdR(size_t(BW) * BH, 0), bdG(bdR.size(), 0), bdB(bdR.size(), 0), bdA(bdR.size(), 0);
+    auto gather = [&](size_t i, float r, float g, float b) {
+        const int x = int(i % W) / cell + pad, z = int(i / W) / cell + pad;
+        const size_t j = size_t(z) * BW + x;
+        bdR[j] += r; bdG[j] += g; bdB[j] += b; bdA[j] += 1.0f;
+    };
+
     // 4. Compose (and keep what a detail tile needs).
     out.assign(N, 0);
     std::vector<uint8_t> kind(N, kNone), edgeOut(N, 0), lightOut(N, 0), alphaOut(N, 0), kOut(N, 0);
@@ -1225,6 +1244,13 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
         }
         // Over the shadow (black): a = content alpha, s = shadow alpha.
         const bool inside = water[i] || main[i] || solid[i];
+        if (inside || kind[i] == kBeyond) {
+            gather(i, r, g, b);
+        } else if (drawn[i] || walk[i]) {
+            float br, bg, bb;
+            beyondColour(sR[i], sG[i], sB[i], 0.5f * footShade[i] * hillShade[i], br, bg, bb);
+            gather(i, br, bg, bb);
+        }
         const float a = inside ? 1.0f : std::clamp(fade[i], 0.0f, 1.0f);
         const float sh = inside ? 0.0f : std::clamp(shadow[i] * 0.6f, 0.0f, 0.6f);
         const float total = a + sh * (1.0f - a);
@@ -1236,8 +1262,48 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
         out[i] = packPixel(r, g, b, total, a / total);
     }
 
+    std::vector<int32_t> backdrop(size_t(BW) * BH, 0);
+    {
+        const float full = float(cell) * float(cell);
+        for (size_t j = 0; j < bdA.size(); j++) {   // coverage 0..1 per cell
+            bdA[j] /= full; bdR[j] /= full; bdG[j] /= full; bdB[j] /= full;
+        }
+        // Gaussian-ish blurs (two box passes) at three widths, in cells: colour close in,
+        // colour further out (normalised by coverage, so it spreads outwards), and the far glow.
+        const float cells = float(S) / float(cell);   // the map's size in cells
+        auto blurred = [&](const std::vector<float>& a, float sigma) {
+            std::vector<float> b = a;
+            const int rr = std::max(1, int(sigma * 1.2f));
+            boxBlur(b, BW, BH, rr); boxBlur(b, BW, BH, rr);
+            return b;
+        };
+        const float s1 = 0.011f * cells, s2 = 0.07f * cells, s3 = 0.17f * cells;
+        const std::vector<float> a1 = blurred(bdA, s1), r1 = blurred(bdR, s1), g1 = blurred(bdG, s1), b1 = blurred(bdB, s1);
+        const std::vector<float> a2 = blurred(bdA, s2), r2 = blurred(bdR, s2), g2 = blurred(bdG, s2), b2 = blurred(bdB, s2);
+        const std::vector<float> a3 = blurred(bdA, s3);
+        for (size_t j = 0; j < backdrop.size(); j++) {
+            const float n1 = std::max(a1[j], 1e-3f), n2 = std::max(a2[j], 1e-3f);
+            const float c1 = std::clamp(a1[j] * 1.5f, 0.0f, 1.0f);
+            float r = (r1[j] / n1) * c1 + (r2[j] / n2) * (1 - c1);
+            float g = (g1[j] / n1) * c1 + (g2[j] / n2) * (1 - c1);
+            float b = (b1[j] / n1) * c1 + (b2[j] / n2) * (1 - c1);
+            const float grey = (r + g + b) / 3.0f;
+            r = r * 0.75f + grey * 0.25f; g = g * 0.75f + grey * 0.25f; b = b * 0.75f + grey * 0.25f;
+            // Brighter close to the area (a soft glow at its edge), fading to black further out.
+            const float near = std::clamp(a2[j] * 2.0f, 0.0f, 1.0f);
+            const float far = std::clamp(a3[j] * 3.0f, 0.0f, 1.0f);
+            const float k = (0.5f + 0.3f * near) * far;
+            backdrop[j] = packPixel(r, g, b, 1.0f, k);
+        }
+    }
+
     {
         std::lock_guard lock{ g_cacheMutex };
+        g_cache.backdrop = std::move(backdrop);
+        g_cache.bdW = BW; g_cache.bdH = BH;
+        g_cache.bdScale = scale / float(cell);
+        g_cache.bdMinX = minX - float(pad) / g_cache.bdScale;
+        g_cache.bdMinZ = minZ - float(pad) / g_cache.bdScale;
         g_cache.valid = true;
         g_cache.key = key;
         g_cache.tris = std::move(tris);
@@ -1353,6 +1419,17 @@ std::vector<uint8_t> bt_water_mask(uint32_t key, int& W, int& H) {
     return m;
 }
 
+// The last whole-area map's backdrop (opaque ARGB, coarse; built with the map) and
+// where it sits: meta = width, height, world x and z of its top-left, pixels per world unit.
+// Empty when the last map doesn't match the key.
+std::vector<int32_t> bt_backdrop(uint32_t key, float meta[5]) {
+    std::lock_guard lock{ g_cacheMutex };
+    if (!g_cache.valid || g_cache.key != key || g_cache.backdrop.empty()) return {};
+    meta[0] = float(g_cache.bdW); meta[1] = float(g_cache.bdH);
+    meta[2] = g_cache.bdMinX; meta[3] = g_cache.bdMinZ; meta[4] = g_cache.bdScale;
+    return g_cache.backdrop;
+}
+
 // Whether some walkable floor lies directly above (x, z), more than 200 units over y: Banjo is
 // under another floor (a lower storey), so the map should show his layer.
 // Whether Banjo (at x, y, z) is under another storey: a floor between 200 and 1500 units
@@ -1428,6 +1505,20 @@ Java_io_github_bownz_btrecomp_GameState_nativeWaterMask(JNIEnv* env, jclass, jin
     jbyteArray a = env->NewByteArray(jsize(m.size()));
     if (a == nullptr) return nullptr;
     env->SetByteArrayRegion(a, 0, jsize(m.size()), reinterpret_cast<const jbyte*>(m.data()));
+    return a;
+}
+
+// The last map's backdrop (see bt_backdrop), or null.
+extern "C" JNIEXPORT jintArray JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeBackdrop(JNIEnv* env, jclass, jint key, jfloatArray info) {
+    if (info == nullptr || env->GetArrayLength(info) < 5) return nullptr;
+    float meta[5];
+    std::vector<int32_t> px = bt_backdrop(uint32_t(key), meta);
+    if (px.empty()) return nullptr;
+    jintArray a = env->NewIntArray(jsize(px.size()));
+    if (a == nullptr) return nullptr;
+    env->SetIntArrayRegion(a, 0, jsize(px.size()), reinterpret_cast<const jint*>(px.data()));
+    env->SetFloatArrayRegion(info, 0, 5, meta);
     return a;
 }
 

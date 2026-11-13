@@ -23,6 +23,7 @@ final class GameState {
     private static native int[] nativeBuildMap(int maxSize, float capY, int key, float[] info);
     private static native int[] nativeBuildDetail(int key, float x0, float z0, float x1, float z1, int maxSize, float[] info);
     private static native byte[] nativeWaterMask(int key);
+    private static native int[] nativeBackdrop(int key, float[] info);
     private static native boolean nativeFloorAbove(float x, float y, float z);
     private static native String nativeAreaName();
     private static native int nativeN64Buttons();
@@ -131,6 +132,8 @@ final class GameState {
         final float minX, minZ, scale;   // world x, z at the picture's top-left; pixels per world unit
         final int key;                   // the build it came from (for detail tiles); -1 when loaded from a file
         final android.graphics.Bitmap water;   // where the water is (alpha), or null
+        /** The soft glow drawn under the map (the level's surroundings, blurred), or null. */
+        volatile MapImage backdrop;
 
         MapImage(android.graphics.Bitmap bitmap, float minX, float minZ, float scale) {
             this(bitmap, minX, minZ, scale, -1, null);
@@ -175,7 +178,15 @@ final class GameState {
             return null;
         }
         android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(pixels, w, h, android.graphics.Bitmap.Config.ARGB_8888);
-        return new MapImage(bitmap, info[2], info[3], info[4], key, waterMask(waterBytes, w, h));
+        MapImage map = new MapImage(bitmap, info[2], info[3], info[4], key, waterMask(waterBytes, w, h));
+        float[] bdInfo = new float[5];
+        int[] bd = nativeBackdrop(key, bdInfo);
+        int bw = (int) bdInfo[0], bh = (int) bdInfo[1];
+        if (bd != null && bw > 0 && bh > 0 && bd.length == bw * bh) {
+            map.backdrop = new MapImage(android.graphics.Bitmap.createBitmap(bd, bw, bh, android.graphics.Bitmap.Config.ARGB_8888),
+                bdInfo[2], bdInfo[3], bdInfo[4]);
+        }
+        return map;
     }
 
     /** An alpha-only bitmap from one byte per pixel, or null. */
