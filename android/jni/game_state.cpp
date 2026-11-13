@@ -107,13 +107,15 @@ namespace {
         return read_u8(rdram, 0x80135A11u) == 1 && read_u8(rdram, 0x80132DCBu) == 0;
     }
 
-    // Cutscene: the u32 at 0x80135A80 holds a pointer (0x8013....) all through play, pausing
-    // included, and is 0 during cutscenes (live session, 13 Nov: 0 in two cutscenes, Jiggywiggy
-    // showing his temple and the next one; set in all 22 other marks across Spiral Mountain,
-    // Isle o' Hags and the pause screen). Probably "who has control"; maybe 0 while loading too.
-    constexpr uint32_t kControlPointer = 0x80135A80u;
+    // Cutscene: the byte at 0x801275F0 is 2 during cutscenes and 1 otherwise (live sessions,
+    // 13 Nov: 2 in four cutscenes: Jiggywiggy's temple twice, a warp pad starting up, a Mumbo
+    // spell; 1 in 16 play marks across three worlds, dialogue, the temple puzzle, a Jiggy's
+    // collect animation, the title screen and file select). Probably the camera's mode.
+    // 0.9.4-0.9.9 used the u32 at 0x80135A80 = 0, which is also 0 in ordinary play after
+    // loading a save from the title screen: the bottom screen stayed dimmed.
+    constexpr uint32_t kCameraMode = 0x801275F0u;
     bool is_cutscene(const uint8_t* rdram) {
-        return read_u32(rdram, kControlPointer) == 0 && read_u32(rdram, kGameMode) == 1;
+        return read_u8(rdram, kCameraMode) == 2;
     }
 
     // ---- TEMPORARY probe ----------------------------------------------------------------
@@ -503,7 +505,7 @@ Java_io_github_bownz_btrecomp_GameState_nativeEntryPoint(JNIEnv* env, jclass, jf
 }
 
 // Whether the game is on its title screen or file select (live session, 13 Nov: map ids 0x18B
-// and 0x158 there, Banjo at exactly (0, 0, 0) and nothing in control). The bottom screen shows
+// and 0x158 there, Banjo at exactly (0, 0, 0)). The bottom screen shows
 // no map then (it used to draw the area of the demo running behind the title).
 JNIEXPORT jboolean JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeOnMenu(JNIEnv*, jclass) {
@@ -513,7 +515,7 @@ Java_io_github_bownz_btrecomp_GameState_nativeOnMenu(JNIEnv*, jclass) {
     if (map == 0x18B || map == 0x158) return JNI_TRUE;
     const bool origin = read_f32(rdram, kPlayerPosition) == 0.0f && read_f32(rdram, kPlayerPosition + 4) == 0.0f &&
         read_f32(rdram, kPlayerPosition + 8) == 0.0f;
-    return origin && read_u32(rdram, kControlPointer) == 0 ? JNI_TRUE : JNI_FALSE;
+    return origin ? JNI_TRUE : JNI_FALSE;
 }
 
 // Whether a cutscene is playing (see is_cutscene).
