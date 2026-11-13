@@ -1333,7 +1333,7 @@ public final class BottomScreenView extends View {
     // ---- Explored areas ----------------------------------------------------------------
     // Each area's map (and storey) is kept: the last few in memory, all of them as PNG files in
     // the app's cache, by the game's map id. Bump MAP_CACHE_VERSION when the map's look changes.
-    private static final String MAP_CACHE_VERSION = "v8";
+    private static final String MAP_CACHE_VERSION = "v9";
     private int cacheTried = Integer.MIN_VALUE;
     private final java.util.LinkedHashMap<String, GameState.MapImage> mapMemory =
         new java.util.LinkedHashMap<String, GameState.MapImage>(8, 0.75f, true) {

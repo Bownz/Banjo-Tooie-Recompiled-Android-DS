@@ -961,7 +961,11 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
                 const bool higher = riseN[size_t(k)] == 0 || rise[size_t(k)] / riseN[size_t(k)] > 150.0;
                 // A boulder at the edge stands mostly in the floor; hedge tops mostly not.
                 const bool ringed = riseN[size_t(k)] * 2 > edgeN[size_t(k)];
-                if (touchesEmpty[size_t(k)] && higher && !ringed) main[i] = 0;
+                // Only pieces small next to the floor (Jinjo Village's were at most 9%): a whole
+                // raised level is part of the area (Mayahem Temple's plateau by Jamjars, 47%,
+                // vanished in 0.8.9-0.9.4).
+                const bool small = sizes[size_t(k)] * 100 < sizes[size_t(floorPart)] * 15;
+                if (touchesEmpty[size_t(k)] && higher && !ringed && small) main[i] = 0;
             }
         }
     }
