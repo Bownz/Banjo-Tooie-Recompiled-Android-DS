@@ -586,15 +586,21 @@ namespace {
                     }
                     alpha = ca / 255.0f;
                 }
-                const float sr = l0 * t.v[0].r + l1 * t.v[1].r + l2 * t.v[2].r;
-                const float sg = l0 * t.v[0].g + l1 * t.v[1].g + l2 * t.v[2].g;
-                const float sb = l0 * t.v[0].b + l1 * t.v[1].b + l2 * t.v[2].b;
+                // The level's baked vertex shading, at 60% strength: in full it shows as light and
+                // dark patches across open ground (Jinjo Village's grass) once the map is sharp.
+                const float sr = 0.4f + 0.6f * (l0 * t.v[0].r + l1 * t.v[1].r + l2 * t.v[2].r);
+                const float sg = 0.4f + 0.6f * (l0 * t.v[0].g + l1 * t.v[1].g + l2 * t.v[2].g);
+                const float sb = 0.4f + 0.6f * (l0 * t.v[0].b + l1 * t.v[1].b + l2 * t.v[2].b);
                 // A see-through texel over the same surface (Isle o' Hags' soft-edged path overlays,
                 // drawn in several passes over the grass) blends in by its alpha, so where two path
                 // pieces meet in their faded ends they still join up.
                 const bool over = drawn[i] && alpha < 0.98f && y - top[i] < 30.0f;
                 if (!over && alpha <= 0.125f) return;
-                const float k = over ? std::min(1.0f, alpha * 1.6f) : 1.0f;   // a little stronger: paths stay readable small
+                // Stronger for paths so they stay readable in the whole-area view; dark overlays
+                // (the soft shadows under rocks and posts) keep the gentler blend, or they turn
+                // into solid black blobs.
+                const bool dark = 0.3f * r + 0.59f * g + 0.11f * b < 70.0f;
+                const float k = over ? std::min(1.0f, alpha * (dark ? 1.6f : 2.4f)) : 1.0f;
                 top[i] = std::max(top[i], y);
                 R[i] = R[i] * (1 - k) + r * sr * light * k;
                 G[i] = G[i] * (1 - k) + g * sg * light * k;
@@ -897,6 +903,124 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
     for (size_t i = 0; i < N; i++) main[i] = walk[i] && ground[i] <= ceiling;
     main = morph(morph(main, W, H, 2 * px, true), W, H, 2 * px, false);   // no ragged bits
     for (size_t i = 0; i < N; i++) main[i] = main[i] && walk[i];
+    // Raised ground cut off from the floor you walk on (a sharp step all round) and standing at
+    // the area's edge: the tops of hedges and trees around Jinjo Village have walkable floors,
+    // so they counted as play area and showed as jagged green spikes. Pieces of the play area
+    // split by steps of more than a gentle slope are found; every piece but the biggest that
+    // borders empty space and is clearly higher than the floor next to it leaves the play area
+    // (drawn as surroundings). Raised pieces inside the area (tables, ledges) stay, or become
+    // raised scenery below.
+    {
+        const float tol = std::max(60.0f, 2.5f / scale);   // a step bigger than a 2:1 slope over a pixel or two
+        std::vector<int> part(N, -1), sizes, stack;
+        for (size_t start = 0; start < N; start++) {
+            if (!main[start] || part[start] >= 0) continue;
+            const int id = int(sizes.size());
+            int count = 0;
+            stack.assign(1, int(start));
+            part[start] = id;
+            while (!stack.empty()) {
+                const int i = stack.back();
+                stack.pop_back();
+                count++;
+                const int x = i % W, z = i / W;
+                const int next[4][2] = { { x - 1, z }, { x + 1, z }, { x, z - 1 }, { x, z + 1 } };
+                for (const auto& n : next) {
+                    if (n[0] < 0 || n[1] < 0 || n[0] >= W || n[1] >= H) continue;
+                    const size_t j = size_t(n[1]) * W + n[0];
+                    if (main[j] && part[j] < 0 && std::fabs(ground[j] - ground[i]) < tol) { part[j] = id; stack.push_back(int(j)); }
+                }
+            }
+            sizes.push_back(count);
+        }
+        if (!sizes.empty()) {
+            const int floorPart = int(std::max_element(sizes.begin(), sizes.end()) - sizes.begin());
+            // Per piece: does it touch empty space, and how much higher is it than the floor beside it?
+            std::vector<uint8_t> touchesEmpty(sizes.size(), 0);
+            std::vector<double> rise(sizes.size(), 0.0);
+            std::vector<int> riseN(sizes.size(), 0), edgeN(sizes.size(), 0);
+            for (int z = 0; z < H; z++)
+                for (int x = 0; x < W; x++) {
+                    const size_t i = size_t(z) * W + x;
+                    if (part[i] < 0 || part[i] == floorPart) continue;
+                    const int next[4][2] = { { x - 1, z }, { x + 1, z }, { x, z - 1 }, { x, z + 1 } };
+                    for (const auto& n : next) {
+                        if (n[0] < 0 || n[1] < 0 || n[0] >= W || n[1] >= H) { touchesEmpty[size_t(part[i])] = 1; continue; }
+                        const size_t j = size_t(n[1]) * W + n[0];
+                        if (!drawn[j] && !walk[j] && !water[j]) touchesEmpty[size_t(part[i])] = 1;
+                        if (part[j] != part[i]) edgeN[size_t(part[i])]++;
+                        if (part[j] == floorPart) { rise[size_t(part[i])] += ground[i] - ground[j]; riseN[size_t(part[i])]++; }
+                    }
+                }
+            for (size_t i = 0; i < N; i++) {
+                const int k = part[i];
+                if (k < 0 || k == floorPart) continue;
+                const bool higher = riseN[size_t(k)] == 0 || rise[size_t(k)] / riseN[size_t(k)] > 150.0;
+                // A boulder at the edge stands mostly in the floor; hedge tops mostly not.
+                const bool ringed = riseN[size_t(k)] * 2 > edgeN[size_t(k)];
+                if (touchesEmpty[size_t(k)] && higher && !ringed) main[i] = 0;
+            }
+        }
+    }
+    // Steep ground at the area's edge: the walkable foot of a cliff or hillside rising out of
+    // the area (left of Jinjo Village) showed as a floating shard of leaves. Near the edge,
+    // ground steeper than about 30 degrees leaves the play area; slopes further in stay.
+    {
+        // Outside: off the play area and reachable from the map's border (holes inside the area,
+        // where rocks and posts stand, don't count).
+        std::vector<uint8_t> outside(N, 0);
+        {
+            std::vector<int> stack;
+            auto open = [&](int x, int z) {
+                const size_t j = size_t(z) * W + x;
+                if (!main[j] && !water[j] && !outside[j]) { outside[j] = 1; stack.push_back(int(j)); }
+            };
+            for (int x = 0; x < W; x++) { open(x, 0); open(x, H - 1); }
+            for (int z = 0; z < H; z++) { open(0, z); open(W - 1, z); }
+            while (!stack.empty()) {
+                const int i = stack.back();
+                stack.pop_back();
+                const int x = i % W, z = i / W;
+                if (x > 0) open(x - 1, z);
+                if (x + 1 < W) open(x + 1, z);
+                if (z > 0) open(x, z - 1);
+                if (z + 1 < H) open(x, z + 1);
+            }
+        }
+        const std::vector<uint8_t> nearEdge = morph(outside, W, H, 12 * px, true);
+        const float limit = 0.6f * 2.0f / scale;   // rise over two pixels at a 0.6 gradient
+        std::vector<uint8_t> steep(N, 0);
+        for (int z = 1; z + 1 < H; z++)
+            for (int x = 1; x + 1 < W; x++) {
+                const size_t i = size_t(z) * W + x;
+                if (!main[i] || !nearEdge[i]) continue;
+                const size_t l = i - 1, r = i + 1, u = i - W, d = i + W;
+                const bool hx = main[l] && main[r], hz = main[u] && main[d];
+                if ((hx && std::fabs(ground[r] - ground[l]) > limit) || (hz && std::fabs(ground[d] - ground[u]) > limit)) steep[i] = 1;
+            }
+        for (size_t i = 0; i < N; i++) if (steep[i]) main[i] = 0;
+        // Steep ground that's enclosed by the play area (the sides of a rock on Jinjo Village's
+        // beach) goes back: only slopes opening onto the outside leave.
+        {
+            std::vector<uint8_t> reach(N, 0);
+            std::vector<int> stack;
+            for (size_t i = 0; i < N; i++) if (outside[i]) { reach[i] = 1; stack.push_back(int(i)); }
+            while (!stack.empty()) {
+                const int i = stack.back();
+                stack.pop_back();
+                const int x = i % W, z = i / W;
+                const int next[4][2] = { { x - 1, z }, { x + 1, z }, { x, z - 1 }, { x, z + 1 } };
+                for (const auto& n : next) {
+                    if (n[0] < 0 || n[1] < 0 || n[0] >= W || n[1] >= H) continue;
+                    const size_t j = size_t(n[1]) * W + n[0];
+                    if (steep[j] && !reach[j]) { reach[j] = 1; stack.push_back(int(j)); }
+                }
+            }
+            for (size_t i = 0; i < N; i++) if (steep[i] && !reach[i]) main[i] = 1;
+        }
+        main = morph(morph(main, W, H, px, false), W, H, px, true);   // no stubs left behind
+        for (size_t i = 0; i < N; i++) main[i] = main[i] && walk[i];
+    }
     // Keep only sizeable pieces (at least 4% of the biggest): slivers and shards left over from
     // the cut become surroundings too.
     {
@@ -1043,6 +1167,37 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
     boxBlur(shadow, W, H, 5 * px);
     boxBlur(shadow, W, H, 5 * px);
     for (float& f : fade) f = std::clamp(f * 2.2f, 0.0f, 1.0f) * 0.85f;
+    // Surroundings only where they're attached to the play area (connected through drawn
+    // pixels): detached bits within the fade distance (a piece of Jinjo Village's cliff wall
+    // floating left of the village) are left out.
+    {
+        std::vector<uint8_t> keep(N, 0);
+        std::vector<int> stack;
+        auto inside = [&](size_t j) { return main[j] || water[j] || solid[j]; };
+        for (int z = 0; z < H; z++)
+            for (int x = 0; x < W; x++) {
+                const size_t i = size_t(z) * W + x;
+                if (inside(i) || !(drawn[i] || walk[i]) || fade[i] <= 0.02f) continue;
+                const int next[4][2] = { { x - 1, z }, { x + 1, z }, { x, z - 1 }, { x, z + 1 } };
+                for (const auto& n : next) {
+                    if (n[0] < 0 || n[1] < 0 || n[0] >= W || n[1] >= H) continue;
+                    if (inside(size_t(n[1]) * W + n[0])) { keep[i] = 1; stack.push_back(int(i)); break; }
+                }
+            }
+        while (!stack.empty()) {
+            const int i = stack.back();
+            stack.pop_back();
+            const int x = i % W, z = i / W;
+            const int next[4][2] = { { x - 1, z }, { x + 1, z }, { x, z - 1 }, { x, z + 1 } };
+            for (const auto& n : next) {
+                if (n[0] < 0 || n[1] < 0 || n[0] >= W || n[1] >= H) continue;
+                const size_t j = size_t(n[1]) * W + n[0];
+                if (!keep[j] && !inside(j) && (drawn[j] || walk[j]) && fade[j] > 0.02f) { keep[j] = 1; stack.push_back(int(j)); }
+            }
+        }
+        for (size_t i = 0; i < N; i++)
+            if (!inside(i) && !keep[i]) fade[i] = 0.0f;
+    }
 
     // 4. Compose (and keep what a detail tile needs).
     out.assign(N, 0);

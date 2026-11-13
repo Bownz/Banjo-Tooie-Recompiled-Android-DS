@@ -228,7 +228,7 @@ android {
         // Android 9: the UI's slot map uses aligned_alloc, which Android's libc has from API 28.
         minSdk 28
         targetSdk 36
-        versionCode 29
+        versionCode 30
         // Shown in the app (Banjo-Tooie Tools, settings) and in log reports, so bug
         // reports name the exact build.
         versionName "${appVersion} (${gitCommit})"
