@@ -453,6 +453,10 @@ namespace {
         if (!ram.ok(base, 0x20) || !ram.ok(col, 0x18)) return false;
         const uint32_t vtxList = base + ram.u32(base + 0x10);
         if (!ram.ok(vtxList, 0x18)) return false;
+        // The vertex list's count (s16 at +0x14) covers the drawn vertices only: collision can
+        // use vertices after them (Bottles' house: indices up to 5357 with a count of 4617, and
+        // its middle room's floors were all past the count, so the room was missing). Any index
+        // whose vertex lies in RAM is used.
         const int vertexCount = ram.s16(vtxList + 0x14);
         const int geo = ram.s16(col + 0x10), count = ram.s16(col + 0x14);
         if (geo <= 0 || count <= 0 || vertexCount <= 0) return false;
@@ -464,8 +468,8 @@ namespace {
             Floor f;
             bool ok = true;
             for (int k = 0; k < 3; k++) {
-                const int i = ram.s16(a + 2 * k);
-                if (i < 0 || i >= vertexCount) { ok = false; break; }
+                const int i = ram.u16(a + 2 * k);
+                if (i >= 0x8000 || !ram.ok(vtxList + 0x18 + 16u * uint32_t(i), 16)) { ok = false; break; }
                 const uint32_t v = vtxList + 0x18 + 16u * i;
                 f.p[k][0] = ram.s16(v); f.p[k][1] = ram.s16(v + 2); f.p[k][2] = ram.s16(v + 4);
             }
@@ -1572,7 +1576,9 @@ bool bt_floor_above(const uint8_t* rdram, float x, float y, float z) {
             const float l2 = 1.0f - l0 - l1;
             if (l0 < 0 || l1 < 0 || l2 < 0) continue;
             const float h = l0 * a[1] + l1 * b[1] + l2 * c[1];
-            if (h > y + 200.0f && h < y + 1500.0f) return true;
+            // Up to 6000 above: a tunnel under a hill (the path below Jinjo Village runs ~3800
+            // under the ground above it). The 7-of-9 test below keeps out overhangs.
+            if (h > y + 200.0f && h < y + 6000.0f) return true;
         }
         return false;
     };
