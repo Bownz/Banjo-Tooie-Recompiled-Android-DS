@@ -346,7 +346,7 @@ public final class BottomScreenView extends View {
         }
 
         if (m == null) {
-            if (old == null) {
+            if (old == null && !onMenu) {   // nothing at all on the title screen and file select
                 drawLoading(c, r, here == null ? "Waiting for the game" : "Drawing the map", now);
                 animating = true;
             }
@@ -1420,8 +1420,11 @@ public final class BottomScreenView extends View {
      */
     private long seedCheckedAt;
 
+    private boolean onMenu;
+
     private void refreshMap() {
-        int id = GameState.mapGeometryId();
+        onMenu = GameState.onMenu();
+        int id = onMenu ? 0 : GameState.mapGeometryId();   // title screen / file select: no map
         long now = SystemClock.uptimeMillis();
         if (id != mapGeometry) {
             if (mapImage != null) {   // fade the area we're leaving out where it was

@@ -20,6 +20,7 @@ final class GameState {
     private static native int nativePlayer(float[] out);
     private static native boolean nativePaused();
     private static native boolean nativeCutscene();
+    private static native boolean nativeOnMenu();
     private static native boolean nativeEntryPoint(float[] out);
     private static native int[] nativeBuildMap(int maxSize, float capY, int key, float[] info);
     private static native int[] nativeBuildDetail(int key, float x0, float z0, float x1, float z1, int maxSize, float[] info);
@@ -316,6 +317,15 @@ final class GameState {
             }
         } catch (UnsatisfiedLinkError e) {
             return new float[0];
+        }
+    }
+
+    /** Whether the game is on its title screen or file select (no map to show). */
+    static boolean onMenu() {
+        try {
+            return nativeOnMenu();
+        } catch (UnsatisfiedLinkError e) {
+            return false;
         }
     }
 

@@ -502,6 +502,20 @@ Java_io_github_bownz_btrecomp_GameState_nativeEntryPoint(JNIEnv* env, jclass, jf
     return JNI_TRUE;
 }
 
+// Whether the game is on its title screen or file select (live session, 13 Nov: map ids 0x18B
+// and 0x158 there, Banjo at exactly (0, 0, 0) and nothing in control). The bottom screen shows
+// no map then (it used to draw the area of the demo running behind the title).
+JNIEXPORT jboolean JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeOnMenu(JNIEnv*, jclass) {
+    uint8_t* rdram = running_rdram();
+    if (rdram == nullptr) return JNI_FALSE;
+    const uint16_t map = read_u16(rdram, kMapId);
+    if (map == 0x18B || map == 0x158) return JNI_TRUE;
+    const bool origin = read_f32(rdram, kPlayerPosition) == 0.0f && read_f32(rdram, kPlayerPosition + 4) == 0.0f &&
+        read_f32(rdram, kPlayerPosition + 8) == 0.0f;
+    return origin && read_u32(rdram, kControlPointer) == 0 ? JNI_TRUE : JNI_FALSE;
+}
+
 // Whether a cutscene is playing (see is_cutscene).
 JNIEXPORT jboolean JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeCutscene(JNIEnv*, jclass) {
