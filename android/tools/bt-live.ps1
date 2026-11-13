@@ -37,7 +37,7 @@ if ($Mode -eq "all") {
 }
 
 try {
-    & $adb @args | ForEach-Object {
+    & $adb @lcArgs | ForEach-Object {
         $line = $_
         Write-Both $line
         if ($line -match "MARK (\d+) saved to (\S+\.bin\.gz)") {
