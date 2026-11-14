@@ -1598,7 +1598,9 @@ public final class BottomScreenView extends View {
         // At most one such rebuild every 15 s: a build costs a second or two of a core, and
         // walking up a long slope the map had left out asked for one every second (0.9.9: a big
         // slowdown on Isle o' Hags' west side, 13 Nov).
-        if (mapImage != null && wantedCap == GameState.WHOLE && now - seedCheckedAt > 1000 && now - seedBuiltAt > 15000) {
+        // 0.9.20: every 45 s at most (a build keeps a slow core busy for several seconds and its
+        // memory traffic cost the renderer frames).
+        if (mapImage != null && wantedCap == GameState.WHOLE && now - seedCheckedAt > 1000 && now - seedBuiltAt > 45000) {
             seedCheckedAt = now;
             float[] p = GameState.position();
             if (p != null && !paused && !cutscene && GameState.mapWantsSeed(mapImage.key, p[0], p[1], p[2])) {
@@ -1610,14 +1612,25 @@ public final class BottomScreenView extends View {
         if (wantedCap != mapCap) {
             if (area >= 0) {
                 GameState.MapImage saved = mapMemory.get(mapKey(area, wantedCap));
-                if (saved != null) {   // a storey seen before: switch at once, refresh behind it
+                if (saved != null && saved.key >= 0) {
+                    // A storey built earlier in this visit: switch to it and don't build it again
+                    // (0.9.20; walking between storeys rebuilt the map every time, nearly without
+                    // pause, and each build cost the renderer frames).
+                    mapImage = saved;
+                    mapCap = wantedCap;
+                    invalidate();
+                    return;
+                }
+                if (saved != null) {   // saved in an earlier session: show it, refresh behind it
                     mapImage = saved;
                     mapCap = wantedCap;
                     invalidate();
                 }
             }
             buildMap(id, wantedCap);
-        } else if ((mapImage == null || !mapRebuilt) && now - mapGeometryAt > 1500) {
+        } else if ((mapImage == null || !mapRebuilt) && now - mapGeometryAt > (mapImage != null ? 8000 : 1500)) {
+            // With a saved map on screen the fresh build waits 8 s: entering an area, the game is
+            // loading and the renderer has the least time to spare (0.9.20).
             mapRebuilt = true;
             buildMap(id, wantedCap);
         }

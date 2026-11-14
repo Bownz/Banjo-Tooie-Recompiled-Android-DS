@@ -520,14 +520,30 @@ namespace {
                 if (in < W) { sum += a[z * W + in]; n++; }
             }
         }
-        for (int x = 0; x < W; x++) {
-            float sum = 0; int n = 0;
-            for (int z = -r; z <= r; z++) if (z >= 0 && z < H) { sum += tmp[z * W + x]; n++; }
-            for (int z = 0; z < H; z++) {
-                a[z * W + x] = sum / std::max(1, n);
-                const int out = z - r, in = z + r + 1;
-                if (out >= 0) { sum -= tmp[out * W + x]; n--; }
-                if (in < H) { sum += tmp[in * W + x]; n++; }
+        // Vertical: the same running sums, kept for all columns at once and moved down a row at
+        // a time (walking each column through memory made this pass several times slower; the
+        // sums are added and taken away in the same order, so the result is identical).
+        std::vector<float> sum(size_t(W), 0.0f);
+        int n = 0;
+        for (int z = 0; z <= r && z < H; z++) {
+            const float* row = &tmp[size_t(z) * W];
+            for (int x = 0; x < W; x++) sum[x] += row[x];
+            n++;
+        }
+        for (int z = 0; z < H; z++) {
+            float* o = &a[size_t(z) * W];
+            const float d = float(std::max(1, n));
+            for (int x = 0; x < W; x++) o[x] = sum[x] / d;
+            const int out = z - r, in = z + r + 1;
+            if (out >= 0) {
+                const float* row = &tmp[size_t(out) * W];
+                for (int x = 0; x < W; x++) sum[x] -= row[x];
+                n--;
+            }
+            if (in < H) {
+                const float* row = &tmp[size_t(in) * W];
+                for (int x = 0; x < W; x++) sum[x] += row[x];
+                n++;
             }
         }
     }
@@ -618,22 +634,45 @@ namespace {
         }
     }
 
+    // Grow (dilate) or shrink (erode) a 0/1 mask by r pixels with a square window. Sliding
+    // window counts, row by row in both passes: O(pixels) whatever r is, and no column-wise
+    // walks through memory. The first version (max/min over the window, columns walked one by
+    // one) was 40% of a map build and, run on the phone's slow cores, kept one busy for 20-30 s
+    // per area while its memory traffic cost the renderer frames (13 Nov).
     std::vector<uint8_t> morph(const std::vector<uint8_t>& m, int W, int H, int r, bool grow) {
         std::vector<uint8_t> tmp(m.size()), out(m.size());
-        for (int z = 0; z < H; z++)
+        if (W <= 0 || H <= 0) return out;
+        std::vector<int> prefix(size_t(W) + 1);
+        for (int z = 0; z < H; z++) {
+            const uint8_t* row = &m[size_t(z) * W];
+            prefix[0] = 0;
+            for (int x = 0; x < W; x++) prefix[x + 1] = prefix[x] + (row[x] != 0);
+            uint8_t* t = &tmp[size_t(z) * W];
             for (int x = 0; x < W; x++) {
-                uint8_t v = grow ? 0 : 1;
-                for (int k = std::max(0, x - r); k <= std::min(W - 1, x + r); k++)
-                    v = grow ? std::max(v, m[z * W + k]) : std::min(v, m[z * W + k]);
-                tmp[z * W + x] = v;
+                const int lo = std::max(0, x - r), hi = std::min(W - 1, x + r);
+                const int sum = prefix[hi + 1] - prefix[lo];
+                t[x] = grow ? uint8_t(sum > 0) : uint8_t(sum == hi - lo + 1);
             }
-        for (int x = 0; x < W; x++)
-            for (int z = 0; z < H; z++) {
-                uint8_t v = grow ? 0 : 1;
-                for (int k = std::max(0, z - r); k <= std::min(H - 1, z + r); k++)
-                    v = grow ? std::max(v, tmp[k * W + x]) : std::min(v, tmp[k * W + x]);
-                out[z * W + x] = v;
+        }
+        // Vertical: per-column counts over rows [lo, hi], moved down one row at a time.
+        std::vector<int> count(size_t(W), 0);
+        int lo = 0, hi = -1;
+        for (int z = 0; z < H; z++) {
+            const int wantLo = std::max(0, z - r), wantHi = std::min(H - 1, z + r);
+            while (hi < wantHi) {
+                hi++;
+                const uint8_t* row = &tmp[size_t(hi) * W];
+                for (int x = 0; x < W; x++) count[x] += row[x];
             }
+            while (lo < wantLo) {
+                const uint8_t* row = &tmp[size_t(lo) * W];
+                for (int x = 0; x < W; x++) count[x] -= row[x];
+                lo++;
+            }
+            const int len = hi - lo + 1;
+            uint8_t* o = &out[size_t(z) * W];
+            for (int x = 0; x < W; x++) o[x] = grow ? uint8_t(count[x] > 0) : uint8_t(count[x] == len);
+        }
         return out;
     }
 }
@@ -709,6 +748,20 @@ namespace {
     };
     constexpr int16_t kNoGround = INT16_MIN;
     MapCache g_cache;
+    // The last whole-area map's ground and kinds, kept apart from g_cache (which holds the last
+    // build of any storey): the level-above and seed checks are about the whole-area map, and
+    // this lets the bottom screen switch back to a whole-area map it built earlier without
+    // building it again (0.9.20: builds were nearly continuous while walking between storeys).
+    struct WholeView {
+        bool valid = false;
+        uint32_t key = 0;
+        int W = 0, H = 0;
+        float minX = 0, minZ = 0, scale = 1;
+        std::vector<uint8_t> kind;
+        std::vector<int16_t> groundY;
+        uint16_t mapId = 0;
+    };
+    WholeView g_whole;
     // Readers share it; storing a new map takes it alone. The bottom screen's UI thread only
     // tries it (bt_map_shows_level_above, bt_map_wants_seed) and skips a check when it's busy:
     // waiting on it while a close-up tile was being drawn (seconds, once 0.9.17 moved the
@@ -1528,6 +1581,14 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
         }
         g_cache.mapId = ram.u16(0x80132DC2u);
         g_cache.roofCap = std::move(roofCap);
+        if (capY >= 1e8f) {
+            g_whole.valid = true;
+            g_whole.key = key;
+            g_whole.W = W; g_whole.H = H; g_whole.minX = minX; g_whole.minZ = minZ; g_whole.scale = scale;
+            g_whole.kind = g_cache.kind;
+            g_whole.groundY = g_cache.groundY;
+            g_whole.mapId = g_cache.mapId;
+        }
     }
 
     meta[0] = float(W); meta[1] = float(H); meta[2] = minX; meta[3] = minZ; meta[4] = scale;
@@ -1541,7 +1602,7 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
 bool bt_map_shows_level_above(uint32_t key, float x, float y, float z) {
     std::shared_lock lock{ g_cacheMutex, std::try_to_lock };
     if (!lock.owns_lock()) return false;   // being built: check again next time
-    const MapCache& c = g_cache;
+    const WholeView& c = g_whole;
     if (!c.valid || c.key != key || c.groundY.empty()) return false;
     const int px = int((x - c.minX) * c.scale), pz = int((z - c.minZ) * c.scale);
     if (px < 0 || pz < 0 || px >= c.W || pz >= c.H) return false;
@@ -1556,7 +1617,7 @@ bool bt_map_shows_level_above(uint32_t key, float x, float y, float z) {
 bool bt_map_wants_seed(uint32_t key, float x, float y, float z) {
     std::shared_lock lock{ g_cacheMutex, std::try_to_lock };
     if (!lock.owns_lock()) return false;   // being built: check again next time
-    const MapCache& c = g_cache;
+    const WholeView& c = g_whole;
     if (!c.valid || c.key != key || c.groundY.empty()) return false;
     const int px = int((x - c.minX) * c.scale), pz = int((z - c.minZ) * c.scale);
     if (px < 0 || pz < 0 || px >= c.W || pz >= c.H) return false;
