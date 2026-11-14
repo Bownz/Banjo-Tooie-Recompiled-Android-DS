@@ -71,6 +71,7 @@ namespace {
         std::fflush(stdout);
     }
     std::atomic<bool> cutscene_dim{ true };
+    std::atomic<bool> bottom_map{ true };
 
     std::filesystem::path config_file(const char* name) {
         return recomp::get_config_path() / name;
@@ -194,6 +195,19 @@ namespace {
         config.add_option_change_callback("android_bottom_buttons",
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
                 bottom_buttons.store(static_cast<int>(std::get<uint32_t>(cur)));
+                save_touch_config(context);
+            });
+        config.add_enum_option(
+            "android_bottom_map",
+            "Bottom Screen Map",
+            "The map of the area you're in, on the bottom screen. Off: no map is drawn or built, which "
+            "leaves more of the phone's time to the game.",
+            on_off,
+            1u
+        );
+        config.add_option_change_callback("android_bottom_map",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
+                bottom_map.store(std::get<uint32_t>(cur) == 1u);
                 save_touch_config(context);
             });
         config.add_enum_option(
@@ -553,6 +567,7 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
         header("Dual Screen"),
         option(t, "android_bottom_screen"),
         option(t, "android_bottom_buttons"),
+        option(t, "android_bottom_map"),
         option(t, "android_cutscene_dim"),
     }, { g, t });
 
@@ -677,9 +692,10 @@ Java_io_github_bownz_btrecomp_TouchInput_nativeTouchFeedback(JNIEnv*, jclass) {
     return touch_feedback.load();
 }
 
-// Bit 1 Bottom Screen Buttons, bit 2 Dim During Cutscenes, bit 4 Video > Show FPS.
+// Bit 1 Bottom Screen Buttons, bit 2 Dim During Cutscenes, bit 4 Video > Show FPS, bit 8 buttons
+// slide in while Z is held, bit 16 Bottom Screen Map off.
 extern "C" JNIEXPORT jint JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeBottomSettings(JNIEnv*, jclass) {
     const int buttons = bottom_buttons.load();
-    return (buttons != 0 ? 1 : 0) | (cutscene_dim.load() ? 2 : 0) | (show_fps.load() ? 4 : 0) | (buttons == 2 ? 8 : 0);
+    return (buttons != 0 ? 1 : 0) | (cutscene_dim.load() ? 2 : 0) | (show_fps.load() ? 4 : 0) | (buttons == 2 ? 8 : 0) | (bottom_map.load() ? 0 : 16);
 }

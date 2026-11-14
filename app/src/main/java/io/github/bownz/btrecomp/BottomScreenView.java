@@ -90,6 +90,7 @@ public final class BottomScreenView extends View {
     private int world = GameState.UNKNOWN;
     private boolean paused, cutscene;
     private boolean showButtons = true, dimCutscenes = true;
+    private boolean mapOff;   // Bottom Screen Map off: nothing built or drawn
     // Bottom Screen Buttons: Hold Z. The buttons are hidden until Z is held, then slide in
     // from the right over the bottom of the map, and slide out when it's let go.
     private boolean slideButtons, zHeld;
@@ -197,6 +198,7 @@ public final class BottomScreenView extends View {
         }
         cutscene = GameState.cutscene();
         GameState.refreshPlayer();
+        mapOff = (GameState.bottomSettings() & 16) != 0;   // Input > Dual Screen > Bottom Screen Map
         refreshMap();
         recordEntry();
         updateHeading();
@@ -323,6 +325,18 @@ public final class BottomScreenView extends View {
         drawFrame(c, frame, r, inner);
         mapClip.reset();
         mapClip.addRoundRect(r, inner, inner, Path.Direction.CW);
+        if (mapOff) {
+            fill.setColor(Color.argb(200, 14, 12, 26));
+            c.drawRoundRect(r, inner, inner, fill);
+            text.setTextAlign(Paint.Align.CENTER);
+            text.setTextSize(3.4f * u);
+            text.setColor(Color.argb(200, 255, 236, 170));
+            c.drawText("Map off", r.centerX(), r.centerY(), text);
+            text.setTextSize(2.4f * u);
+            text.setColor(Color.argb(150, 255, 236, 170));
+            c.drawText("Settings > Input > Bottom Screen Map", r.centerX(), r.centerY() + 4.5f * u, text);
+            return;
+        }
 
         float[] here = GameState.position();
         GameState.MapImage m = mapImage;
@@ -1530,6 +1544,14 @@ public final class BottomScreenView extends View {
 
     private void refreshMap() {
         onMenu = GameState.onMenu();
+        if (mapOff) {
+            // Forget the area, so turning the map back on builds it afresh.
+            mapGeometry = 0;
+            mapImage = null;
+            detail = null;
+            leavingMap = null;
+            return;
+        }
         int id = onMenu ? 0 : GameState.mapGeometryId();   // title screen / file select: no map
         long now = SystemClock.uptimeMillis();
         if (id != mapGeometry) {
