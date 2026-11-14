@@ -731,10 +731,10 @@ index 7a8c13b..bd198be 100644
          VI lastScreenVI;
          uint64_t lastScreenHash;
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..f2a8d02 100644
+index 5a331aa..4df4e12 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -10,7 +10,115 @@
+@@ -10,7 +10,124 @@
  
  #define ENABLE_HIGH_RESOLUTION_RENDERER 1
  
@@ -792,14 +792,18 @@ index 5a331aa..f2a8d02 100644
 +            if ((nowMs - windowStartMs) < 1000.0) {
 +                return;
 +            }
-+            if (samples >= 10) {
++            // A window where the game itself ran slow (loading an area: game frames well over
++            // their usual length) says nothing about the render cost; skip it (13 Nov: each area
++            // load dropped Auto to 30 and the long wait to come back kept it there).
++            const bool gameStalled = (samples >= 10) && ((double(windowMicro) / double(samples)) > 40000.0);
++            if ((samples >= 10) && !gameStalled) {
 +                const double window = double(windowMicro) / double(samples);
 +                if (!capped.load(std::memory_order_relaxed)) {
 +                    const double missed = (wanted > 0) ? (1.0 - double(rendered) / double(wanted)) : 0.0;
 +                    const double busy = double(busyMicro) / double(samples);
 +                    const bool bad = (wanted > samples) && ((missed > 0.10) || (busy > 0.95 * window));
 +                    badWindows = bad ? (badWindows + 1) : 0;
-+                    if (badWindows >= 2) {
++                    if (badWindows >= 3) {   // was 2: one hitch (a map build, a texture upload) cost the 60
 +                        if ((nowMs - lastChangeMs) < 6000.0) {
 +                            backoffMs = std::min(backoffMs * 2.0, 64000.0);
 +                        }
@@ -817,9 +821,14 @@ index 5a331aa..f2a8d02 100644
 +                }
 +                else {
 +                    const double cost = double(frameMicro) / double(samples);
-+                    const bool good = (2.0 * cost) <= (0.8 * window);
++                    // Measured at 30, where the GPU clocks down (401 MHz on the Thor vs 550-680 at
++                    // 60), so a frame looks dearer here than it will be at 60. 0.8.3 wanted two
++                    // frames to fit in 80% of a game frame and often never came back (a frame cost
++                    // 12.5-13.2 ms at 30 against a 13.3 ms bar). Now: try 60 once two frames fit in
++                    // a game frame; if 60 doesn't hold, the back-off doubles the next wait.
++                    const bool good = (2.0 * cost) <= window;
 +                    goodWindows = good ? (goodWindows + 1) : 0;
-+                    if ((goodWindows >= 3) && (nowMs >= retryAtMs)) {
++                    if ((goodWindows >= 2) && (nowMs >= retryAtMs)) {
 +                        capped.store(false, std::memory_order_relaxed);
 +                        lastChangeMs = nowMs;
 +                        badWindows = goodWindows = 0;
@@ -850,7 +859,7 @@ index 5a331aa..f2a8d02 100644
      // WorkloadQueue
  
      WorkloadQueue::WorkloadQueue() {
-@@ -188,7 +296,18 @@ namespace RT64 {
+@@ -188,7 +305,18 @@ namespace RT64 {
          switch (resolutionMode) {
          case UserConfiguration::Resolution::WindowIntegerScale:
              if (ext.sharedResources->swapChainHeight > 0) {
@@ -869,7 +878,7 @@ index 5a331aa..f2a8d02 100644
              }
              else {
                  resolutionMultiplier = 1.0f;
-@@ -226,6 +345,12 @@ namespace RT64 {
+@@ -226,6 +354,12 @@ namespace RT64 {
                  workloadConfig.targetRate = ext.sharedResources->swapChainRate;
              }
  
@@ -882,7 +891,7 @@ index 5a331aa..f2a8d02 100644
              break;
          case UserConfiguration::RefreshRate::Original:
          default:
-@@ -301,6 +426,10 @@ namespace RT64 {
+@@ -301,6 +435,10 @@ namespace RT64 {
          const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
  
          rendererCPUProfiler.start();
@@ -893,7 +902,7 @@ index 5a331aa..f2a8d02 100644
  
          const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
          const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
-@@ -484,6 +613,10 @@ namespace RT64 {
+@@ -484,6 +622,10 @@ namespace RT64 {
  
                      if (colorTarget != nullptr) {
                          rtWidth = std::max(rtWidth, colorTarget->width);
@@ -904,7 +913,7 @@ index 5a331aa..f2a8d02 100644
                          rtHeight = std::max(rtHeight, colorTarget->height);
                          chosenRt = colorTarget;
                      }
-@@ -840,8 +973,15 @@ namespace RT64 {
+@@ -840,8 +982,15 @@ namespace RT64 {
              ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 1);
              ext.workloadGraphicsWorker->commandList->end();
              framebufferRenderer->waitForUploaders();
@@ -920,7 +929,7 @@ index 5a331aa..f2a8d02 100644
              workerMutex.unlock();
  
              // Update the GPU profiler with the results from the timestamps of the frame.
-@@ -880,6 +1020,7 @@ namespace RT64 {
+@@ -880,6 +1029,7 @@ namespace RT64 {
  
      void WorkloadQueue::renderThreadLoop() {
          Thread::setCurrentThreadName("RT64 Workload");
@@ -928,7 +937,7 @@ index 5a331aa..f2a8d02 100644
  
          WorkloadConfiguration workloadConfig;
          int64_t logicalTicks = 0;
-@@ -1070,7 +1211,19 @@ namespace RT64 {
+@@ -1070,7 +1220,19 @@ namespace RT64 {
                          const int64_t currentTimeMicro = workloadTimer.elapsedMicroseconds() - setupTimeMicro;
                          const int64_t expectedTimeMicro = frame * maxTimePerFrameMicro;
                          const int64_t measuredFrameMicro = renderTimeTotalMicro / framesRendered;
@@ -949,7 +958,7 @@ index 5a331aa..f2a8d02 100644
                              displayTicks += workload.viOriginalRate;
                              skippedFrames = true;
                              continue;
-@@ -1162,6 +1315,17 @@ namespace RT64 {
+@@ -1162,6 +1324,17 @@ namespace RT64 {
                      ext.sharedResources->interpolatedCondition.notify_all();
                  }
  

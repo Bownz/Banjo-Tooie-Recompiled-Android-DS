@@ -1046,7 +1046,7 @@ public final class BottomScreenView extends View {
     private volatile GameState.MapImage detail;
     private boolean detailBuilding;
     private final java.util.concurrent.ExecutorService detailWorker = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "BT map detail");
+        Thread t = new Thread(() -> { GameState.backgroundThread(); r.run(); }, "BT map detail");
         t.setPriority(Thread.MIN_PRIORITY);
         return t;
     });
@@ -1509,7 +1509,7 @@ public final class BottomScreenView extends View {
     private boolean mapRebuilt;
     private boolean mapBuilding;
     private final java.util.concurrent.ExecutorService mapWorker = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "BT map");
+        Thread t = new Thread(() -> { GameState.backgroundThread(); r.run(); }, "BT map");
         t.setPriority(Thread.MIN_PRIORITY);
         return t;
     });

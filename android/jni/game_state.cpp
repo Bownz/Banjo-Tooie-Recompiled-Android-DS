@@ -16,6 +16,10 @@
 #include <android/log.h>
 #include <cstdarg>
 #include <dirent.h>
+#include <sched.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#include <fstream>
 #include <sys/stat.h>
 #include <zlib.h>
 #include <jni.h>
@@ -342,7 +346,7 @@ namespace {
     };
     constexpr size_t kPauseWatchCount = sizeof(kPauseWatch) / sizeof(kPauseWatch[0]);
 
-    void pause_watch_thread() {
+    [[maybe_unused]] void pause_watch_thread() {
         uint8_t last[kPauseWatchCount];
         unsigned logged[kPauseWatchCount] = {};
         bool have = false;
@@ -401,10 +405,8 @@ namespace {
                 pthread_setname_np(pthread_self(), "BT probe");
                 probe_thread();
             }).detach();
-            std::thread([] {
-                pthread_setname_np(pthread_self(), "BT pause watch");
-                pause_watch_thread();
-            }).detach();
+            // The pause watch (pause_watch_thread) found its flags on 13 Nov (0.9.3) and isn't
+            // started any more: it woke every 16 ms and logged thousands of lines.
         }
     }
 }
@@ -502,6 +504,37 @@ Java_io_github_bownz_btrecomp_GameState_nativeEntryPoint(JNIEnv* env, jclass, jf
     }
     env->SetFloatArrayRegion(out, 0, 3, p);
     return JNI_TRUE;
+}
+
+// Called first on the app's own background threads (the bottom screen's map builders): run
+// them on the slowest cores at the lowest priority, so building a map never takes a fast core
+// from the game or the renderer (13 Nov: frame drops at 60 FPS lined up with map builds).
+JNIEXPORT void JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeBackgroundThread(JNIEnv*, jclass) {
+    setpriority(PRIO_PROCESS, 0, 19);
+    const long count = sysconf(_SC_NPROCESSORS_CONF);
+    if (count <= 1 || count > CPU_SETSIZE) return;
+    std::vector<long> maxFreq(static_cast<size_t>(count), 0);
+    long slowest = 0;
+    for (long i = 0; i < count; i++) {
+        std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(i) + "/cpufreq/cpuinfo_max_freq");
+        long khz = 0;
+        if (f >> khz) {
+            maxFreq[static_cast<size_t>(i)] = khz;
+            slowest = slowest == 0 ? khz : std::min(slowest, khz);
+        }
+    }
+    if (slowest == 0) return;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    int chosen = 0;
+    for (long i = 0; i < count; i++) {
+        if (maxFreq[static_cast<size_t>(i)] == slowest) {
+            CPU_SET(i, &set);
+            chosen++;
+        }
+    }
+    if (chosen > 0 && chosen < count) sched_setaffinity(0, sizeof(set), &set);
 }
 
 // Whether the game is on its title screen or file select (live session, 13 Nov: map ids 0x18B

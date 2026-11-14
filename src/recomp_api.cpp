@@ -366,7 +366,7 @@ extern "C" void tooie_probe_record_free(uint8_t* rdram, recomp_context* ctx) {
     const gpr slot_ptr = record ? MEM_W(0x30, record) : 0;
     const gpr slot_value = slot_ptr ? MEM_W(0x0, slot_ptr) : 0;
     const gpr frame = MEM_W(0, 0xFFFFFFFF800459C8ULL);
-    if (calls < 400U) {
+    if (calls < 40U) {
         std::fprintf(stderr,
             "[rec-free] #%u frame=%u record=0x%08X slot_ptr=0x%08X "
             "slot_value=0x%08X\n",
@@ -492,7 +492,9 @@ extern "C" void tooie_probe_gate(uint8_t* rdram, recomp_context* ctx) {
     const gpr frame = MEM_W(0, 0xFFFFFFFF800459C8ULL);
     const bool changed = index != last_index || result != last_result;
     const bool periodic = calls != 0U && (calls % 200000U) == 0U;
-    if (changed || calls < 40U || periodic) {
+    // Only the first calls now: printing every change flooded the log (and the game thread)
+    // on each area load (13 Nov, 60 FPS work).
+    if (calls < 40U || periodic) {
         std::fprintf(stderr,
             "[gate] #%u frame=%u index=%u result=%u%s\n", calls,
             static_cast<uint32_t>(frame), index, result,
@@ -566,7 +568,7 @@ constexpr uint32_t kSlotTableSlots = 0xFAU;
 extern "C" void tooie_probe_create(uint8_t* rdram, recomp_context* ctx) {
     (void)rdram;
     static int count = 0;
-    if (count++ >= 400) {
+    if (count++ >= 40) {   // was 400: a burst of lines on the game thread at each area load
         return;
     }
     std::fprintf(stderr, "[create] obj=0x%08X index=%u size=0x%X\n",

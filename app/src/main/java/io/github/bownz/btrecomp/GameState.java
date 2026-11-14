@@ -21,6 +21,7 @@ final class GameState {
     private static native boolean nativePaused();
     private static native boolean nativeCutscene();
     private static native boolean nativeOnMenu();
+    private static native void nativeBackgroundThread();
     private static native boolean nativeEntryPoint(float[] out);
     private static native int[] nativeBuildMap(int maxSize, float capY, int key, float[] info);
     private static native int[] nativeBuildDetail(int key, float x0, float z0, float x1, float z1, int maxSize, float[] info);
@@ -343,6 +344,15 @@ final class GameState {
             }
         } catch (UnsatisfiedLinkError e) {
             return new float[0];
+        }
+    }
+
+    /** Moves the calling thread to the slowest cores at the lowest priority (map builders). */
+    static void backgroundThread() {
+        try {
+            nativeBackgroundThread();
+        } catch (UnsatisfiedLinkError e) {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LOWEST);
         }
     }
 
