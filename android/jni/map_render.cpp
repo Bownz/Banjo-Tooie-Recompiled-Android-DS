@@ -26,6 +26,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <set>
 #include <tuple>
 #include <vector>
@@ -708,7 +709,12 @@ namespace {
     };
     constexpr int16_t kNoGround = INT16_MIN;
     MapCache g_cache;
-    std::mutex g_cacheMutex;
+    // Readers share it; storing a new map takes it alone. The bottom screen's UI thread only
+    // tries it (bt_map_shows_level_above, bt_map_wants_seed) and skips a check when it's busy:
+    // waiting on it while a close-up tile was being drawn (seconds, once 0.9.17 moved the
+    // builders to the slow cores) froze the UI thread, and with it the controls (user, 13 Nov).
+    std::shared_mutex g_cacheMutex;
+    std::mutex g_seedMutex;   // g_seeds
     // Places Banjo has stood on that the play area rule left out (ground well above the main
     // level: the top tier of Mayahem Temple). Per map id, for this run of the app; each map
     // built adds the ground around them back (see bt_map_wants_seed).
@@ -1122,7 +1128,7 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
         const uint16_t mapId = ram.u16(0x80132DC2u);
         std::vector<std::array<float, 3>> seeds;
         {
-            std::lock_guard lock{ g_cacheMutex };
+            std::lock_guard lock{ g_seedMutex };
             auto it = g_seeds.find(mapId);
             if (it != g_seeds.end()) seeds = it->second;
         }
@@ -1502,7 +1508,7 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
     }
 
     {
-        std::lock_guard lock{ g_cacheMutex };
+        std::unique_lock lock{ g_cacheMutex };
         g_cache.backdrop = std::move(backdrop);
         g_cache.bdW = BW; g_cache.bdH = BH;
         g_cache.bdScale = scale / float(cell);
@@ -1533,7 +1539,8 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
 // should switch to the level he's on. Catches what bt_floor_above's 7-of-9 test misses at the
 // edge of what's above (user, 13 Nov: by Bottles' house under the cliff of Jiggywiggy's temple).
 bool bt_map_shows_level_above(uint32_t key, float x, float y, float z) {
-    std::lock_guard lock{ g_cacheMutex };
+    std::shared_lock lock{ g_cacheMutex, std::try_to_lock };
+    if (!lock.owns_lock()) return false;   // being built: check again next time
     const MapCache& c = g_cache;
     if (!c.valid || c.key != key || c.groundY.empty()) return false;
     const int px = int((x - c.minX) * c.scale), pz = int((z - c.minZ) * c.scale);
@@ -1547,7 +1554,8 @@ bool bt_map_shows_level_above(uint32_t key, float x, float y, float z) {
 // of the play area. If so the point is remembered for this area and true is returned: the
 // caller builds the map again, and the ground he's on joins the area.
 bool bt_map_wants_seed(uint32_t key, float x, float y, float z) {
-    std::lock_guard lock{ g_cacheMutex };
+    std::shared_lock lock{ g_cacheMutex, std::try_to_lock };
+    if (!lock.owns_lock()) return false;   // being built: check again next time
     const MapCache& c = g_cache;
     if (!c.valid || c.key != key || c.groundY.empty()) return false;
     const int px = int((x - c.minX) * c.scale), pz = int((z - c.minZ) * c.scale);
@@ -1555,6 +1563,7 @@ bool bt_map_wants_seed(uint32_t key, float x, float y, float z) {
     const size_t i = size_t(pz) * c.W + px;
     if (c.kind[i] == kMain || c.kind[i] == kWater || c.kind[i] == kSolid) return false;
     if (c.groundY[i] == kNoGround || std::fabs(float(c.groundY[i]) - y) > 60.0f) return false;   // on it, not jumping over it
+    std::lock_guard seedLock{ g_seedMutex };
     auto& seeds = g_seeds[c.mapId];
     for (const auto& p : seeds)
         if (std::fabs(p[0] - x) < 300.0f && std::fabs(p[2] - z) < 300.0f && std::fabs(p[1] - y) < 150.0f) return false;
@@ -1572,7 +1581,7 @@ bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int
 // map (bilinear), so the tile matches it and only gets sharper. False when the last map
 // doesn't match the key.
 bool bt_build_detail(uint32_t key, float x0, float z0, float x1, float z1, int maxSize, std::vector<int32_t>& out, float meta[5]) {
-    std::lock_guard lock{ g_cacheMutex };
+    std::shared_lock lock{ g_cacheMutex };
     const MapCache& c = g_cache;
     if (!c.valid || c.key != key || x1 <= x0 || z1 <= z0) return false;
     const float scale = float(std::clamp(maxSize, 64, 3072)) / std::max(x1 - x0, z1 - z0);
@@ -1669,7 +1678,7 @@ bool bt_build_detail(uint32_t key, float x0, float z0, float x1, float z1, int m
 // The last whole-area map's water (1 per map pixel), for the bottom screen's shimmer; empty
 // when it doesn't match the key.
 std::vector<uint8_t> bt_water_mask(uint32_t key, int& W, int& H) {
-    std::lock_guard lock{ g_cacheMutex };
+    std::shared_lock lock{ g_cacheMutex };
     W = H = 0;
     if (!g_cache.valid || g_cache.key != key) return {};
     W = g_cache.W; H = g_cache.H;
@@ -1682,7 +1691,7 @@ std::vector<uint8_t> bt_water_mask(uint32_t key, int& W, int& H) {
 // where it sits: meta = width, height, world x and z of its top-left, pixels per world unit.
 // Empty when the last map doesn't match the key.
 std::vector<int32_t> bt_backdrop(uint32_t key, float meta[5]) {
-    std::lock_guard lock{ g_cacheMutex };
+    std::shared_lock lock{ g_cacheMutex };
     if (!g_cache.valid || g_cache.key != key || g_cache.backdrop.empty()) return {};
     meta[0] = float(g_cache.bdW); meta[1] = float(g_cache.bdH);
     meta[2] = g_cache.bdMinX; meta[3] = g_cache.bdMinZ; meta[4] = g_cache.bdScale;
