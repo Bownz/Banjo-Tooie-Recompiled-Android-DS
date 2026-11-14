@@ -170,6 +170,11 @@ extern "C" int SDL_main(int argc, char* argv[]) {
     setenv("HOME", data_dir.c_str(), 1);
     setenv("XDG_CONFIG_HOME", (data_dir / ".config").c_str(), 1);
     setenv("XDG_DATA_HOME", (data_dir / ".local" / "share").c_str(), 1);
+    // RT64's shader list and the Vulkan pipeline cache (rt64_raster_shader_cache.cpp,
+    // plume_vulkan.cpp): app-private, rebuilt if deleted.
+    const std::filesystem::path render_cache = std::filesystem::path{internal_path} / "rendercache";
+    std::filesystem::create_directories(render_cache, ec);
+    setenv("BT_RENDER_CACHE_DIR", render_cache.c_str(), 1);
 
     // The UI loads "assets/..." relative to the working directory, exactly like the desktop
     // build (on Linux, run.sh changes to the executable's folder for the same reason).
