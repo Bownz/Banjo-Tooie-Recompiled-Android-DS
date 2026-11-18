@@ -637,3 +637,22 @@ extern "C" bool bt_android_game_brief(uint32_t* frames, int* map, bool* idle) {
     *idle = is_paused(rdram) || is_cutscene(rdram) || on_menu;
     return true;
 }
+
+// RT64 (Video > Frame Copy: Smart): whether the game may read its own picture back from memory
+// this frame, so every frame is copied: paused (the pause screen's background), menus,
+// cutscenes, and while Start is held (the frame before the pause screen opens).
+extern "C" uint16_t bt_android_last_n64_buttons();
+extern "C" bool bt_android_frame_copy_needed() {
+    uint8_t* rdram = running_rdram();
+    if (rdram == nullptr) {
+        return true;
+    }
+    const uint16_t id = read_u16(rdram, kMapId);
+    if (id == 0x18B || id == 0x158) {
+        return true;
+    }
+    if (is_paused(rdram) || is_cutscene(rdram)) {
+        return true;
+    }
+    return (bt_android_last_n64_buttons() & 0x1000) != 0;   // Start
+}

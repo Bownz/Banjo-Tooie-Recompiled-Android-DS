@@ -154,6 +154,10 @@ void bt_android_note_n64_buttons(uint16_t buttons) {
     last_n64_buttons.store(buttons, std::memory_order_relaxed);
 }
 
+uint16_t bt_android_last_n64_buttons() {
+    return last_n64_buttons.load(std::memory_order_relaxed);
+}
+
 JNIEXPORT jint JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeN64Buttons(JNIEnv*, jclass) {
     return last_n64_buttons.load(std::memory_order_relaxed);

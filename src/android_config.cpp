@@ -56,8 +56,8 @@ namespace {
 
     // Video > Frame Copy (test): passed to RT64 (rt64-android.patch).
     void apply_frame_copy(uint32_t mode) {
-        rt64_android_set_ram_copy_mode(static_cast<int>(mode <= 2u ? mode : 0u));
-        std::printf("Frame Copy: %s\n", mode == 1u ? "Wait" : mode == 2u ? "Off" : "Late");
+        rt64_android_set_ram_copy_mode(static_cast<int>(mode <= 3u ? mode : 3u));
+        std::printf("Frame Copy: %s\n", mode == 1u ? "Wait" : mode == 2u ? "Off" : mode == 3u ? "Smart" : "Late");
         std::fflush(stdout);
     }
     // Video > Live Debug Log: a once-a-second status line for adb logcat (perf_monitor.cpp).
@@ -473,19 +473,20 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
         // game's memory (rt64-android.patch, rt64_android_set_ram_copy_mode). Late is the
         // DK64 speed-up; Wait is upstream; Off skips the copy (fastest, may break effects).
         static EnumOptionVector copy_options = {
-            {0u, "Late", "Late (fast)"},
-            {1u, "Wait", "Wait (safe)"},
+            {3u, "Smart", "Smart (fastest)"},
+            {0u, "Late", "Every frame"},
+            {1u, "Wait", "Every frame, game waits"},
             {2u, "Off", "Off (test)"},
         };
         graphics_config.add_enum_option(
             "android_frame_copy",
-            "Frame Copy (test)",
-            "How each finished frame is copied back to the game, which uses it for some effects. "
-            "Late: fastest, copied while the game carries on. Wait: the game waits for the copy, as on PC. "
-            "Off: no copy at all; much faster, but effects that use the last frame may look wrong. "
-            "For testing flicker and speed.",
+            "Frame Copy",
+            "Each copy redraws the scene at the N64's resolution and puts it in the game's memory, which "
+            "the game reads for a few things (like the pause screen). Smart: every 4th frame, and every "
+            "frame while paused, in menus and cutscenes; saves up to a quarter of the GPU's time in busy "
+            "places. Every frame: as before. Game waits: as on PC. Off: never (some effects may look wrong).",
             copy_options,
-            0u
+            3u
         );
         graphics_config.add_option_change_callback("android_frame_copy",
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
@@ -518,13 +519,16 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             {0u, "Off", "Off"},
             {1u, "On", "On"},
         };
+        // On by default here (0.9.22): Banjo-Tooie is limited by the GPU in busy places, and
+        // without the idle work the GPU sat at 401-550 MHz, 70% busy, while frames were being
+        // dropped in Jinjo Village (18 Nov slowdown report); with it, 550-680 MHz.
         graphics_config.add_enum_option(
             "android_keep_gpu_awake",
             "Keep GPU Awake",
-            "Sends the GPU a tiny job every millisecond between frames so it doesn't slow right down. "
-            "Off runs cooler; turn it on if the frame rate dips when little is happening on screen.",
+            "Sends the GPU a tiny job every millisecond between frames so it doesn't slow down between "
+            "them. On: steadier frame rate in busy places. Off: runs a little cooler.",
             keep_awake_options,
-            0u
+            1u
         );
         graphics_config.add_option_change_callback("android_keep_gpu_awake",
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
@@ -642,7 +646,19 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
 
 void bt::android::after_config_loaded() {
     {
-        const recomp::config::ConfigValueVariant mode = recompui::config::get_graphics_config().get_option_value("android_frame_copy");
+        recomp::config::Config& graphics = recompui::config::get_graphics_config();
+        // Once (0.9.22): Frame Copy's old default, Late, becomes Smart.
+        const std::filesystem::path copy_marker = config_file("frame_copy_smart.txt");
+        if (!std::filesystem::exists(copy_marker)) {
+            const recomp::config::ConfigValueVariant old_mode = graphics.get_option_value("android_frame_copy");
+            if (const uint32_t* value = std::get_if<uint32_t>(&old_mode); value != nullptr && *value == 0u) {
+                graphics.update_option_value("android_frame_copy", 3u);
+                graphics.save_config();
+            }
+            std::ofstream out{ copy_marker };
+            out << "done\n";
+        }
+        const recomp::config::ConfigValueVariant mode = graphics.get_option_value("android_frame_copy");
         if (const uint32_t* value = std::get_if<uint32_t>(&mode)) {
             apply_frame_copy(*value);
         }
@@ -660,7 +676,16 @@ void bt::android::after_config_loaded() {
         }
     }
     {
-        const recomp::config::ConfigValueVariant mode = recompui::config::get_graphics_config().get_option_value("android_keep_gpu_awake");
+        // Once (0.9.22): 0.9.21 shipped Keep GPU Awake off by default; it's on now.
+        recomp::config::Config& graphics = recompui::config::get_graphics_config();
+        const std::filesystem::path awake_marker = config_file("keep_gpu_awake_on.txt");
+        if (!std::filesystem::exists(awake_marker)) {
+            graphics.update_option_value("android_keep_gpu_awake", 1u);
+            graphics.save_config();
+            std::ofstream out{ awake_marker };
+            out << "done\n";
+        }
+        const recomp::config::ConfigValueVariant mode = graphics.get_option_value("android_keep_gpu_awake");
         if (const uint32_t* value = std::get_if<uint32_t>(&mode)) {
             bt_android_set_gpu_keep_awake(*value == 1u);
         }
