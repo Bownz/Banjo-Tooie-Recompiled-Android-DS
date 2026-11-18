@@ -521,16 +521,19 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             {0u, "Off", "Off"},
             {1u, "On", "On"},
         };
-        // On by default here (0.9.22): Banjo-Tooie is limited by the GPU in busy places, and
-        // without the idle work the GPU sat at 401-550 MHz, 70% busy, while frames were being
-        // dropped in Jinjo Village (18 Nov slowdown report); with it, 550-680 MHz.
+        // Off by default (again from 0.9.23's follow-up, 0.9.24). 0.9.22 turned it on, and the
+        // slowdown reports since show the GPU at 401-475 MHz in Jinjo Village at Standard
+        // performance, against 550-680 MHz with it off (0.9.21): its thread takes the workload
+        // worker's lock and waits for its tiny job, which queues behind the frame being drawn,
+        // so the next frame is submitted late, the GPU idles between frames and Android clocks
+        // it down (18 Nov).
         graphics_config.add_enum_option(
             "android_keep_gpu_awake",
             "Keep GPU Awake",
-            "Sends the GPU a tiny job every millisecond between frames so it doesn't slow down between "
-            "them. On: steadier frame rate in busy places. Off: runs a little cooler.",
+            "Sends the GPU a tiny job every millisecond between frames. Off is faster on most "
+            "phones (it can hold up the next frame); try On only if the frame rate dips in quiet scenes.",
             keep_awake_options,
-            1u
+            0u
         );
         graphics_config.add_option_change_callback("android_keep_gpu_awake",
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
@@ -719,11 +722,11 @@ void bt::android::after_config_loaded() {
         std::fflush(stdout);
     }
     {
-        // Once (0.9.22): 0.9.21 shipped Keep GPU Awake off by default; it's on now.
+        // Once (0.9.24): 0.9.22 switched Keep GPU Awake on; it's off again.
         recomp::config::Config& graphics = recompui::config::get_graphics_config();
-        const std::filesystem::path awake_marker = config_file("keep_gpu_awake_on.txt");
+        const std::filesystem::path awake_marker = config_file("keep_gpu_awake_off.txt");
         if (!std::filesystem::exists(awake_marker)) {
-            graphics.update_option_value("android_keep_gpu_awake", 1u);
+            graphics.update_option_value("android_keep_gpu_awake", 0u);
             graphics.save_config();
             std::ofstream out{ awake_marker };
             out << "done\n";
@@ -731,6 +734,8 @@ void bt::android::after_config_loaded() {
         const recomp::config::ConfigValueVariant mode = graphics.get_option_value("android_keep_gpu_awake");
         if (const uint32_t* value = std::get_if<uint32_t>(&mode)) {
             bt_android_set_gpu_keep_awake(*value == 1u);
+            std::printf("Keep GPU Awake: %s\n", *value == 1u ? "on" : "off");
+            std::fflush(stdout);
         }
     }
     // Once: set-ups made before B backed out of menus get Back (Menu) on B.
