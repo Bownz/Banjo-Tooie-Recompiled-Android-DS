@@ -24,6 +24,9 @@
 
 int bt_main(int argc, char** argv);
 
+extern "C" void bt_android_record_output(const char* data, size_t size);   // slowdown_recorder.cpp
+extern "C" void bt_android_set_slowdown_folder(const char* data_dir);
+
 namespace {
     constexpr const char* log_tag = "BTRecomp";
 
@@ -52,6 +55,7 @@ namespace {
             char buffer[1024];
             ssize_t size;
             while ((size = read(pipe_fds[0], buffer, sizeof(buffer) - 1)) > 0) {
+                bt_android_record_output(buffer, size_t(size));   // slowdown_recorder.cpp
                 if (session_log != nullptr) {
                     fwrite(buffer, 1, size_t(size), session_log);
                     fflush(session_log);
@@ -163,6 +167,7 @@ extern "C" int SDL_main(int argc, char* argv[]) {
 
     std::error_code ec;
     std::filesystem::create_directories(data_dir, ec);
+    bt_android_set_slowdown_folder(data_dir.c_str());   // reports in <data>/logs/slowdowns
 
     // recompui::file::get_app_folder_path() honours APP_FOLDER_PATH on Linux-like
     // platforms (Android defines __linux__), and RT64's user paths fall back to HOME.

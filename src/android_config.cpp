@@ -36,6 +36,7 @@
 extern "C" void bt_android_set_touch_controls_mode(int mode);   // android/jni/touch_controller.cpp
 extern "C" void bt_android_edit_touch_layout();                  // android/jni/touch_controller.cpp
 extern "C" void bt_android_set_bottom_screen(int enabled);        // android/jni/touch_controller.cpp
+extern "C" void bt_android_set_gpu_keep_awake(bool on);           // android/jni/perf_hint.cpp
 extern "C" void rt64_android_set_ram_copy_mode(int mode);  // rt64-android.patch
 extern "C" void rt64_android_set_auto_framerate(int enabled);  // rt64-android.patch
 extern "C" void bt_android_set_live_log(int on);              // android/jni/perf_monitor.cpp
@@ -510,6 +511,27 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
                 apply_auto_framerate(std::get<uint32_t>(cur));
             });
+        // RT64's "idle work": a tiny GPU job every millisecond between frames that stops the GPU
+        // clocking right down. The performance hints do that job now, so it's off by default
+        // (less heat, so less throttling later on); kept as an option to compare (from DK64).
+        static EnumOptionVector keep_awake_options = {
+            {0u, "Off", "Off"},
+            {1u, "On", "On"},
+        };
+        graphics_config.add_enum_option(
+            "android_keep_gpu_awake",
+            "Keep GPU Awake",
+            "Sends the GPU a tiny job every millisecond between frames so it doesn't slow right down. "
+            "Off runs cooler; turn it on if the frame rate dips when little is happening on screen.",
+            keep_awake_options,
+            0u
+        );
+        graphics_config.add_option_change_callback("android_keep_gpu_awake",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
+                if (context != recomp::config::OptionChangeContext::Temporary) {
+                    bt_android_set_gpu_keep_awake(std::get<uint32_t>(cur) == 1u);
+                }
+            });
         static EnumOptionVector live_options = {
             {0u, "Off", "Off"},
             {1u, "On", "On"},
@@ -635,6 +657,12 @@ void bt::android::after_config_loaded() {
         const recomp::config::ConfigValueVariant mode = recompui::config::get_graphics_config().get_option_value("android_live_log");
         if (const uint32_t* value = std::get_if<uint32_t>(&mode)) {
             apply_live_log(*value);
+        }
+    }
+    {
+        const recomp::config::ConfigValueVariant mode = recompui::config::get_graphics_config().get_option_value("android_keep_gpu_awake");
+        if (const uint32_t* value = std::get_if<uint32_t>(&mode)) {
+            bt_android_set_gpu_keep_awake(*value == 1u);
         }
     }
     // Once: set-ups made before B backed out of menus get Back (Menu) on B.

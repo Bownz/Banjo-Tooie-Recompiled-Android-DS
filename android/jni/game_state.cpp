@@ -621,3 +621,19 @@ extern "C" bool bt_android_live_state(char* buf, size_t size, uint32_t* frames) 
         read_f32(rdram, 0x8012CEACu), paused ? " paused" : "", is_cutscene(rdram) ? " cutscene" : "");
     return true;
 }
+
+// For the slowdown recorder (perf_monitor.cpp, every second): the game frame counter, the map,
+// and whether the second shouldn't count (paused, a cutscene, the title screen or file select).
+// False before the game runs.
+extern "C" bool bt_android_game_brief(uint32_t* frames, int* map, bool* idle) {
+    uint8_t* rdram = running_rdram();
+    if (rdram == nullptr) {
+        return false;
+    }
+    *frames = read_u32(rdram, kGameFrameCount);
+    const uint16_t id = read_u16(rdram, kMapId);
+    *map = id;
+    const bool on_menu = id == 0x18B || id == 0x158;
+    *idle = is_paused(rdram) || is_cutscene(rdram) || on_menu;
+    return true;
+}

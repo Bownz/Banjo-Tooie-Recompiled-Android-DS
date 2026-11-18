@@ -344,3 +344,14 @@ add_custom_command(TARGET BanjoTooieRecompiled POST_BUILD
 endif()
 
 set_property(TARGET BanjoTooieRecompiled PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+if (ANDROID)
+    # Android: the code that runs every frame (the recompiled game, its patches, the runtime,
+    # RT64 and plume) built at -O3 and scheduled for current Snapdragon big cores. -mtune only
+    # changes instruction scheduling, so the app still runs on any 64-bit ARM phone (from DK64).
+    foreach(hot_target RecompiledFuncs PatchesLib librecomp ultramodern rt64 plume)
+        if (TARGET ${hot_target})
+            target_compile_options(${hot_target} PRIVATE -O3 -mtune=cortex-x3)
+        endif()
+    endforeach()
+endif()

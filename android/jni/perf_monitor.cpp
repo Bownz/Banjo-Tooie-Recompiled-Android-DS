@@ -27,6 +27,10 @@
 
 extern "C" uint32_t rt64_android_presented_frames();
 extern "C" bool bt_android_live_state(char* buf, size_t size, uint32_t* frames);
+extern "C" void bt_android_set_thread_role(int role);
+extern "C" bool bt_android_game_brief(uint32_t* frames, int* map, bool* idle);
+extern "C" void bt_android_slowdown_second(float game_fps, float shown_fps, int map);   // slowdown_recorder.cpp
+extern "C" void bt_android_record_line(const char* line);
 
 namespace {
     constexpr const char* log_tag = "BTRecomp";
@@ -129,20 +133,39 @@ namespace {
         uint32_t presentedBefore = rt64_android_presented_frames();
         uint32_t gameBefore = 0;
         bool gameKnown = false;
+        uint32_t briefBefore = 0;
+        bool briefKnown = false;
         long long ticksBefore = total_ticks(before);
         while (true) {
             // Every second while the live log is on, every 5 seconds otherwise.
             for (int i = 0; i < 5; i++) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
-                if (!live.load()) {
-                    continue;
-                }
                 const auto t = std::chrono::steady_clock::now();
                 const double dt = std::chrono::duration<double>(t - liveLast).count();
                 liveLast = t;
                 const uint32_t presented = rt64_android_presented_frames();
                 const double fps = (presented - presentedBefore) / dt;
                 presentedBefore = presented;
+                // Every second, live log or not: the slowdown recorder's frame rates (game frames
+                // and frames shown), except while paused, in cutscenes and menus, and after gaps
+                // (the app in the background).
+                {
+                    uint32_t frames = 0;
+                    int map = 0;
+                    bool idle = true;
+                    if (bt_android_game_brief(&frames, &map, &idle)) {
+                        const bool counterOk = briefKnown && frames >= briefBefore;
+                        const double gameRate = counterOk ? (frames - briefBefore) / dt : -1.0;
+                        briefBefore = frames;
+                        briefKnown = true;
+                        if (!idle && dt < 2.0 && gameRate >= 0.0) {
+                            bt_android_slowdown_second(float(gameRate), float(fps), map);
+                        }
+                    }
+                }
+                if (!live.load()) {
+                    continue;
+                }
                 char state[160] = "game not running";
                 uint32_t game = 0;
                 double gameFps = -1;
@@ -202,6 +225,7 @@ namespace {
             snprintf(tail, sizeof(tail), " | total %.0f%%", total);
             line += tail;
             __android_log_print(ANDROID_LOG_INFO, log_tag, "%s", line.c_str());
+            bt_android_record_line(line.c_str());
 
             // Clock speeds, if readable (MHz).
             std::string clocks = "Perf clocks: CPU";
@@ -224,6 +248,7 @@ namespace {
                 clocks += part;
             }
             __android_log_print(ANDROID_LOG_INFO, log_tag, "%s", clocks.c_str());
+            bt_android_record_line(clocks.c_str());
         }
     }
 }
@@ -235,6 +260,7 @@ extern "C" void bt_android_start_perf_monitor() {
     }
     std::thread([] {
         pthread_setname_np(pthread_self(), "Perf monitor");
+        bt_android_set_thread_role(2);   // background: off the cores the game uses (cpu_layout.cpp)
         run();
     }).detach();
 }

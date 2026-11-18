@@ -69,125 +69,11 @@ index 79dfc38..ff188ea 100644
  
  # Add any Apple-specific source files and libraries
  if (APPLE)
-diff --git a/src/common/rt64_android_hint.h b/src/common/rt64_android_hint.h
-new file mode 100644
-index 0000000..587a0e5
---- /dev/null
-+++ b/src/common/rt64_android_hint.h
-@@ -0,0 +1,108 @@
-+//
-+// RT64 (Android): performance hint sessions (ADPF, Android 13+).
-+//
-+// The renderer's threads tell Android how long each frame's work took against the time it
-+// must fit in (16.7 ms for 60 FPS), so the CPU governor raises their clocks before a slow
-+// frame instead of after it. Loaded with dlsym: the app also runs on Android 9-12, where these
-+// calls don't exist and this does nothing.
-+//
-+
-+#pragma once
-+
-+#if defined(__ANDROID__)
-+#   include <cstdint>
-+#   include <cstdio>
-+#   include <mutex>
-+#   include <vector>
-+#   include <dlfcn.h>
-+#   include <unistd.h>
-+
-+namespace RT64::AndroidHint {
-+    // 0: the workload (render) and present threads. 1: the display-list thread.
-+    enum Group : int { Render = 0, DisplayLists = 1, GroupCount = 2 };
-+
-+    struct Api {
-+        void *(*getManager)() = nullptr;
-+        void *(*createSession)(void *, const int32_t *, size_t, int64_t) = nullptr;
-+        int (*reportActual)(void *, int64_t) = nullptr;
-+        void (*closeSession)(void *) = nullptr;
-+        void *manager = nullptr;
-+        bool loaded = false, available = false;
-+    };
-+
-+    struct State {
-+        std::mutex mutex;
-+        Api api;
-+        std::vector<int32_t> tids[GroupCount];
-+        void *session[GroupCount] = {};
-+        bool dirty[GroupCount] = {};
-+    };
-+
-+    inline State &state() {
-+        static State s;
-+        return s;
-+    }
-+
-+    inline constexpr int64_t TargetNanos = 16666667;
-+
-+    inline bool loadLocked(State &s) {
-+        if (s.api.loaded) {
-+            return s.api.available;
-+        }
-+        s.api.loaded = true;
-+        void *lib = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
-+        if (lib == nullptr) {
-+            return false;
-+        }
-+        s.api.getManager = reinterpret_cast<void *(*)()>(dlsym(lib, "APerformanceHint_getManager"));
-+        s.api.createSession = reinterpret_cast<void *(*)(void *, const int32_t *, size_t, int64_t)>(dlsym(lib, "APerformanceHint_createSession"));
-+        s.api.reportActual = reinterpret_cast<int (*)(void *, int64_t)>(dlsym(lib, "APerformanceHint_reportActualWorkDuration"));
-+        s.api.closeSession = reinterpret_cast<void (*)(void *)>(dlsym(lib, "APerformanceHint_closeSession"));
-+        if ((s.api.getManager == nullptr) || (s.api.createSession == nullptr) || (s.api.reportActual == nullptr) || (s.api.closeSession == nullptr)) {
-+            fprintf(stdout, "Performance hint: not available on this Android version\n");
-+            fflush(stdout);
-+            return false;
-+        }
-+        s.api.manager = s.api.getManager();
-+        s.api.available = (s.api.manager != nullptr);
-+        if (!s.api.available) {
-+            fprintf(stdout, "Performance hint: no manager on this device\n");
-+            fflush(stdout);
-+        }
-+        return s.api.available;
-+    }
-+
-+    // Adds the calling thread to a group (once, at the start of the thread).
-+    inline void join(Group group) {
-+        State &s = state();
-+        std::lock_guard<std::mutex> lock(s.mutex);
-+        if (!loadLocked(s)) {
-+            return;
-+        }
-+        s.tids[group].push_back(int32_t(gettid()));
-+        s.dirty[group] = true;
-+    }
-+
-+    // The time one unit of work took (a rendered frame; a display list), in nanoseconds.
-+    inline void report(Group group, int64_t actualNanos) {
-+        State &s = state();
-+        std::lock_guard<std::mutex> lock(s.mutex);
-+        if (!s.api.available || (actualNanos <= 0)) {
-+            return;
-+        }
-+        if (s.dirty[group]) {
-+            s.dirty[group] = false;
-+            if (s.session[group] != nullptr) {
-+                s.api.closeSession(s.session[group]);
-+            }
-+            s.session[group] = s.api.createSession(s.api.manager, s.tids[group].data(), s.tids[group].size(), TargetNanos);
-+            fprintf(stdout, "Performance hint: %s session for %zu thread(s), target %.1f ms%s\n", (group == Render) ? "render" : "display-list",
-+                s.tids[group].size(), double(TargetNanos) / 1e6, (s.session[group] != nullptr) ? "" : " (refused)");
-+            fflush(stdout);
-+        }
-+        if (s.session[group] != nullptr) {
-+            s.api.reportActual(s.session[group], actualNanos);
-+        }
-+    }
-+}
-+#endif
 diff --git a/src/common/rt64_thread.cpp b/src/common/rt64_thread.cpp
-index c4b080b..45e070a 100644
+index c4b080b..764389a 100644
 --- a/src/common/rt64_thread.cpp
 +++ b/src/common/rt64_thread.cpp
-@@ -12,6 +12,10 @@
+@@ -12,6 +12,14 @@
  #   include "utf8conv/utf8conv.h"
  #elif defined(__linux__)
  #   include <pthread.h>
@@ -195,10 +81,14 @@ index c4b080b..45e070a 100644
 +#       include <sys/resource.h>
 +#       include <unistd.h>
 +#   endif
++#endif
++
++#if defined(__ANDROID__)
++extern "C" void bt_android_set_thread_role(int role) __attribute__((weak));
  #endif
  
  namespace RT64 {
-@@ -55,6 +59,21 @@ namespace RT64 {
+@@ -55,6 +63,27 @@ namespace RT64 {
      void Thread::setCurrentThreadPriority(Priority priority) {
  #   if defined(_WIN32)
          SetThreadPriority(GetCurrentThread(), toWindowsPriority(priority));
@@ -217,6 +107,12 @@ index c4b080b..45e070a 100644
 +        default: break;
 +        }
 +        setpriority(PRIO_PROCESS, gettid(), nice);
++
++        // Background work (shader compiling, texture streaming) also moves to the small cores,
++        // via the game's CPU layout (android/jni/cpu_layout.cpp), when that's linked in.
++        if ((nice >= 10) && (bt_android_set_thread_role != nullptr)) {
++            bt_android_set_thread_role(2);
++        }
  #   elif defined(__linux__) || defined(__APPLE__)
          // On Linux, thread priorities can't be changed under the default scheduler policy (SCHED_OTHER) and the other policies
          // that are available without root privileges are lower priority. Instead you can set the thread's "nice" value, which ranges
@@ -238,14 +134,12 @@ index 7006549..cec813b 100644
              return nullptr;
          }
 diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
-index ee8bc1f..230440d 100644
+index ee8bc1f..55dbd2b 100644
 --- a/src/hle/rt64_application.cpp
 +++ b/src/hle/rt64_application.cpp
-@@ -2,7 +2,12 @@
- // RT64
+@@ -3,6 +3,10 @@
  //
  
-+#include "common/rt64_android_hint.h"
  #include "rt64_application.h"
 +
 +#if defined(__ANDROID__)
@@ -254,7 +148,7 @@ index ee8bc1f..230440d 100644
  #include "rhi/rt64_render_hooks.h"
  
  #include <cinttypes>
-@@ -18,11 +23,13 @@
+@@ -18,11 +22,13 @@
  
  //#define LOG_DISPLAY_LISTS
  
@@ -269,7 +163,7 @@ index ee8bc1f..230440d 100644
      extern std::unique_ptr<RenderInterface> CreateVulkanInterface(RenderWindow renderWindow);
  #else
      extern std::unique_ptr<RenderInterface> CreateVulkanInterface();
-@@ -33,7 +40,7 @@ namespace RT64 {
+@@ -33,7 +39,7 @@ namespace RT64 {
      // Constants
  
      static std::unique_ptr<RenderInterface> CreateVulkanInterfaceWrapper(RenderWindow renderWindow) {
@@ -278,7 +172,7 @@ index ee8bc1f..230440d 100644
          return plume::CreateVulkanInterface(renderWindow);
  #else
          return plume::CreateVulkanInterface();
-@@ -316,16 +323,38 @@ namespace RT64 {
+@@ -316,16 +322,38 @@ namespace RT64 {
          workloadExtrasUploader = std::make_unique<BufferUploader>(device.get());
          workloadVelocityUploader = std::make_unique<BufferUploader>(device.get());
          workloadTilesUploader = std::make_unique<BufferUploader>(device.get());
@@ -317,7 +211,7 @@ index ee8bc1f..230440d 100644
          swapChainDesc.textureCount = (userConfig.displayBuffering == UserConfiguration::DisplayBuffering::Triple) ? 3 : 2;
  
          // Enable present wait if supported by the device. We specify a max latency of 1 as we use it to wait right before the next
-@@ -441,6 +470,7 @@ namespace RT64 {
+@@ -441,6 +469,7 @@ namespace RT64 {
          stateExt.device = device.get();
          stateExt.swapChain = swapChain.get();
          stateExt.framebufferGraphicsWorker = framebufferGraphicsWorker.get();
@@ -325,24 +219,7 @@ index ee8bc1f..230440d 100644
          stateExt.shaderLibrary = shaderLibrary.get();
          stateExt.drawDataUploader = drawDataUploader.get();
          stateExt.transformsUploader = transformsUploader.get();
-@@ -499,6 +529,16 @@ namespace RT64 {
-             else {
-                 interpreter->processRDPLists(dlStartAddress, dlStart, dlEnd);
-             }
-+#       if defined(__ANDROID__)
-+            if (isHLE) {
-+                static thread_local bool hintJoined = false;
-+                if (!hintJoined) {
-+                    hintJoined = true;
-+                    AndroidHint::join(AndroidHint::DisplayLists);
-+                }
-+                AndroidHint::report(AndroidHint::DisplayLists, int64_t(displayListTimer.elapsedMicroseconds()) * 1000);
-+            }
-+#       endif
-         }
- 
-         if (isHLE) {
-@@ -522,6 +562,41 @@ namespace RT64 {
+@@ -522,6 +551,41 @@ namespace RT64 {
          appWindow->sdlCheckFilterInstallation();
          screenApiProfiler.logAndRestart();
          state->updateScreen(core.decodeVI(), false);
@@ -542,16 +419,17 @@ index dccaa87..5a0cbe9 100644
          state->dlCpuProfiler.start();
  
 diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
-index 7de5b69..1fc20de 100644
+index 7de5b69..ee599d7 100644
 --- a/src/hle/rt64_present_queue.cpp
 +++ b/src/hle/rt64_present_queue.cpp
-@@ -2,8 +2,19 @@
- // RT64
- //
+@@ -4,6 +4,20 @@
  
-+#include "common/rt64_android_hint.h"
  #include "rt64_present_queue.h"
  
++#if defined(__ANDROID__)
++extern "C" void bt_android_perf_hint_add_thread() __attribute__((weak));
++#endif
++
 +#if defined(__ANDROID__)
 +#   include <atomic>
 +// Frames actually shown on screen (including the in-between frames made for a higher
@@ -565,7 +443,7 @@ index 7de5b69..1fc20de 100644
  #include "common/rt64_thread.h"
  #include "rhi/rt64_render_hooks.h"
  
-@@ -257,8 +268,9 @@ namespace RT64 {
+@@ -257,8 +271,9 @@ namespace RT64 {
              }
          }
  
@@ -577,7 +455,7 @@ index 7de5b69..1fc20de 100644
              uint32_t textureCount = ext.swapChain->getTextureCount();
              swapChainFramebuffers.resize(textureCount);
              for (uint32_t i = 0; i < textureCount; i++) {
-@@ -403,6 +415,9 @@ namespace RT64 {
+@@ -403,6 +418,9 @@ namespace RT64 {
                  presentTimestamp = Timer::current();
                  swapChainValid = ext.swapChain->present(swapChainIndex, &waitSemaphore, 1);
                  presentProfiler.logAndRestart();
@@ -587,14 +465,16 @@ index 7de5b69..1fc20de 100644
              }
          }
      }
-@@ -433,6 +448,10 @@ namespace RT64 {
+@@ -433,6 +451,12 @@ namespace RT64 {
  
      void PresentQueue::threadLoop() {
          Thread::setCurrentThreadName("RT64 Present");
-+        Thread::setCurrentThreadPriority(Thread::Priority::High);
 +#   if defined(__ANDROID__)
-+        AndroidHint::join(AndroidHint::Render);
++        if (bt_android_perf_hint_add_thread != nullptr) {
++            bt_android_perf_hint_add_thread();
++        }
 +#   endif
++        Thread::setCurrentThreadPriority(Thread::Priority::High);
  
          // Create the semaphore the acquire method will use.
          acquiredSemaphore = ext.device->createCommandSemaphore();
@@ -870,10 +750,24 @@ index 7a8c13b..bd198be 100644
          VI lastScreenVI;
          uint64_t lastScreenHash;
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..773fd8b 100644
+index 5a331aa..a2c0f1e 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -10,7 +10,190 @@
+@@ -4,13 +4,203 @@
+ 
+ #include "rt64_workload_queue.h"
+ 
++#if defined(__ANDROID__)
++// Android performance hints (android/jni/perf_hint.cpp in the game), if linked in.
++extern "C" void bt_android_perf_hint_add_thread() __attribute__((weak));
++extern "C" void bt_android_perf_hint_frame(int64_t start_ns, int64_t wall_ns, int64_t target_ns) __attribute__((weak));
++extern "C" int64_t bt_android_perf_hint_now_ns() __attribute__((weak));
++extern "C" bool bt_android_gpu_keep_awake() __attribute__((weak));
++#endif
++
+ #include "common/rt64_thread.h"
+ 
+ #include "rt64_present_queue.h"
  
  #define ENABLE_HIGH_RESOLUTION_RENDERER 1
  
@@ -882,7 +776,6 @@ index 5a331aa..773fd8b 100644
 +#   include <algorithm>
 +#   include <cstdio>
 +#   include "common/rt64_elapsed_timer.h"
-+#   include "common/rt64_android_hint.h"
 +namespace {
 +    // Android "60 FPS: Auto". While the device can't render two frames per game frame, drop the
 +    // in-between frames (a steady 30, which looks smoother than 60 with frames skipped
@@ -1064,7 +957,7 @@ index 5a331aa..773fd8b 100644
      // WorkloadQueue
  
      WorkloadQueue::WorkloadQueue() {
-@@ -102,7 +285,11 @@ namespace RT64 {
+@@ -102,7 +292,11 @@ namespace RT64 {
          vertexProcessor = std::make_unique<VertexProcessor>(ext.device);
          framebufferRenderer = std::make_unique<FramebufferRenderer>(ext.workloadGraphicsWorker, true, ext.createdGraphicsAPI, ext.shaderLibrary);
          renderFramebufferManager = std::make_unique<RenderFramebufferManager>(ext.device);
@@ -1076,7 +969,7 @@ index 5a331aa..773fd8b 100644
  
          projectionProcessor.setup(ext.workloadGraphicsWorker);
          transformProcessor.setup(ext.workloadGraphicsWorker);
-@@ -188,7 +375,18 @@ namespace RT64 {
+@@ -188,7 +382,18 @@ namespace RT64 {
          switch (resolutionMode) {
          case UserConfiguration::Resolution::WindowIntegerScale:
              if (ext.sharedResources->swapChainHeight > 0) {
@@ -1095,7 +988,7 @@ index 5a331aa..773fd8b 100644
              }
              else {
                  resolutionMultiplier = 1.0f;
-@@ -226,6 +424,12 @@ namespace RT64 {
+@@ -226,6 +431,12 @@ namespace RT64 {
                  workloadConfig.targetRate = ext.sharedResources->swapChainRate;
              }
  
@@ -1108,7 +1001,34 @@ index 5a331aa..773fd8b 100644
              break;
          case UserConfiguration::RefreshRate::Original:
          default:
-@@ -301,6 +505,10 @@ namespace RT64 {
+@@ -273,12 +484,26 @@ namespace RT64 {
+             ext.sharedResources->interpolatedColorTargets.clear();
+         }
+ 
++#   if defined(__ANDROID__)
++        // Android: the idle work only runs with Keep GPU Awake on (Graphics), checked every
++        // frame so the option works straight away; the performance hints do its job.
++        {
++            const bool wantIdle = ext.sharedResources->userConfig.idleWorkActive && (bt_android_gpu_keep_awake != nullptr) && bt_android_gpu_keep_awake();
++            if (wantIdle != idleActive) {
++                idleMutex.lock();
++                idleActive = wantIdle;
++                idleMutex.unlock();
++                idleCondition.notify_all();
++            }
++        }
++#   else
+         if (ext.sharedResources->userConfigChanged) {
+             idleMutex.lock();
+             idleActive = ext.sharedResources->userConfig.idleWorkActive;
+             idleMutex.unlock();
+             idleCondition.notify_all();
+         }
++#   endif
+     }
+ 
+     void WorkloadQueue::threadConfigurationValidate() {
+@@ -301,6 +526,10 @@ namespace RT64 {
          const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
  
          rendererCPUProfiler.start();
@@ -1119,7 +1039,7 @@ index 5a331aa..773fd8b 100644
  
          const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
          const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
-@@ -484,6 +692,10 @@ namespace RT64 {
+@@ -484,6 +713,10 @@ namespace RT64 {
  
                      if (colorTarget != nullptr) {
                          rtWidth = std::max(rtWidth, colorTarget->width);
@@ -1130,7 +1050,7 @@ index 5a331aa..773fd8b 100644
                          rtHeight = std::max(rtHeight, colorTarget->height);
                          chosenRt = colorTarget;
                      }
-@@ -699,7 +911,12 @@ namespace RT64 {
+@@ -699,7 +932,12 @@ namespace RT64 {
  
              workerMutex.lock();
              ext.workloadGraphicsWorker->commandList->begin();
@@ -1143,7 +1063,7 @@ index 5a331aa..773fd8b 100644
              ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 0);
              framebufferRenderer->endFramebuffers(ext.workloadGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, workloadConfig.raytracingEnabled);
              framebufferRenderer->recordSetup(ext.workloadGraphicsWorker, bufferUploaders, processRSP ? rspProcessor.get() : nullptr, processWorldVertices ? vertexProcessor.get() : nullptr, &workload.outputBuffers, workloadConfig.raytracingEnabled);
-@@ -708,6 +925,13 @@ namespace RT64 {
+@@ -708,6 +946,13 @@ namespace RT64 {
              uint32_t framebufferIndex = 0;
              for (uint32_t f = 0; f < fbPairCount; f++) {
                  const FramebufferPair &fbPair = workload.fbPairs[f];
@@ -1157,7 +1077,7 @@ index 5a331aa..773fd8b 100644
                  bool validTargets = getTargetsFromPair(f);
                  fbManager.recordOperations(ext.workloadGraphicsWorker, &workload.fbChangePool, &workload.fbStorage, ext.shaderLibrary, ext.textureCache,
                      fbPair.startFbOperations, targetManager, fixedResScale, f, workload.submissionFrame);
-@@ -835,19 +1059,45 @@ namespace RT64 {
+@@ -835,19 +1080,45 @@ namespace RT64 {
                  
                  fbManager.recordOperations(ext.workloadGraphicsWorker, &workload.fbChangePool, &workload.fbStorage, ext.shaderLibrary, ext.textureCache,
                      fbPair.endFbOperations, targetManager, fixedResScale, f, workload.submissionFrame);
@@ -1203,18 +1123,20 @@ index 5a331aa..773fd8b 100644
  
              // Indicate to the texture cache it's safe to delete the textures if no locks are active.
              ext.textureCache->decrementLock();
-@@ -880,6 +1130,10 @@ namespace RT64 {
+@@ -880,6 +1151,12 @@ namespace RT64 {
  
      void WorkloadQueue::renderThreadLoop() {
          Thread::setCurrentThreadName("RT64 Workload");
-+        Thread::setCurrentThreadPriority(Thread::Priority::High);
 +#   if defined(__ANDROID__)
-+        AndroidHint::join(AndroidHint::Render);
++        if (bt_android_perf_hint_add_thread != nullptr) {
++            bt_android_perf_hint_add_thread();
++        }
 +#   endif
++        Thread::setCurrentThreadPriority(Thread::Priority::High);
  
          WorkloadConfiguration workloadConfig;
          int64_t logicalTicks = 0;
-@@ -1070,7 +1324,19 @@ namespace RT64 {
+@@ -1070,7 +1347,19 @@ namespace RT64 {
                          const int64_t currentTimeMicro = workloadTimer.elapsedMicroseconds() - setupTimeMicro;
                          const int64_t expectedTimeMicro = frame * maxTimePerFrameMicro;
                          const int64_t measuredFrameMicro = renderTimeTotalMicro / framesRendered;
@@ -1235,17 +1157,30 @@ index 5a331aa..773fd8b 100644
                              displayTicks += workload.viOriginalRate;
                              skippedFrames = true;
                              continue;
-@@ -1122,6 +1388,9 @@ namespace RT64 {
+@@ -1117,11 +1406,22 @@ namespace RT64 {
+                     }
+ 
+                     int64_t renderTimeMicro = workloadTimer.elapsedMicroseconds();
++#               if defined(__ANDROID__)
++                    const int64_t hintStartNs = (bt_android_perf_hint_now_ns != nullptr) ? bt_android_perf_hint_now_ns() : 0;
++#               endif
+                     threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
+                         interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed);
  
                      // Add total time the frame took to render.
                      renderTimeTotalMicro += workloadTimer.elapsedMicroseconds() - renderTimeMicro;
 +#               if defined(__ANDROID__)
-+                    AndroidHint::report(AndroidHint::Render, (workloadTimer.elapsedMicroseconds() - renderTimeMicro) * 1000);
++                    // Android: tell the system how long this frame took against its share of the
++                    // game frame, so it raises clocks before frames run late.
++                    if ((bt_android_perf_hint_frame != nullptr) && (originalTimeMicro > 0) && (hintStartNs > 0)) {
++                        bt_android_perf_hint_frame(hintStartNs, bt_android_perf_hint_now_ns() - hintStartNs,
++                            originalTimeMicro * 1000 / std::max<int64_t>(displayFrames, 1));
++                    }
 +#               endif
  
                      // After one frame is rendered, we indicate the workload has been processed so the present thread can start presenting frames as soon as it can.
                      if (frame == 0) {
-@@ -1162,6 +1431,17 @@ namespace RT64 {
+@@ -1162,6 +1462,17 @@ namespace RT64 {
                      ext.sharedResources->interpolatedCondition.notify_all();
                  }
  
@@ -1825,6 +1760,180 @@ index d1c5273..0f14d91 100644
              pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
              pipelineDesc.renderTargetCount = 1;
              pipelineDesc.pipelineLayout = videoInterfaceNearest.pipelineLayout.get();
+diff --git a/src/render/rt64_texture_cache.cpp b/src/render/rt64_texture_cache.cpp
+index 0848f3e..9537021 100644
+--- a/src/render/rt64_texture_cache.cpp
++++ b/src/render/rt64_texture_cache.cpp
+@@ -22,6 +22,10 @@
+ 
+ #define ONLY_USE_LOW_MIP_CACHE 0
+ 
++#if defined(__ANDROID__)
++extern "C" void bt_android_perf_hint_add_thread() __attribute__((weak));
++#endif
++
+ namespace RT64 {
+     // ReplacementMap
+     
+@@ -337,7 +341,18 @@ namespace RT64 {
+             const uint64_t MinimumMaxAge = WORKLOAD_QUEUE_SIZE * 2;
+             const uint64_t MaximumMaxAge = WORKLOAD_QUEUE_SIZE * 32;
+             const uint64_t age = submissionFrame - it->second;
++#       if defined(__ANDROID__)
++            // Android: while the cache is within its budget, keep textures for about 30 seconds
++            // after their last use (instead of ~4), so turning around or going back into a room
++            // doesn't upload and decode them all again (the DL thread waits for uploads).
++            const uint64_t AndroidKeepFrames = 900;
++            const size_t AndroidTextureBudget = 2500;
++            const size_t liveTextures = textures.size() - freeSpaces.size();
++            const uint64_t usualMaxAge = std::clamp(it->second - creationFrames[it->first], MinimumMaxAge, MaximumMaxAge);
++            const uint64_t maxAge = (liveTextures <= AndroidTextureBudget) ? std::max(usualMaxAge, AndroidKeepFrames) : usualMaxAge;
++#       else
+             const uint64_t maxAge = std::clamp(it->second - creationFrames[it->first], MinimumMaxAge, MaximumMaxAge);
++#       endif
+ 
+             // Evict all entries that are present in the access list and are older than the frame by the specified margin.
+             if (age >= maxAge) {
+@@ -967,6 +982,14 @@ namespace RT64 {
+ 
+     void TextureCache::uploadThreadLoop() {
+         Thread::setCurrentThreadName("RT64 Texture");
++#   if defined(__ANDROID__)
++        // The display-list thread waits for this one's uploads every frame, so it gets the same
++        // priority as the render threads, and is part of the performance hints.
++        Thread::setCurrentThreadPriority(Thread::Priority::High);
++        if (bt_android_perf_hint_add_thread != nullptr) {
++            bt_android_perf_hint_add_thread();
++        }
++#   endif
+ 
+         uploadThreadRunning = true;
+ 
+@@ -1070,8 +1093,17 @@ namespace RT64 {
+                     newTexture->format = RenderFormat::R8_UINT;
+                     newTexture->width = upload.width;
+                     newTexture->height = upload.height;
+-                    newTexture->tmem = copyWorker->device->createTexture(RenderTextureDesc::Texture1D(std::max(uint32_t(upload.bytesTMEM.size()), 1U), 1, newTexture->format));
+-                    newTexture->tmem->setName("Texture Cache TMEM #" + std::to_string(TMEMGlobalCounter++));
++#               if defined(__ANDROID__)
++                    if (upload.bytesTMEM.size() == TMEMSize) {
++                        newTexture->tmem = takeTMEMTexture();
++                    }
++
++                    if (newTexture->tmem == nullptr)
++#               endif
++                    {
++                        newTexture->tmem = copyWorker->device->createTexture(RenderTextureDesc::Texture1D(std::max(uint32_t(upload.bytesTMEM.size()), 1U), 1, newTexture->format));
++                        newTexture->tmem->setName("Texture Cache TMEM #" + std::to_string(TMEMGlobalCounter++));
++                    }
+                     newTexture->bytesTMEM = upload.bytesTMEM;
+                     newTexture->loadTile = upload.loadTile;
+                     newTexture->tlut = upload.tlut;
+@@ -1105,8 +1137,14 @@ namespace RT64 {
+                         static uint32_t TextureGlobalCounter = 0;
+                         TextureDecodeDescriptorSet *descSet = descriptorSets[i].get();
+                         dstTexture->format = RenderFormat::R8G8B8A8_UNORM;
+-                        dstTexture->texture = directWorker->device->createTexture(RenderTextureDesc::Texture2D(upload.width, upload.height, 1, dstTexture->format, RenderTextureFlag::STORAGE | RenderTextureFlag::UNORDERED_ACCESS));
+-                        dstTexture->texture->setName("Texture Cache RGBA32 #" + std::to_string(TextureGlobalCounter++));
++#                   if defined(__ANDROID__)
++                        dstTexture->texture = takeDecodedTexture(upload.width, upload.height);
++                        if (dstTexture->texture == nullptr)
++#                   endif
++                        {
++                            dstTexture->texture = directWorker->device->createTexture(RenderTextureDesc::Texture2D(upload.width, upload.height, 1, dstTexture->format, RenderTextureFlag::STORAGE | RenderTextureFlag::UNORDERED_ACCESS));
++                            dstTexture->texture->setName("Texture Cache RGBA32 #" + std::to_string(TextureGlobalCounter++));
++                        }
+                         descSet->setTexture(descSet->TMEM, dstTexture->tmem.get(), RenderTextureLayout::SHADER_READ);
+                         descSet->setTexture(descSet->RGBA32, dstTexture->texture.get(), RenderTextureLayout::GENERAL);
+                         beforeDecodeBarriers.emplace_back(dstTexture->texture.get(), RenderTextureLayout::GENERAL);
+@@ -1718,6 +1756,54 @@ namespace RT64 {
+         return textureMap.evict(submissionFrame, evictedHashes);
+     }
+ 
++#if defined(__ANDROID__)
++    static constexpr size_t TMEMPoolMax = 1024;
++    static constexpr size_t DecodedPoolMax = 768;
++
++    static uint64_t decodedPoolKey(uint32_t width, uint32_t height) {
++        return (uint64_t(width) << 32) | height;
++    }
++
++    // Called once the GPU can no longer be using the texture (the lock counter reached zero).
++    void TextureCache::recycleTexture(Texture *texture) {
++        std::unique_lock lock(texturePoolMutex);
++        if ((texture->tmem != nullptr) && (texture->bytesTMEM.size() == 0x1000) && (tmemPool.size() < TMEMPoolMax)) {
++            tmemPool.emplace_back(std::move(texture->tmem));
++        }
++
++        if ((texture->texture != nullptr) && texture->decodeTMEM && (texture->format == RenderFormat::R8G8B8A8_UNORM) &&
++            (texture->width > 0) && (texture->height > 0) && (decodedPoolCount < DecodedPoolMax))
++        {
++            decodedPool[decodedPoolKey(texture->width, texture->height)].emplace_back(std::move(texture->texture));
++            decodedPoolCount++;
++        }
++    }
++
++    std::unique_ptr<RenderTexture> TextureCache::takeTMEMTexture() {
++        std::unique_lock lock(texturePoolMutex);
++        if (tmemPool.empty()) {
++            return nullptr;
++        }
++
++        std::unique_ptr<RenderTexture> texture = std::move(tmemPool.back());
++        tmemPool.pop_back();
++        return texture;
++    }
++
++    std::unique_ptr<RenderTexture> TextureCache::takeDecodedTexture(uint32_t width, uint32_t height) {
++        std::unique_lock lock(texturePoolMutex);
++        auto it = decodedPool.find(decodedPoolKey(width, height));
++        if ((it == decodedPool.end()) || it->second.empty()) {
++            return nullptr;
++        }
++
++        std::unique_ptr<RenderTexture> texture = std::move(it->second.back());
++        it->second.pop_back();
++        decodedPoolCount--;
++        return texture;
++    }
++#endif
++
+     void TextureCache::incrementLock() {
+         std::unique_lock lock(textureMapMutex);
+         lockCounter++;
+@@ -1730,6 +1816,9 @@ namespace RT64 {
+         if (lockCounter == 0) {
+             // Delete evicted textures from texture map.
+             for (Texture *texture : textureMap.evictedTextures) {
++#           if defined(__ANDROID__)
++                recycleTexture(texture);
++#           endif
+                 delete texture;
+             }
+ 
+diff --git a/src/render/rt64_texture_cache.h b/src/render/rt64_texture_cache.h
+index 9131697..d215c02 100644
+--- a/src/render/rt64_texture_cache.h
++++ b/src/render/rt64_texture_cache.h
+@@ -228,6 +228,18 @@ namespace RT64 {
+         std::unique_ptr<RenderPool> uploadResourcePool;
+         std::mutex uploadResourcePoolMutex;
+         uint32_t lockCounter;
++#   if defined(__ANDROID__)
++        // Android: GPU textures of evicted cache entries, kept for reuse instead of freed, so
++        // a new area's textures don't each need two fresh GPU allocations (a source of stutter).
++        // The raw TMEM copies are all 4 KB; decoded textures are pooled by size.
++        std::mutex texturePoolMutex;
++        std::vector<std::unique_ptr<RenderTexture>> tmemPool;
++        std::unordered_map<uint64_t, std::vector<std::unique_ptr<RenderTexture>>> decodedPool;
++        size_t decodedPoolCount = 0;
++        void recycleTexture(Texture *texture);
++        std::unique_ptr<RenderTexture> takeTMEMTexture();
++        std::unique_ptr<RenderTexture> takeDecodedTexture(uint32_t width, uint32_t height);
++#   endif
+         bool developerMode;
+ 
+         TextureCache(RenderWorker *directWorker, RenderWorker *copyWorker, uint32_t threadCount, const ShaderLibrary *shaderLibrary);
 diff --git a/src/shaders/FbCommon.hlsli b/src/shaders/FbCommon.hlsli
 index 973ee67..51aea3b 100644
 --- a/src/shaders/FbCommon.hlsli

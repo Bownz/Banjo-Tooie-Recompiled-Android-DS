@@ -1407,8 +1407,23 @@ extern std::atomic<uint32_t> g_bt_rt64_proj_skipped_other;
 // func_800A73F4 builds and submits Tooie's real scene display list, and RT64
 // resets the extended-GBI enable whenever a display list starts, so the enable
 // is re-emitted at the head of every frame's list.
+#if defined(__ANDROID__)
+extern "C" void bt_android_perf_hint_add_thread();
+extern "C" void bt_android_set_thread_role(int role);
+#endif
+
 extern "C" void tooie_rt64_begin_frame(uint8_t* rdram, recomp_context* ctx) {
     (void)ctx;
+#if defined(__ANDROID__)
+    // The game's own thread (the one building each frame): part of the performance hints, and on
+    // the prime core(s) (android/jni/perf_hint.cpp, cpu_layout.cpp; from DK64, 18 Nov).
+    static thread_local bool android_thread_set = false;
+    if (!android_thread_set) {
+        android_thread_set = true;
+        bt_android_perf_hint_add_thread();
+        bt_android_set_thread_role(0);
+    }
+#endif
     if (rt64_disabled()) {
         return;
     }
