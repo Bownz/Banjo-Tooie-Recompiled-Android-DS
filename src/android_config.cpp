@@ -39,6 +39,7 @@ extern "C" void bt_android_set_bottom_screen(int enabled);        // android/jni
 extern "C" void bt_android_set_gpu_keep_awake(bool on);           // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_perf_hints(bool on);               // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_frame_pacing(bool on);             // android/jni/perf_hint.cpp
+extern "C" void bt_android_set_shared_gpu_queue(bool on);         // android/jni/perf_hint.cpp
 extern "C" void rt64_android_set_ram_copy_mode(int mode);  // rt64-android.patch
 extern "C" void rt64_android_set_auto_framerate(int enabled);  // rt64-android.patch
 extern "C" void bt_android_set_live_log(int on);              // android/jni/perf_monitor.cpp
@@ -559,6 +560,19 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
                 bt_android_set_perf_hints(std::get<uint32_t>(cur) == 1u);
             });
+        static EnumOptionVector queue_options = {
+            {1u, "Shared", "Shared"},
+            {0u, "Separate", "Separate"},
+        };
+        graphics_config.add_enum_option(
+            "android_gpu_queues",
+            "GPU Queues (test)",
+            "Takes effect the next time the game starts. Shared: the game's own GPU work (uploads, "
+            "its copy of each frame) waits in line behind the frames being drawn. Separate: it gets "
+            "its own high-priority queue and interrupts them. For testing which holds 60 better.",
+            queue_options,
+            1u
+        );
         graphics_config.add_enum_option(
             "android_frame_pacing",
             "Frame Pacing (test)",
@@ -716,6 +730,10 @@ void bt::android::after_config_loaded() {
         const recomp::config::ConfigValueVariant pacing = graphics.get_option_value("android_frame_pacing");
         const uint32_t* h = std::get_if<uint32_t>(&hints);
         const uint32_t* p = std::get_if<uint32_t>(&pacing);
+        const recomp::config::ConfigValueVariant queues = graphics.get_option_value("android_gpu_queues");
+        const uint32_t* q = std::get_if<uint32_t>(&queues);
+        bt_android_set_shared_gpu_queue(q == nullptr || *q == 1u);
+        std::printf("GPU Queues: %s\n", (q == nullptr || *q == 1u) ? "Shared" : "Separate");
         bt_android_set_perf_hints(h != nullptr && *h == 1u);
         bt_android_set_frame_pacing(p != nullptr && *p == 1u);
         std::printf("Performance Hints: %s, Frame Pacing: %s\n", (h != nullptr && *h == 1u) ? "on" : "off", (p != nullptr && *p == 1u) ? "on" : "off");

@@ -134,7 +134,7 @@ index 7006549..cec813b 100644
              return nullptr;
          }
 diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
-index ee8bc1f..55dbd2b 100644
+index ee8bc1f..402e8fe 100644
 --- a/src/hle/rt64_application.cpp
 +++ b/src/hle/rt64_application.cpp
 @@ -3,6 +3,10 @@
@@ -148,7 +148,7 @@ index ee8bc1f..55dbd2b 100644
  #include "rhi/rt64_render_hooks.h"
  
  #include <cinttypes>
-@@ -18,11 +22,13 @@
+@@ -18,22 +22,28 @@
  
  //#define LOG_DISPLAY_LISTS
  
@@ -163,7 +163,14 @@ index ee8bc1f..55dbd2b 100644
      extern std::unique_ptr<RenderInterface> CreateVulkanInterface(RenderWindow renderWindow);
  #else
      extern std::unique_ptr<RenderInterface> CreateVulkanInterface();
-@@ -33,7 +39,7 @@ namespace RT64 {
+ #endif
+ }
+ 
++#if defined(__ANDROID__)
++extern "C" bool rt64_android_shared_gpu_queue() __attribute__((weak));
++#endif
++
+ namespace RT64 {
      // Constants
  
      static std::unique_ptr<RenderInterface> CreateVulkanInterfaceWrapper(RenderWindow renderWindow) {
@@ -172,7 +179,7 @@ index ee8bc1f..55dbd2b 100644
          return plume::CreateVulkanInterface(renderWindow);
  #else
          return plume::CreateVulkanInterface();
-@@ -316,16 +322,38 @@ namespace RT64 {
+@@ -316,16 +326,42 @@ namespace RT64 {
          workloadExtrasUploader = std::make_unique<BufferUploader>(device.get());
          workloadVelocityUploader = std::make_unique<BufferUploader>(device.get());
          workloadTilesUploader = std::make_unique<BufferUploader>(device.get());
@@ -180,7 +187,11 @@ index ee8bc1f..55dbd2b 100644
 +        // Android: the game waits on the display-list thread's GPU work (its native-resolution
 +        // render for Render to RAM, and texture uploads), so those workers get the high-priority
 +        // GPU queue and can run ahead of the full-resolution frames (see plume).
-+        plume::vulkanHighPriorityQueueCreation = true;
++        // Video > GPU Queues (the game; takes effect at start): Shared puts this work on the
++        // renderer's own queue instead, so the display-list thread never waits for the GPU to
++        // stop a frame halfway for it (18 Nov: 7-9 ms of waiting per game frame in Jinjo Village,
++        // while the GPU sat at 401-475 MHz).
++        plume::vulkanHighPriorityQueueCreation = !((rt64_android_shared_gpu_queue != nullptr) && rt64_android_shared_gpu_queue());
 +#   endif
          framebufferGraphicsWorker = std::make_unique<RenderWorker>(device.get(), "Framebuffer Graphics", RenderCommandListType::DIRECT);
          textureDirectWorker = std::make_unique<RenderWorker>(device.get(), "Texture Direct", RenderCommandListType::DIRECT);
@@ -211,7 +222,7 @@ index ee8bc1f..55dbd2b 100644
          swapChainDesc.textureCount = (userConfig.displayBuffering == UserConfiguration::DisplayBuffering::Triple) ? 3 : 2;
  
          // Enable present wait if supported by the device. We specify a max latency of 1 as we use it to wait right before the next
-@@ -441,6 +469,7 @@ namespace RT64 {
+@@ -441,6 +477,7 @@ namespace RT64 {
          stateExt.device = device.get();
          stateExt.swapChain = swapChain.get();
          stateExt.framebufferGraphicsWorker = framebufferGraphicsWorker.get();
@@ -219,7 +230,7 @@ index ee8bc1f..55dbd2b 100644
          stateExt.shaderLibrary = shaderLibrary.get();
          stateExt.drawDataUploader = drawDataUploader.get();
          stateExt.transformsUploader = transformsUploader.get();
-@@ -522,6 +551,41 @@ namespace RT64 {
+@@ -522,6 +559,41 @@ namespace RT64 {
          appWindow->sdlCheckFilterInstallation();
          screenApiProfiler.logAndRestart();
          state->updateScreen(core.decodeVI(), false);

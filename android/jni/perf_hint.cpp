@@ -183,6 +183,17 @@ extern "C" bool bt_android_frame_pacing() {
     return g_pacing_on.load();
 }
 
+// Video > GPU Queues: true = Shared (RT64 creates its workers on the renderer's queue).
+static std::atomic<bool> g_shared_queue{true};
+
+extern "C" void bt_android_set_shared_gpu_queue(bool on) {
+    g_shared_queue.store(on);
+}
+
+extern "C" bool rt64_android_shared_gpu_queue() {
+    return g_shared_queue.load();
+}
+
 extern "C" void bt_android_perf_hint_frame(int64_t start_ns, int64_t wall_ns, int64_t target_ns) {
     if (!g_hints_on.load(std::memory_order_relaxed)) {
         return;
