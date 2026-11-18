@@ -157,7 +157,36 @@ extern "C" void bt_android_perf_hint_add_thread() {
 
 // From RT64's workload thread, after each rendered frame: how long it took (wall clock, from
 // starting to record it until the GPU finished) and how long it was allowed.
+// Video > Performance Hints and Frame Pacing (android_config.cpp). Both off by default from
+// 0.9.23: with them (0.9.21-0.9.22) the GPU ran at 401-475 MHz in Jinjo Village at Standard
+// performance and dropped frames; on 13 Nov, without them, it ran at 550-680 MHz.
+static std::atomic<bool> g_hints_on{false};
+static std::atomic<bool> g_pacing_on{false};
+
+extern "C" void bt_android_set_perf_hints(bool on) {
+    g_hints_on.store(on);
+    if (!on) {
+        std::lock_guard lock{mutex};
+        if (session != nullptr && api.closeSession != nullptr) {
+            api.closeSession(session);
+            session = nullptr;
+            threads_changed = true;
+        }
+    }
+}
+
+extern "C" void bt_android_set_frame_pacing(bool on) {
+    g_pacing_on.store(on);
+}
+
+extern "C" bool bt_android_frame_pacing() {
+    return g_pacing_on.load();
+}
+
 extern "C" void bt_android_perf_hint_frame(int64_t start_ns, int64_t wall_ns, int64_t target_ns) {
+    if (!g_hints_on.load(std::memory_order_relaxed)) {
+        return;
+    }
     if (target_ns <= 0 || wall_ns <= 0) {
         return;
     }

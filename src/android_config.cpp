@@ -37,6 +37,8 @@ extern "C" void bt_android_set_touch_controls_mode(int mode);   // android/jni/t
 extern "C" void bt_android_edit_touch_layout();                  // android/jni/touch_controller.cpp
 extern "C" void bt_android_set_bottom_screen(int enabled);        // android/jni/touch_controller.cpp
 extern "C" void bt_android_set_gpu_keep_awake(bool on);           // android/jni/perf_hint.cpp
+extern "C" void bt_android_set_perf_hints(bool on);               // android/jni/perf_hint.cpp
+extern "C" void bt_android_set_frame_pacing(bool on);             // android/jni/perf_hint.cpp
 extern "C" void rt64_android_set_ram_copy_mode(int mode);  // rt64-android.patch
 extern "C" void rt64_android_set_auto_framerate(int enabled);  // rt64-android.patch
 extern "C" void bt_android_set_live_log(int on);              // android/jni/perf_monitor.cpp
@@ -536,6 +538,36 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
                     bt_android_set_gpu_keep_awake(std::get<uint32_t>(cur) == 1u);
                 }
             });
+        // Test switches (0.9.23): ported from DK64 in 0.9.21; since then the GPU has run slower
+        // at Standard performance. Off by default, as before 0.9.21.
+        static EnumOptionVector onoff_options = {
+            {0u, "Off", "Off"},
+            {1u, "On", "On"},
+        };
+        graphics_config.add_enum_option(
+            "android_perf_hints",
+            "Performance Hints (test)",
+            "Tells Android how long each frame took, so it can raise the CPU's speed early. "
+            "Off by default; for testing whether it helps or hurts.",
+            onoff_options,
+            0u
+        );
+        graphics_config.add_option_change_callback("android_perf_hints",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+                bt_android_set_perf_hints(std::get<uint32_t>(cur) == 1u);
+            });
+        graphics_config.add_enum_option(
+            "android_frame_pacing",
+            "Frame Pacing (test)",
+            "Asks the screen to show each frame a whole number of refreshes after the last one. "
+            "Off by default; for testing whether it helps or hurts.",
+            onoff_options,
+            0u
+        );
+        graphics_config.add_option_change_callback("android_frame_pacing",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+                bt_android_set_frame_pacing(std::get<uint32_t>(cur) == 1u);
+            });
         static EnumOptionVector live_options = {
             {0u, "Off", "Off"},
             {1u, "On", "On"},
@@ -674,6 +706,17 @@ void bt::android::after_config_loaded() {
         if (const uint32_t* value = std::get_if<uint32_t>(&mode)) {
             apply_live_log(*value);
         }
+    }
+    {
+        recomp::config::Config& graphics = recompui::config::get_graphics_config();
+        const recomp::config::ConfigValueVariant hints = graphics.get_option_value("android_perf_hints");
+        const recomp::config::ConfigValueVariant pacing = graphics.get_option_value("android_frame_pacing");
+        const uint32_t* h = std::get_if<uint32_t>(&hints);
+        const uint32_t* p = std::get_if<uint32_t>(&pacing);
+        bt_android_set_perf_hints(h != nullptr && *h == 1u);
+        bt_android_set_frame_pacing(p != nullptr && *p == 1u);
+        std::printf("Performance Hints: %s, Frame Pacing: %s\n", (h != nullptr && *h == 1u) ? "on" : "off", (p != nullptr && *p == 1u) ? "on" : "off");
+        std::fflush(stdout);
     }
     {
         // Once (0.9.22): 0.9.21 shipped Keep GPU Awake off by default; it's on now.
