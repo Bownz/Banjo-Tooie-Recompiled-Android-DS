@@ -45,6 +45,7 @@ extern "C" void rt64_android_set_ram_copy_mode(int mode);  // rt64-android.patch
 extern "C" void rt64_android_set_auto_framerate(int enabled);  // rt64-android.patch
 extern "C" void rt64_android_set_dynamic_resolution(int enabled);   // rt64-android.patch
 extern "C" void rt64_android_set_hardware_depth_clip(int enabled);  // rt64-android.patch
+extern "C" void rt64_android_set_single_shader(int enabled);        // rt64-android.patch
 extern "C" void bt_android_set_live_log(int on);              // android/jni/perf_monitor.cpp
 
 
@@ -580,14 +581,33 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             "android_dynamic_resolution",
             "Dynamic Resolution",
             "With Resolution on Auto and 60 FPS on: when the GPU can't draw a frame in time, the "
-            "picture steps down to as low as 810 lines (from 1080) and back up once there's room, "
-            "instead of dropping frames or falling to 30.",
+            "picture steps down to as low as 810 lines (from 1080) and back up once there's room. "
+            "Off by default: each step briefly stutters, and in Banjo-Tooie the GPU's time hardly "
+            "depends on the resolution.",
             onoff_options,
-            1u
+            0u
         );
         graphics_config.add_option_change_callback("android_dynamic_resolution",
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
                 rt64_android_set_dynamic_resolution(std::get<uint32_t>(cur) == 1u ? 1 : 0);
+            });
+        static EnumOptionVector shader_mode_options = {
+            {0u, "Specialized", "Specialized"},
+            {1u, "Single", "Single"},
+        };
+        graphics_config.add_enum_option(
+            "android_shader_mode",
+            "Shader Mode (test)",
+            "Specialized: a shader made for each kind of surface (quick per pixel, but the GPU "
+            "switches shaders hundreds of times a frame). Single: one general shader for "
+            "everything (more work per pixel, almost no switching). For testing which is faster "
+            "here; changes right away.",
+            shader_mode_options,
+            0u
+        );
+        graphics_config.add_option_change_callback("android_shader_mode",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+                rt64_android_set_single_shader(std::get<uint32_t>(cur) == 1u ? 1 : 0);
             });
         graphics_config.add_enum_option(
             "android_early_depth",
@@ -772,13 +792,27 @@ void bt::android::after_config_loaded() {
         const uint32_t* q = std::get_if<uint32_t>(&queues);
         bt_android_set_shared_gpu_queue(q == nullptr || *q == 1u);
         std::printf("GPU Queues: %s\n", (q == nullptr || *q == 1u) ? "Shared" : "Separate");
+        // Once (0.9.28): 0.9.27 had Dynamic Resolution on; it's off by default now.
+        {
+            const std::filesystem::path dynres_marker = config_file("dynamic_resolution_off.txt");
+            if (!std::filesystem::exists(dynres_marker)) {
+                graphics.update_option_value("android_dynamic_resolution", 0u);
+                graphics.save_config();
+                std::ofstream out{ dynres_marker };
+                out << "done\n";
+            }
+        }
+        const recomp::config::ConfigValueVariant shader_mode = graphics.get_option_value("android_shader_mode");
+        const uint32_t* sm = std::get_if<uint32_t>(&shader_mode);
+        rt64_android_set_single_shader((sm != nullptr && *sm == 1u) ? 1 : 0);
+        std::printf("Shader Mode: %s\n", (sm != nullptr && *sm == 1u) ? "Single" : "Specialized");
         const recomp::config::ConfigValueVariant dynres = graphics.get_option_value("android_dynamic_resolution");
         const uint32_t* dr = std::get_if<uint32_t>(&dynres);
-        rt64_android_set_dynamic_resolution((dr == nullptr || *dr == 1u) ? 1 : 0);
+        rt64_android_set_dynamic_resolution((dr != nullptr && *dr == 1u) ? 1 : 0);
         const recomp::config::ConfigValueVariant early = graphics.get_option_value("android_early_depth");
         const uint32_t* ed = std::get_if<uint32_t>(&early);
         rt64_android_set_hardware_depth_clip((ed == nullptr || *ed == 1u) ? 1 : 0);
-        std::printf("Dynamic Resolution: %s, Early Depth Test: %s\n", (dr == nullptr || *dr == 1u) ? "on" : "off", (ed == nullptr || *ed == 1u) ? "on" : "off");
+        std::printf("Dynamic Resolution: %s, Early Depth Test: %s\n", (dr != nullptr && *dr == 1u) ? "on" : "off", (ed == nullptr || *ed == 1u) ? "on" : "off");
         const recomp::config::ConfigValueVariant clears = graphics.get_option_value("android_fast_clears");
         const uint32_t* fc = std::get_if<uint32_t>(&clears);
         bt_android_set_fast_clears(fc == nullptr || *fc == 1u);

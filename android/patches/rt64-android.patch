@@ -134,7 +134,7 @@ index 7006549..cec813b 100644
              return nullptr;
          }
 diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
-index ee8bc1f..e7cbea0 100644
+index ee8bc1f..feb3be3 100644
 --- a/src/hle/rt64_application.cpp
 +++ b/src/hle/rt64_application.cpp
 @@ -3,6 +3,10 @@
@@ -230,7 +230,7 @@ index ee8bc1f..e7cbea0 100644
          stateExt.shaderLibrary = shaderLibrary.get();
          stateExt.drawDataUploader = drawDataUploader.get();
          stateExt.transformsUploader = transformsUploader.get();
-@@ -522,6 +559,45 @@ namespace RT64 {
+@@ -522,6 +559,48 @@ namespace RT64 {
          appWindow->sdlCheckFilterInstallation();
          screenApiProfiler.logAndRestart();
          state->updateScreen(core.decodeVI(), false);
@@ -252,6 +252,7 @@ index ee8bc1f..e7cbea0 100644
 +            const uint64_t recordMicros = AndroidRenderStats::recordMicros.exchange(0);
 +            const uint64_t waitMicros = AndroidRenderStats::waitMicros.exchange(0);
 +            const uint64_t uberDraws = AndroidRenderStats::uberDraws.exchange(0);
++            const uint64_t pipelineSwitches = AndroidRenderStats::pipelineSwitches.exchange(0);
 +            if (renders > 0) {
 +                const double n = double(renders);
 +                const UserConfiguration &config = sharedQueueResources->userConfig;
@@ -260,8 +261,10 @@ index ee8bc1f..e7cbea0 100644
 +                    double(passes) / n, double(depthSwitches) / n, double(draws) / n, double(recordMicros) / n / 1000.0, double(waitMicros) / n / 1000.0,
 +                    int(config.refreshRate), config.refreshRateTarget, int(config.resolution), config.resolutionMultiplier);
 +                // Draws that fell back to the general (slow) shader while their own was being made.
-+                fprintf(stdout, "Perf shaders: %.1f ubershader draws per frame (%.1f%% of draws)\n",
-+                    double(uberDraws) / n, (draws > 0) ? (100.0 * double(uberDraws) / double(draws)) : 0.0);
++                // Pipeline switches cost the most per draw on a tiled GPU (each one is redone for
++                // every screen tile); Video > Shader Mode trades them for heavier pixels.
++                fprintf(stdout, "Perf shaders: %.1f ubershader draws per frame (%.1f%% of draws), %.0f pipeline switches per frame\n",
++                    double(uberDraws) / n, (draws > 0) ? (100.0 * double(uberDraws) / double(draws)) : 0.0, double(pipelineSwitches) / n);
 +            }
 +            const uint64_t syncs = AndroidRenderStats::dlSyncs.exchange(0);
 +            if (syncs > 0) {
@@ -780,10 +783,10 @@ index 7a8c13b..bd198be 100644
          VI lastScreenVI;
          uint64_t lastScreenHash;
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..5bb2c50 100644
+index 5a331aa..20d19db 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -4,13 +4,342 @@
+@@ -4,13 +4,353 @@
  
  #include "rt64_workload_queue.h"
  
@@ -808,6 +811,12 @@ index 5a331aa..5bb2c50 100644
 +#   include "common/rt64_elapsed_timer.h"
 +namespace plume { extern std::atomic<uint64_t> vulkanClearOnBeginCount; }   // plume_vulkan.cpp
 +namespace {
++    // Video > Shader Mode: Single draws everything with RT64's general shader (a handful of
++    // pipelines) instead of one specialized shader per combination (a pipeline switch on most
++    // draws). 21 Nov: a 1600x900 frame of Jinjo Village costs 9.4 ms for 574 draws and barely
++    // less at 1440x810, so the cost is per draw, not per pixel.
++    std::atomic<bool> androidSingleShader{ false };
++
 +    // GPU time of the latest rendered frames (AndroidPassTimes::collect), smoothed.
 +    std::atomic<float> androidGpuFrameMs{ 0.0f };
 +
@@ -820,7 +829,7 @@ index 5a331aa..5bb2c50 100644
 +    struct AndroidDynRes {
 +        static constexpr int stepCount = 4;
 +        static constexpr float scales[stepCount] = { 1.0f, 0.917f, 0.833f, 0.75f };   // 1080, 990, 900, 810 lines
-+        std::atomic<bool> enabled{ true };
++        std::atomic<bool> enabled{ false };   // Video > Dynamic Resolution (off by default)
 +        std::atomic<int> step{ 0 };
 +        int appliedStep = 0;   // workload thread: the step the render targets were made for
 +        // Render thread only, over 1-second windows.
@@ -1110,6 +1119,11 @@ index 5a331aa..5bb2c50 100644
 +    androidAutoRate.enabled.store(enabled != 0, std::memory_order_relaxed);
 +}
 +
++// Video > Shader Mode (src/android_config.cpp): 1 = Single.
++extern "C" void rt64_android_set_single_shader(int enabled) {
++    androidSingleShader.store(enabled != 0, std::memory_order_relaxed);
++}
++
 +// Video > Dynamic Resolution (src/android_config.cpp).
 +extern "C" void rt64_android_set_dynamic_resolution(int enabled) {
 +    androidDynRes.enabled.store(enabled != 0, std::memory_order_relaxed);
@@ -1126,7 +1140,7 @@ index 5a331aa..5bb2c50 100644
      // WorkloadQueue
  
      WorkloadQueue::WorkloadQueue() {
-@@ -102,7 +431,11 @@ namespace RT64 {
+@@ -102,7 +442,11 @@ namespace RT64 {
          vertexProcessor = std::make_unique<VertexProcessor>(ext.device);
          framebufferRenderer = std::make_unique<FramebufferRenderer>(ext.workloadGraphicsWorker, true, ext.createdGraphicsAPI, ext.shaderLibrary);
          renderFramebufferManager = std::make_unique<RenderFramebufferManager>(ext.device);
@@ -1138,7 +1152,7 @@ index 5a331aa..5bb2c50 100644
  
          projectionProcessor.setup(ext.workloadGraphicsWorker);
          transformProcessor.setup(ext.workloadGraphicsWorker);
-@@ -188,7 +521,25 @@ namespace RT64 {
+@@ -188,7 +532,25 @@ namespace RT64 {
          switch (resolutionMode) {
          case UserConfiguration::Resolution::WindowIntegerScale:
              if (ext.sharedResources->swapChainHeight > 0) {
@@ -1164,7 +1178,7 @@ index 5a331aa..5bb2c50 100644
              }
              else {
                  resolutionMultiplier = 1.0f;
-@@ -226,6 +577,12 @@ namespace RT64 {
+@@ -226,6 +588,12 @@ namespace RT64 {
                  workloadConfig.targetRate = ext.sharedResources->swapChainRate;
              }
  
@@ -1177,7 +1191,7 @@ index 5a331aa..5bb2c50 100644
              break;
          case UserConfiguration::RefreshRate::Original:
          default:
-@@ -273,12 +630,26 @@ namespace RT64 {
+@@ -273,12 +641,26 @@ namespace RT64 {
              ext.sharedResources->interpolatedColorTargets.clear();
          }
  
@@ -1204,7 +1218,7 @@ index 5a331aa..5bb2c50 100644
      }
  
      void WorkloadQueue::threadConfigurationValidate() {
-@@ -301,6 +672,10 @@ namespace RT64 {
+@@ -301,6 +683,10 @@ namespace RT64 {
          const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
  
          rendererCPUProfiler.start();
@@ -1215,7 +1229,7 @@ index 5a331aa..5bb2c50 100644
  
          const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
          const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
-@@ -484,6 +859,10 @@ namespace RT64 {
+@@ -484,6 +870,10 @@ namespace RT64 {
  
                      if (colorTarget != nullptr) {
                          rtWidth = std::max(rtWidth, colorTarget->width);
@@ -1226,7 +1240,19 @@ index 5a331aa..5bb2c50 100644
                          rtHeight = std::max(rtHeight, colorTarget->height);
                          chosenRt = colorTarget;
                      }
-@@ -699,7 +1078,12 @@ namespace RT64 {
+@@ -635,7 +1025,11 @@ namespace RT64 {
+                     drawParams.rtEnabled = workloadConfig.raytracingEnabled;
+                     drawParams.submissionFrame = workload.submissionFrame;
+                     drawParams.deltaTimeMs = deltaTimeMs;
++#               if defined(__ANDROID__)
++                    drawParams.ubershadersOnly = ubershadersOnly || androidSingleShader.load(std::memory_order_relaxed);
++#               else
+                     drawParams.ubershadersOnly = ubershadersOnly;
++#               endif
+                     drawParams.postBlendNoise = workloadConfig.postBlendNoise;
+                     drawParams.postBlendNoiseNegative = workloadConfig.postBlendNoiseNegative;
+                     drawParams.maxGameCall = std::min(gameCallCountMax - gameCallCursor, fbPair.gameCallCount);
+@@ -699,7 +1093,12 @@ namespace RT64 {
  
              workerMutex.lock();
              ext.workloadGraphicsWorker->commandList->begin();
@@ -1239,7 +1265,7 @@ index 5a331aa..5bb2c50 100644
              ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 0);
              framebufferRenderer->endFramebuffers(ext.workloadGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, workloadConfig.raytracingEnabled);
              framebufferRenderer->recordSetup(ext.workloadGraphicsWorker, bufferUploaders, processRSP ? rspProcessor.get() : nullptr, processWorldVertices ? vertexProcessor.get() : nullptr, &workload.outputBuffers, workloadConfig.raytracingEnabled);
-@@ -708,6 +1092,13 @@ namespace RT64 {
+@@ -708,6 +1107,13 @@ namespace RT64 {
              uint32_t framebufferIndex = 0;
              for (uint32_t f = 0; f < fbPairCount; f++) {
                  const FramebufferPair &fbPair = workload.fbPairs[f];
@@ -1253,7 +1279,7 @@ index 5a331aa..5bb2c50 100644
                  bool validTargets = getTargetsFromPair(f);
                  fbManager.recordOperations(ext.workloadGraphicsWorker, &workload.fbChangePool, &workload.fbStorage, ext.shaderLibrary, ext.textureCache,
                      fbPair.startFbOperations, targetManager, fixedResScale, f, workload.submissionFrame);
-@@ -835,19 +1226,49 @@ namespace RT64 {
+@@ -835,19 +1241,49 @@ namespace RT64 {
                  
                  fbManager.recordOperations(ext.workloadGraphicsWorker, &workload.fbChangePool, &workload.fbStorage, ext.shaderLibrary, ext.textureCache,
                      fbPair.endFbOperations, targetManager, fixedResScale, f, workload.submissionFrame);
@@ -1303,7 +1329,7 @@ index 5a331aa..5bb2c50 100644
  
              // Indicate to the texture cache it's safe to delete the textures if no locks are active.
              ext.textureCache->decrementLock();
-@@ -880,6 +1301,12 @@ namespace RT64 {
+@@ -880,6 +1316,12 @@ namespace RT64 {
  
      void WorkloadQueue::renderThreadLoop() {
          Thread::setCurrentThreadName("RT64 Workload");
@@ -1316,7 +1342,7 @@ index 5a331aa..5bb2c50 100644
  
          WorkloadConfiguration workloadConfig;
          int64_t logicalTicks = 0;
-@@ -1070,7 +1497,19 @@ namespace RT64 {
+@@ -1070,7 +1512,19 @@ namespace RT64 {
                          const int64_t currentTimeMicro = workloadTimer.elapsedMicroseconds() - setupTimeMicro;
                          const int64_t expectedTimeMicro = frame * maxTimePerFrameMicro;
                          const int64_t measuredFrameMicro = renderTimeTotalMicro / framesRendered;
@@ -1337,7 +1363,7 @@ index 5a331aa..5bb2c50 100644
                              displayTicks += workload.viOriginalRate;
                              skippedFrames = true;
                              continue;
-@@ -1117,11 +1556,22 @@ namespace RT64 {
+@@ -1117,11 +1571,22 @@ namespace RT64 {
                      }
  
                      int64_t renderTimeMicro = workloadTimer.elapsedMicroseconds();
@@ -1360,7 +1386,7 @@ index 5a331aa..5bb2c50 100644
  
                      // After one frame is rendered, we indicate the workload has been processed so the present thread can start presenting frames as soon as it can.
                      if (frame == 0) {
-@@ -1162,6 +1612,19 @@ namespace RT64 {
+@@ -1162,6 +1627,19 @@ namespace RT64 {
                      ext.sharedResources->interpolatedCondition.notify_all();
                  }
  
@@ -1432,10 +1458,10 @@ index 69a82ac..3f7dd70 100644
              if (device != nullptr) {
                  create(device);
 diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
-index ff85358..063167a 100644
+index ff85358..69379fb 100644
 --- a/src/render/rt64_framebuffer_renderer.cpp
 +++ b/src/render/rt64_framebuffer_renderer.cpp
-@@ -53,6 +53,29 @@ namespace interop {
+@@ -53,6 +53,30 @@ namespace interop {
  };
  
  namespace RT64 {
@@ -1446,6 +1472,7 @@ index ff85358..063167a 100644
 +    std::atomic<uint64_t> AndroidRenderStats::draws{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::uberDraws{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::ditherDraws{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::pipelineSwitches{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::passPixels{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::readingPasses{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::tileCopies{ 0 };
@@ -1465,7 +1492,7 @@ index ff85358..063167a 100644
      // TEMPORARY diagnostic (Banjo-Tooie port). RT64 takes the widescreen decision
      // twice: the projection processor widens the projection's field of view, and
      // this file decides whether the viewport is stretched instead. The two must
-@@ -337,7 +360,14 @@ namespace RT64 {
+@@ -337,7 +361,14 @@ namespace RT64 {
          
          const bool createSet = (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
          if (createSet) {
@@ -1480,7 +1507,7 @@ index ff85358..063167a 100644
          }
  
          if (createSet || (descriptorTextureReplacementMapEnabled != textureCacheReplacementMapEnabled)) {
-@@ -487,6 +517,9 @@ namespace RT64 {
+@@ -487,6 +518,9 @@ namespace RT64 {
          worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(fbStorage->depthTarget->texture.get(), readOnly ? depthReadState : RenderTextureLayout::DEPTH_WRITE));
          worker->commandList->setFramebuffer(renderFramebuffer);
          depthState = readOnly;
@@ -1490,7 +1517,7 @@ index ff85358..063167a 100644
          return true;
      }
      
-@@ -579,7 +612,12 @@ namespace RT64 {
+@@ -579,7 +613,12 @@ namespace RT64 {
                  const interop::OtherMode otherMode = triangles.shaderDesc.otherMode;
                  bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
                  bool depthWrite = otherMode.zUpd();
@@ -1504,10 +1531,14 @@ index ff85358..063167a 100644
                      switchToDepthRead();
                  }
                  else if (!depthDecal && depthWrite) {
-@@ -595,7 +633,22 @@ namespace RT64 {
+@@ -594,8 +633,26 @@ namespace RT64 {
+                 if (previousPipeline != triangles.pipeline) {
                      worker->commandList->setPipeline(triangles.pipeline);
                      previousPipeline = triangles.pipeline;
-                 }
++#               if defined(__ANDROID__)
++                    AndroidRenderStats::pipelineSwitches.fetch_add(1, std::memory_order_relaxed);
++#               endif
++                }
 +
 +#           if defined(__ANDROID__)
 +                if (depthDecal && triangles.hardwareDecal) {
@@ -1518,7 +1549,7 @@ index ff85358..063167a 100644
 +                    // resolution scale, decals a little behind the surface (the ring under a
 +                    // charging Kong, shadows) partly failed at high resolutions.
 +                    worker->commandList->setDepthBias(-8192.0f, 0.0f, -2.0f * std::max(framebuffer.resolutionScaleY, 1.0f));
-+                }
+                 }
 +#           endif
                  
 +#           if defined(__ANDROID__)
@@ -1527,7 +1558,7 @@ index ff85358..063167a 100644
                  rasterParams.renderIndex = i;
                  rasterParams.screenScale = triangles.screenScale;
                  rasterParams.screenOffset = triangles.screenOffset;
-@@ -605,6 +658,9 @@ namespace RT64 {
+@@ -605,6 +662,9 @@ namespace RT64 {
  
                  // Simulate dither noise.
                  if (triangles.postBlendDitherNoise) {
@@ -1537,7 +1568,7 @@ index ff85358..063167a 100644
                      if (triangles.postBlendDitherNoiseNegative) {
                          worker->commandList->setPipeline(postBlendDitherNoiseSubNegativePipeline);
                      }
-@@ -1254,6 +1310,9 @@ namespace RT64 {
+@@ -1254,6 +1314,9 @@ namespace RT64 {
      }
  
      void FramebufferRenderer::recordFramebuffer(RenderWorker *worker, uint32_t framebufferIndex) {
@@ -1547,7 +1578,7 @@ index ff85358..063167a 100644
          // Submit all transition barriers first.
          thread_local std::vector<RenderTextureBarrier> startBarriers;
          startBarriers.clear();
-@@ -1269,6 +1328,14 @@ namespace RT64 {
+@@ -1269,6 +1332,14 @@ namespace RT64 {
          if (colorTarget != nullptr) {
              startBarriers.emplace_back(RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE));
          }
@@ -1562,7 +1593,7 @@ index ff85358..063167a 100644
  
          startBarriers.emplace_back(RenderTextureBarrier(depthTarget->texture.get(), RenderTextureLayout::DEPTH_WRITE));
          worker->commandList->barriers(RenderBarrierStage::GRAPHICS, startBarriers);
-@@ -1467,6 +1534,7 @@ namespace RT64 {
+@@ -1467,6 +1538,7 @@ namespace RT64 {
          const float originalWidth = p.fbWidth * p.resolutionScale.y;
          const float commonHeight = float(p.targetHeight);
          framebuffer.viewport = RenderViewport(0.0f, 0.0f, wideWidth, commonHeight);
@@ -1570,7 +1601,7 @@ index ff85358..063167a 100644
          
          const interop::float2 halfViewportSize = { framebuffer.viewport.width / 2.0f, framebuffer.viewport.height / 2.0f };
          const interop::float2 halfPixelOffset = { 1.0f / framebuffer.viewport.width, -1.0f / framebuffer.viewport.height };
-@@ -1713,10 +1781,15 @@ namespace RT64 {
+@@ -1713,10 +1785,15 @@ namespace RT64 {
                          triangles.shaderDesc = call.shaderDesc;
  
                          RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
@@ -1587,7 +1618,7 @@ index ff85358..063167a 100644
                              triangles.pipeline = rasterShaderUber->getPipeline(
                                  !copyMode && call.shaderDesc.otherMode.zCmp() && (call.shaderDesc.otherMode.zMode() != ZMODE_DEC),
 diff --git a/src/render/rt64_framebuffer_renderer.h b/src/render/rt64_framebuffer_renderer.h
-index 3add9c3..ba64600 100644
+index 3add9c3..7ad603a 100644
 --- a/src/render/rt64_framebuffer_renderer.h
 +++ b/src/render/rt64_framebuffer_renderer.h
 @@ -4,6 +4,8 @@
@@ -1599,7 +1630,7 @@ index 3add9c3..ba64600 100644
  #include <stdint.h>
  
  #include "common/rt64_emulator_configuration.h"
-@@ -30,6 +32,38 @@
+@@ -30,6 +32,39 @@
  #endif
  
  namespace RT64 {
@@ -1618,6 +1649,7 @@ index 3add9c3..ba64600 100644
 +        static std::atomic<uint32_t> targetHeight;
 +        static std::atomic<uint64_t> uberDraws;      // draws using the general (slow) ubershader
 +        static std::atomic<uint64_t> ditherDraws;    // extra draws simulating dither noise
++        static std::atomic<uint64_t> pipelineSwitches; // pipeline binds between scene draws
 +        static std::atomic<uint64_t> passPixels;     // colour-target pixels of all passes
 +        static std::atomic<uint64_t> readingPasses;  // passes that sample another render target
 +        static std::atomic<uint64_t> tileCopies;     // framebuffer -> texture copies
@@ -1638,7 +1670,7 @@ index 3add9c3..ba64600 100644
      struct DynamicTextureView {
          const RenderTexture *texture = nullptr;
          uint32_t dstIndex = 0;
-@@ -118,6 +152,7 @@ namespace RT64 {
+@@ -118,6 +153,7 @@ namespace RT64 {
              std::set<RenderTarget *> transitionRenderTargetSet;
              RenderTargetDrawCall renderTargetDrawCall;
              RenderViewport viewport;
