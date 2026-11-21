@@ -210,7 +210,38 @@ public final class BottomScreenView extends View {
         boolean held = (GameState.n64Buttons() & GameState.BUTTON_Z) != 0;
         for (Move m : moves) held |= m.down;
         zHeld = held;
-        invalidate();
+        // Redraw only when something shown has changed (or once a second for the rest: counts,
+        // collected icons). The bottom screen is drawn by the same GPU as the game, and a full
+        // redraw 30 times a second while Banjo stands still was GPU time the game could use.
+        long sig = drawSignature();
+        long now = SystemClock.uptimeMillis();
+        if (sig != lastSignature || now - lastPollDraw >= 1000) {
+            lastSignature = sig;
+            lastPollDraw = now;
+            invalidate();
+        }
+    }
+
+    private long lastSignature, lastPollDraw;
+
+    /** A hash of what poll() reads that changes what's drawn. */
+    private long drawSignature() {
+        long h = 1125899906842597L;
+        float[] p = GameState.position();
+        if (p != null) {
+            h = 31 * h + Math.round(p[0] * 2f);
+            h = 31 * h + Math.round(p[1] * 2f);
+            h = 31 * h + Math.round(p[2] * 2f);
+        } else {
+            h = 31 * h + 7;
+        }
+        h = 31 * h + (Float.isNaN(shownDegrees) ? -1 : Math.round(shownDegrees * 4f));
+        h = 31 * h + System.identityHashCode(mapImage);
+        h = 31 * h + world;
+        h = 31 * h + (areaLabel == null ? 0 : areaLabel.hashCode());
+        h = 31 * h + GameState.bottomSettings();
+        h = 31 * h + ((paused ? 1 : 0) | (cutscene ? 2 : 0) | (bookOpen ? 4 : 0) | (zHeld ? 8 : 0) | (mapOff ? 16 : 0) | (onMenu ? 32 : 0));
+        return h;
     }
 
     // ------------------------------------------------------------------------------

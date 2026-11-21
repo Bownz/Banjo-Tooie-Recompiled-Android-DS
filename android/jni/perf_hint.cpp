@@ -194,6 +194,14 @@ extern "C" bool rt64_android_shared_gpu_queue() {
     return g_shared_queue.load();
 }
 
+// Video > Fast Clears: plume begins a render pass with loadOp CLEAR when it starts with a
+// full-target clear (lib/rt64 plume patch). Read on every clear, so it changes live.
+namespace plume { extern bool vulkanClearOnBegin; }
+
+extern "C" void bt_android_set_fast_clears(bool on) {
+    plume::vulkanClearOnBegin = on;
+}
+
 extern "C" void bt_android_perf_hint_frame(int64_t start_ns, int64_t wall_ns, int64_t target_ns) {
     if (!g_hints_on.load(std::memory_order_relaxed)) {
         return;

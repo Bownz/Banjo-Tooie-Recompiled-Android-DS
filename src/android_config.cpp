@@ -40,6 +40,7 @@ extern "C" void bt_android_set_gpu_keep_awake(bool on);           // android/jni
 extern "C" void bt_android_set_perf_hints(bool on);               // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_frame_pacing(bool on);             // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_shared_gpu_queue(bool on);         // android/jni/perf_hint.cpp
+extern "C" void bt_android_set_fast_clears(bool on);              // android/jni/perf_hint.cpp
 extern "C" void rt64_android_set_ram_copy_mode(int mode);  // rt64-android.patch
 extern "C" void rt64_android_set_auto_framerate(int enabled);  // rt64-android.patch
 extern "C" void bt_android_set_live_log(int on);              // android/jni/perf_monitor.cpp
@@ -574,6 +575,19 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             1u
         );
         graphics_config.add_enum_option(
+            "android_fast_clears",
+            "Fast Clears",
+            "On: when a frame starts by clearing the whole screen, the GPU starts it cleared "
+            "instead of first loading the old picture into its tile memory and then painting over "
+            "it. Same picture, less memory traffic. Off is the old way, for comparison.",
+            onoff_options,
+            1u
+        );
+        graphics_config.add_option_change_callback("android_fast_clears",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+                bt_android_set_fast_clears(std::get<uint32_t>(cur) == 1u);
+            });
+        graphics_config.add_enum_option(
             "android_frame_pacing",
             "Frame Pacing (test)",
             "Asks the screen to show each frame a whole number of refreshes after the last one. "
@@ -734,6 +748,10 @@ void bt::android::after_config_loaded() {
         const uint32_t* q = std::get_if<uint32_t>(&queues);
         bt_android_set_shared_gpu_queue(q == nullptr || *q == 1u);
         std::printf("GPU Queues: %s\n", (q == nullptr || *q == 1u) ? "Shared" : "Separate");
+        const recomp::config::ConfigValueVariant clears = graphics.get_option_value("android_fast_clears");
+        const uint32_t* fc = std::get_if<uint32_t>(&clears);
+        bt_android_set_fast_clears(fc == nullptr || *fc == 1u);
+        std::printf("Fast Clears: %s\n", (fc == nullptr || *fc == 1u) ? "on" : "off");
         bt_android_set_perf_hints(h != nullptr && *h == 1u);
         bt_android_set_frame_pacing(p != nullptr && *p == 1u);
         std::printf("Performance Hints: %s, Frame Pacing: %s\n", (h != nullptr && *h == 1u) ? "on" : "off", (p != nullptr && *p == 1u) ? "on" : "off");

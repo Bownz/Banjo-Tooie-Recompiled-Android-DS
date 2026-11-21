@@ -1,5 +1,5 @@
 diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
-index f1dd503..dd17420 100644
+index f1dd503..79930f9 100644
 --- a/plume_vulkan.cpp
 +++ b/plume_vulkan.cpp
 @@ -13,6 +13,7 @@
@@ -386,11 +386,16 @@ index f1dd503..dd17420 100644
      void VulkanSwapChain::releaseSwapChain() {
          if (vk != VK_NULL_HANDLE) {
              vkDestroySwapchainKHR(commandQueue->device->vk, vk, nullptr);
-@@ -2631,6 +2927,41 @@ namespace plume {
+@@ -2631,6 +2927,46 @@ namespace plume {
              return;
          }
          
 +#if defined(__ANDROID__)
++        androidAttachments = attachments;
++        androidColorReferences = colorReferences;
++        androidDepthReference = depthReference;
++        androidHasDepth = (subpass.pDepthStencilAttachment != nullptr);
++
 +        const uint32_t firstWidth = width, firstHeight = height;
 +        // Size the framebuffer to the smallest attachment. RT64 can pair a color target with a
 +        // smaller depth buffer (or the reverse); desktop drivers clip to each image, but Adreno
@@ -428,7 +433,93 @@ index f1dd503..dd17420 100644
          VkFramebufferCreateInfo fbInfo = {};
          fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
          fbInfo.renderPass = renderPass;
-@@ -3077,12 +3408,36 @@ namespace plume {
+@@ -2655,8 +2991,63 @@ namespace plume {
+         if (renderPass != VK_NULL_HANDLE) {
+             vkDestroyRenderPass(device->vk, renderPass, nullptr);
+         }
++#if defined(__ANDROID__)
++        for (const auto &variant : androidVariants) {
++            vkDestroyRenderPass(device->vk, variant.second, nullptr);
++        }
++#endif
+     }
+ 
++#if defined(__ANDROID__)
++    VkRenderPass VulkanFramebuffer::androidClearVariant(uint32_t clearMask) const {
++        std::lock_guard<std::mutex> lock(androidVariantMutex);
++        for (const auto &variant : androidVariants) {
++            if (variant.first == clearMask) {
++                return variant.second;
++            }
++        }
++
++        // Same attachments, formats, samples and layouts as renderPass, so the two are
++        // compatible (Vulkan ignores load/store ops for compatibility).
++        std::vector<VkAttachmentDescription> attachments = androidAttachments;
++        for (uint32_t i = 0; i < androidColorReferences.size(); i++) {
++            if (clearMask & (1u << i)) {
++                attachments[androidColorReferences[i].attachment].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
++            }
++        }
++        if (androidHasDepth) {
++            VkAttachmentDescription &depth = attachments[androidDepthReference.attachment];
++            if (clearMask & (1u << 8)) {
++                depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
++            }
++            if (clearMask & (1u << 9)) {
++                depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
++            }
++        }
++
++        VkSubpassDescription subpass = {};
++        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
++        subpass.pColorAttachments = !androidColorReferences.empty() ? androidColorReferences.data() : nullptr;
++        subpass.colorAttachmentCount = uint32_t(androidColorReferences.size());
++        subpass.pDepthStencilAttachment = androidHasDepth ? &androidDepthReference : nullptr;
++
++        VkRenderPassCreateInfo passInfo = {};
++        passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
++        passInfo.pAttachments = attachments.data();
++        passInfo.attachmentCount = uint32_t(attachments.size());
++        passInfo.pSubpasses = &subpass;
++        passInfo.subpassCount = 1;
++
++        VkRenderPass variant = VK_NULL_HANDLE;
++        if (vkCreateRenderPass(device->vk, &passInfo, nullptr, &variant) != VK_SUCCESS) {
++            return VK_NULL_HANDLE;
++        }
++
++        androidVariants.emplace_back(clearMask, variant);
++        return variant;
++    }
++#endif
++
+     uint32_t VulkanFramebuffer::getWidth() const {
+         return width;
+     }
+@@ -2794,6 +3185,9 @@ namespace plume {
+ 
+     void VulkanCommandList::begin() {
+         vkResetCommandBuffer(vk, 0);
++#if defined(__ANDROID__)
++        androidPendingClearMask = 0;
++#endif
+ 
+         VkCommandBufferBeginInfo beginInfo = {};
+         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+@@ -2887,6 +3281,11 @@ namespace plume {
+ 
+     void VulkanCommandList::dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) {
+         assert(activeComputePipelineLayout != nullptr);
++#if defined(__ANDROID__)
++        if (androidPendingClearMask != 0) {
++            endActiveRenderPass();   // pending clears run before the dispatch, as recorded
++        }
++#endif
+ 
+         vkCmdDispatch(vk, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+     }
+@@ -3077,12 +3476,36 @@ namespace plume {
      }
  
      void VulkanCommandList::setScissors(const RenderRect *scissorRects, uint32_t count) {
@@ -466,7 +557,7 @@ index f1dd503..dd17420 100644
              }
  
              if (!scissorVector.empty()) {
-@@ -3091,7 +3446,7 @@ namespace plume {
+@@ -3091,7 +3514,7 @@ namespace plume {
          }
          else {
              // Single element fast path.
@@ -475,7 +566,7 @@ index f1dd503..dd17420 100644
              vkCmdSetScissor(vk, 0, 1, &scissor);
          }
      }
-@@ -3102,6 +3457,12 @@ namespace plume {
+@@ -3102,6 +3525,12 @@ namespace plume {
          if (framebuffer != nullptr) {
              const VulkanFramebuffer *interfaceFramebuffer = static_cast<const VulkanFramebuffer *>(framebuffer);
              targetFramebuffer = interfaceFramebuffer;
@@ -488,7 +579,18 @@ index f1dd503..dd17420 100644
          }
          else {
              targetFramebuffer = nullptr;
-@@ -3118,10 +3479,26 @@ namespace plume {
+@@ -3112,16 +3541,37 @@ namespace plume {
+         vkCmdSetDepthBias(vk, depthBias, depthBiasClamp, slopeScaledDepthBias);
+     }
+ 
++#if defined(__ANDROID__)
++    bool vulkanClearOnBegin = true;
++    std::atomic<uint64_t> vulkanClearOnBeginCount{ 0 };
++#endif
++
+     static void clearCommonRectVector(uint32_t width, uint32_t height, const RenderRect *clearRects, uint32_t clearRectsCount, std::vector<VkClearRect> &rectVector) {
+         rectVector.clear();
+ 
          if (clearRectsCount > 0) {
              for (uint32_t i = 0; i < clearRectsCount; i++) {
                  VkClearRect clearRect;
@@ -515,27 +617,171 @@ index f1dd503..dd17420 100644
                  clearRect.baseArrayLayer = 0;
                  clearRect.layerCount = 1;
                  rectVector.emplace_back(clearRect);
-@@ -3157,6 +3534,9 @@ namespace plume {
+@@ -3144,8 +3594,6 @@ namespace plume {
+         assert(attachmentIndex < targetFramebuffer->colorAttachments.size());
+         assert((clearRectsCount == 0) || (clearRects != nullptr));
+ 
+-        checkActiveRenderPass();
+-
+         thread_local std::vector<VkClearRect> rectVector;
+         clearCommonRectVector(targetFramebuffer->getWidth(), targetFramebuffer->getHeight(), clearRects, clearRectsCount, rectVector);
+ 
+@@ -3157,6 +3605,18 @@ namespace plume {
          rgba[3] = colorValue.a;
          attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
          attachment.colorAttachment = attachmentIndex;
 +        if (rectVector.empty()) {
 +            return;   // every rect was outside the render target
 +        }
++#if defined(__ANDROID__)
++        if (androidClearOnBegin(rectVector) && (attachmentIndex < 8)) {
++            androidPendingClearMask |= 1u << attachmentIndex;
++            androidPendingClearValues[attachmentIndex] = attachment.clearValue;
++            vulkanClearOnBeginCount.fetch_add(1, std::memory_order_relaxed);
++            return;
++        }
++#endif
++        checkActiveRenderPass();
          vkCmdClearAttachments(vk, 1, &attachment, uint32_t(rectVector.size()), rectVector.data());
      }
  
-@@ -3180,6 +3560,9 @@ namespace plume {
+@@ -3164,8 +3624,6 @@ namespace plume {
+         assert(targetFramebuffer != nullptr);
+         assert((clearRectsCount == 0) || (clearRects != nullptr));
+ 
+-        checkActiveRenderPass();
+-
+         thread_local std::vector<VkClearRect> rectVector;
+         clearCommonRectVector(targetFramebuffer->getWidth(), targetFramebuffer->getHeight(), clearRects, clearRectsCount, rectVector);
+ 
+@@ -3180,6 +3638,27 @@ namespace plume {
              attachment.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
          }
  
 +        if (rectVector.empty()) {
 +            return;   // every rect was outside the render target
 +        }
++#if defined(__ANDROID__)
++        if (androidClearOnBegin(rectVector) && targetFramebuffer->androidHasDepth && !targetFramebuffer->depthAttachmentReadOnly) {
++            // Depth and stencil share one clear value; clearing only one of them keeps the
++            // other's pending value.
++            VkClearDepthStencilValue &pending = androidPendingClearValues[8].depthStencil;
++            if (clearDepth) {
++                androidPendingClearMask |= 1u << 8;
++                pending.depth = depthValue;
++            }
++            if (clearStencil) {
++                androidPendingClearMask |= 1u << 9;
++                pending.stencil = stencilValue;
++            }
++            vulkanClearOnBeginCount.fetch_add(1, std::memory_order_relaxed);
++            return;
++        }
++#endif
++        checkActiveRenderPass();
          vkCmdClearAttachments(vk, 1, &attachment, uint32_t(rectVector.size()), rectVector.data());
      }
  
-@@ -3703,13 +4086,29 @@ namespace plume {
+@@ -3469,6 +3948,12 @@ namespace plume {
+     void VulkanCommandList::checkActiveRenderPass() {
+         assert(targetFramebuffer != nullptr);
+         
++#if defined(__ANDROID__)
++        if ((activeRenderPass == VK_NULL_HANDLE) && (androidPendingClearMask != 0)) {
++            flushPendingClears();
++            return;
++        }
++#endif
+         if (activeRenderPass == VK_NULL_HANDLE) {
+             VkRenderPassBeginInfo beginInfo = {};
+             beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+@@ -3481,7 +3966,85 @@ namespace plume {
+         }
+     }
+ 
++#if defined(__ANDROID__)
++    // A full-target clear can become the pass's loadOp only before anything else was recorded
++    // in it, i.e. while no pass is active.
++    bool VulkanCommandList::androidClearOnBegin(const std::vector<VkClearRect> &rects) const {
++        if (!vulkanClearOnBegin || (activeRenderPass != VK_NULL_HANDLE) || (rects.size() != 1)) {
++            return false;
++        }
++        const VkClearRect &r = rects[0];
++        return (r.rect.offset.x == 0) && (r.rect.offset.y == 0) && (r.baseArrayLayer == 0) && (r.layerCount == 1) &&
++            (r.rect.extent.width >= targetFramebuffer->width) && (r.rect.extent.height >= targetFramebuffer->height);
++    }
++
++    // Begins the render pass with the pending full-target clears as its loadOp CLEAR.
++    void VulkanCommandList::flushPendingClears() {
++        const uint32_t mask = androidPendingClearMask;
++        androidPendingClearMask = 0;
++        if ((mask == 0) || (targetFramebuffer == nullptr) || (activeRenderPass != VK_NULL_HANDLE)) {
++            return;
++        }
++
++        const VkRenderPass variant = targetFramebuffer->androidClearVariant(mask);
++        const uint32_t colorCount = std::min(uint32_t(targetFramebuffer->androidColorReferences.size()), 8u);
++        VkClearValue clearValues[9] = {};
++        uint32_t clearValueCount = 0;
++        for (uint32_t i = 0; i < colorCount; i++) {
++            const uint32_t a = targetFramebuffer->androidColorReferences[i].attachment;
++            if (a < 9) {
++                clearValues[a] = androidPendingClearValues[i];
++                clearValueCount = std::max(clearValueCount, a + 1);
++            }
++        }
++        if (targetFramebuffer->androidHasDepth && (targetFramebuffer->androidDepthReference.attachment < 9)) {
++            const uint32_t a = targetFramebuffer->androidDepthReference.attachment;
++            clearValues[a] = androidPendingClearValues[8];
++            clearValueCount = std::max(clearValueCount, a + 1);
++        }
++
++        VkRenderPassBeginInfo beginInfo = {};
++        beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
++        beginInfo.renderPass = (variant != VK_NULL_HANDLE) ? variant : targetFramebuffer->renderPass;
++        beginInfo.framebuffer = targetFramebuffer->vk;
++        beginInfo.renderArea.extent.width = targetFramebuffer->width;
++        beginInfo.renderArea.extent.height = targetFramebuffer->height;
++        beginInfo.clearValueCount = clearValueCount;
++        beginInfo.pClearValues = clearValues;
++        vkCmdBeginRenderPass(vk, &beginInfo, VkSubpassContents::VK_SUBPASS_CONTENTS_INLINE);
++        activeRenderPass = beginInfo.renderPass;
++
++        if (variant == VK_NULL_HANDLE) {
++            // No variant could be made: clear the usual way.
++            VkClearRect rect = {};
++            rect.rect.extent.width = targetFramebuffer->width;
++            rect.rect.extent.height = targetFramebuffer->height;
++            rect.layerCount = 1;
++            for (uint32_t i = 0; i < colorCount; i++) {
++                if (mask & (1u << i)) {
++                    VkClearAttachment attachment = {};
++                    attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++                    attachment.colorAttachment = i;
++                    attachment.clearValue = androidPendingClearValues[i];
++                    vkCmdClearAttachments(vk, 1, &attachment, 1, &rect);
++                }
++            }
++            if (mask & (3u << 8)) {
++                VkClearAttachment attachment = {};
++                attachment.aspectMask = ((mask & (1u << 8)) ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u) | ((mask & (1u << 9)) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
++                attachment.clearValue = androidPendingClearValues[8];
++                vkCmdClearAttachments(vk, 1, &attachment, 1, &rect);
++            }
++        }
++    }
++#endif
++
+     void VulkanCommandList::endActiveRenderPass() {
++#if defined(__ANDROID__)
++        if ((activeRenderPass == VK_NULL_HANDLE) && (androidPendingClearMask != 0)) {
++            flushPendingClears();   // the clears still have to happen: begin, then end below
++        }
++#endif
+         if (activeRenderPass != VK_NULL_HANDLE) {
+             vkCmdEndRenderPass(vk);
+             activeRenderPass = VK_NULL_HANDLE;
+@@ -3703,13 +4266,29 @@ namespace plume {
      
      // VulkanQueueFamily
  
@@ -566,7 +812,7 @@ index f1dd503..dd17420 100644
              uint32_t virtualQueueCount = uint32_t(queues[i].virtualQueues.size());
              if (virtualQueueCount < lowestCount) {
                  queueIndex = i;
-@@ -3828,6 +4227,12 @@ namespace plume {
+@@ -3828,6 +4407,12 @@ namespace plume {
  
          // Store properties.
          vkGetPhysicalDeviceProperties(physicalDevice, &physicalDeviceProperties);
@@ -579,7 +825,7 @@ index f1dd503..dd17420 100644
  
          // Check for supported features.
          void *featuresChain = nullptr;
-@@ -4018,12 +4423,22 @@ namespace plume {
+@@ -4018,12 +4603,22 @@ namespace plume {
          // Create the logical device with the desired family queues.
          std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
          std::vector<float> queuePriorities(MaxQueuesPerFamilyCount, 1.0f);
@@ -602,7 +848,7 @@ index f1dd503..dd17420 100644
                  queueCreateInfo.queueFamilyIndex = i;
                  queueCreateInfo.pQueuePriorities = queuePriorities.data();
                  queueCreateInfos.emplace_back(queueCreateInfo);
-@@ -4149,7 +4564,15 @@ namespace plume {
+@@ -4149,7 +4744,15 @@ namespace plume {
  #   endif
  
          // Fill Vulkan-only capabilities.
@@ -618,7 +864,7 @@ index f1dd503..dd17420 100644
  
          if (!nullDescriptorSupported) {
              nullBuffer = createBuffer(RenderBufferDesc::DefaultBuffer(16, RenderBufferFlag::VERTEX));
-@@ -4438,6 +4861,9 @@ namespace plume {
+@@ -4438,6 +5041,9 @@ namespace plume {
          }
  
          if (vk != VK_NULL_HANDLE) {
@@ -628,7 +874,7 @@ index f1dd503..dd17420 100644
              vkDestroyDevice(vk, nullptr);
              vk = VK_NULL_HANDLE;
          }
-@@ -4464,7 +4890,19 @@ namespace plume {
+@@ -4464,7 +5070,19 @@ namespace plume {
  #else
      VulkanInterface::VulkanInterface() {
  #endif
@@ -649,10 +895,18 @@ index f1dd503..dd17420 100644
              fprintf(stderr, "volkInitialize failed with error code 0x%X.\n", res);
              return;
 diff --git a/plume_vulkan.h b/plume_vulkan.h
-index 0a1edbe..bc6e405 100644
+index 0a1edbe..a117949 100644
 --- a/plume_vulkan.h
 +++ b/plume_vulkan.h
-@@ -42,6 +42,14 @@
+@@ -9,6 +9,7 @@
+ 
+ #include "plume_render_interface.h"
+ 
++#include <atomic>
+ #include <mutex>
+ #include <set>
+ #include <unordered_map>
+@@ -42,6 +43,14 @@
  #endif
  
  namespace plume {
@@ -667,7 +921,7 @@ index 0a1edbe..bc6e405 100644
      struct VulkanCommandQueue;
      struct VulkanDevice;
      struct VulkanInterface;
-@@ -241,6 +249,17 @@ namespace plume {
+@@ -241,6 +250,17 @@ namespace plume {
          uint64_t currentPresentId = 0;
          bool immediatePresentModeSupported = false;
          bool mailboxPresentModeSupported = false;
@@ -685,7 +939,7 @@ index 0a1edbe..bc6e405 100644
  
          VulkanSwapChain(VulkanCommandQueue *commandQueue, const RenderSwapChainDesc &desc);
          ~VulkanSwapChain() override;
-@@ -261,6 +280,9 @@ namespace plume {
+@@ -261,6 +281,9 @@ namespace plume {
          void getWindowSize(uint32_t &dstWidth, uint32_t &dstHeight) const;
          void releaseSwapChain();
          void releaseImageViews();
@@ -695,7 +949,26 @@ index 0a1edbe..bc6e405 100644
      };
  
      struct VulkanFramebuffer : RenderFramebuffer {
-@@ -298,6 +320,10 @@ namespace plume {
+@@ -273,6 +296,18 @@ namespace plume {
+         bool depthAttachmentReadOnly = false;
+         uint32_t width = 0;
+         uint32_t height = 0;
++#if defined(__ANDROID__)
++        // Render pass variants whose loadOp is CLEAR for some attachments (see
++        // VulkanCommandList::androidPendingClears). Keyed by the clear mask; compatible with
++        // renderPass, so the framebuffer and every pipeline work with them unchanged.
++        std::vector<VkAttachmentDescription> androidAttachments;
++        std::vector<VkAttachmentReference> androidColorReferences;
++        VkAttachmentReference androidDepthReference = {};
++        bool androidHasDepth = false;
++        mutable std::mutex androidVariantMutex;
++        mutable std::vector<std::pair<uint32_t, VkRenderPass>> androidVariants;
++        VkRenderPass androidClearVariant(uint32_t clearMask) const;
++#endif
+ 
+         VulkanFramebuffer(VulkanDevice *device, const RenderFramebufferDesc &desc);
+         ~VulkanFramebuffer() override;
+@@ -298,10 +333,24 @@ namespace plume {
          VkCommandPool commandPool = VK_NULL_HANDLE;
          VulkanCommandQueue *queue = nullptr;
          const VulkanFramebuffer *targetFramebuffer = nullptr;
@@ -706,7 +979,21 @@ index 0a1edbe..bc6e405 100644
          const VulkanPipelineLayout *activeComputePipelineLayout = nullptr;
          const VulkanPipelineLayout *activeGraphicsPipelineLayout = nullptr;
          const VulkanPipelineLayout *activeRaytracingPipelineLayout = nullptr;
-@@ -395,6 +421,15 @@ namespace plume {
+         VkRenderPass activeRenderPass = VK_NULL_HANDLE;
++#if defined(__ANDROID__)
++        // Full-target clears issued before the render pass has begun. Rather than beginning
++        // with loadOp LOAD (a full read of the attachment into tile memory on Adreno) and then
++        // drawing the clear, the pass begins with loadOp CLEAR for these attachments. Bits 0-7
++        // are color attachments, bit 8 depth, bit 9 stencil (see vulkanClearOnBegin).
++        uint32_t androidPendingClearMask = 0;
++        VkClearValue androidPendingClearValues[9] = {};
++        void flushPendingClears();
++        bool androidClearOnBegin(const std::vector<VkClearRect> &rects) const;
++#endif
+ 
+         VulkanCommandList(VulkanCommandQueue *queue);
+         ~VulkanCommandList() override;
+@@ -395,6 +444,21 @@ namespace plume {
          std::unordered_set<const VulkanCommandQueue *> virtualQueues;
      };
  
@@ -717,6 +1004,12 @@ index 0a1edbe..bc6e405 100644
 +    // its small display-list renders and texture uploads, which the game waits on, can run
 +    // ahead of the full-resolution frames instead of queueing behind them.
 +    extern bool vulkanHighPriorityQueueCreation;
++
++    // Android: when true (the default), a clear that covers the whole target and comes before
++    // anything else in a render pass becomes the pass's loadOp CLEAR instead of a load followed
++    // by vkCmdClearAttachments. The result is identical; it saves a full-screen tile load.
++    extern bool vulkanClearOnBegin;
++    extern std::atomic<uint64_t> vulkanClearOnBeginCount;
 +#endif
 +
      struct VulkanQueueFamily {
