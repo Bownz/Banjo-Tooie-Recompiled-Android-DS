@@ -42,6 +42,7 @@ extern "C" void bt_android_set_frame_pacing(bool on);             // android/jni
 extern "C" void bt_android_set_shared_gpu_queue(bool on);         // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_fast_clears(bool on);              // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_overlap_frames(bool on);           // android/jni/perf_hint.cpp
+extern "C" void bt_android_set_draw_batching(bool on);            // android/jni/perf_hint.cpp
 extern "C" void rt64_android_set_ram_copy_mode(int mode);  // rt64-android.patch
 extern "C" void rt64_android_set_auto_framerate(int enabled);  // rt64-android.patch
 extern "C" void rt64_android_set_dynamic_resolution(int enabled);   // rt64-android.patch
@@ -611,6 +612,15 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
                 rt64_android_set_single_shader(std::get<uint32_t>(cur) == 1u ? 1 : 0);
             });
         graphics_config.add_enum_option(
+            "android_draw_batching",
+            "Draw Batching",
+            "Takes effect the next time the game starts. On: runs of things drawn the same way "
+            "go to the GPU as one draw instead of dozens, which is what the GPU spends most of its "
+            "time on here. Same picture. Off is the old way, for comparison.",
+            onoff_options,
+            1u
+        );
+        graphics_config.add_enum_option(
             "android_overlap_frames",
             "Overlap Frames",
             "Takes effect the next time the game starts. On: the CPU gets the next frame ready "
@@ -812,6 +822,10 @@ void bt::android::after_config_loaded() {
                 out << "done\n";
             }
         }
+        const recomp::config::ConfigValueVariant batching = graphics.get_option_value("android_draw_batching");
+        const uint32_t* db = std::get_if<uint32_t>(&batching);
+        bt_android_set_draw_batching(db == nullptr || *db == 1u);
+        std::printf("Draw Batching: %s\n", (db == nullptr || *db == 1u) ? "on" : "off");
         const recomp::config::ConfigValueVariant overlap = graphics.get_option_value("android_overlap_frames");
         const uint32_t* ov = std::get_if<uint32_t>(&overlap);
         bt_android_set_overlap_frames(ov == nullptr || *ov == 1u);

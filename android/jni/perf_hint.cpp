@@ -206,6 +206,18 @@ extern "C" bool rt64_android_overlap_frames() {
     return g_overlap.load();
 }
 
+// Video > Draw Batching: RT64 draws runs of similar draws with one call (RasterPS.hlsl,
+// FramebufferRenderer::androidPlanBatches). Read once when RT64 starts.
+static std::atomic<bool> g_batching{true};
+
+extern "C" void bt_android_set_draw_batching(bool on) {
+    g_batching.store(on);
+}
+
+extern "C" bool rt64_android_draw_batching() {
+    return g_batching.load();
+}
+
 // Video > Fast Clears: plume begins a render pass with loadOp CLEAR when it starts with a
 // full-target clear (lib/rt64 plume patch). Read on every clear, so it changes live.
 namespace plume { extern bool vulkanClearOnBegin; }

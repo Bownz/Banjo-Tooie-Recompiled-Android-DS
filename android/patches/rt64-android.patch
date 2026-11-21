@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 79dfc38..ff188ea 100644
+index 79dfc38..aa5525e 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -35,7 +35,7 @@ function(preprocess INFILE OUTFILE OPTIONS)
@@ -69,6 +69,23 @@ index 79dfc38..ff188ea 100644
  
  # Add any Apple-specific source files and libraries
  if (APPLE)
+@@ -504,6 +519,16 @@ build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/
+ build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING")
+ build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
+ build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING")
++if (ANDROID)
++    # Android draw batching (RasterPS.hlsl, ANDROID_BATCHING): the same shaders reading each
++    # triangle's draw through its primitive ID. Used only when the device has geometryShader.
++    build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamicBatch.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D ANDROID_BATCHING")
++    build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamicBatchMS.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING" "-D ANDROID_BATCHING")
++    build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantBatch.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D ANDROID_BATCHING")
++    build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantBatchMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING" "-D ANDROID_BATCHING")
++    build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatBatch.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D ANDROID_BATCHING")
++    build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatBatchMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING" "-D ANDROID_BATCHING")
++endif()
+ build_vertex_shader( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS")
+ build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS")
+ build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
 diff --git a/src/common/rt64_thread.cpp b/src/common/rt64_thread.cpp
 index c4b080b..764389a 100644
 --- a/src/common/rt64_thread.cpp
@@ -134,7 +151,7 @@ index 7006549..cec813b 100644
              return nullptr;
          }
 diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
-index ee8bc1f..8be8657 100644
+index ee8bc1f..87fb53b 100644
 --- a/src/hle/rt64_application.cpp
 +++ b/src/hle/rt64_application.cpp
 @@ -3,6 +3,10 @@
@@ -148,7 +165,7 @@ index ee8bc1f..8be8657 100644
  #include "rhi/rt64_render_hooks.h"
  
  #include <cinttypes>
-@@ -18,22 +22,30 @@
+@@ -18,22 +22,31 @@
  
  //#define LOG_DISPLAY_LISTS
  
@@ -169,6 +186,7 @@ index ee8bc1f..8be8657 100644
 +#if defined(__ANDROID__)
 +extern "C" bool rt64_android_shared_gpu_queue() __attribute__((weak));
 +extern "C" bool rt64_android_overlap_frames() __attribute__((weak));
++extern "C" bool rt64_android_draw_batching() __attribute__((weak));
 +static bool androidOverlapActive = false;   // Video > Overlap Frames, as set up (Application::setup)
 +#endif
 +
@@ -181,7 +199,7 @@ index ee8bc1f..8be8657 100644
          return plume::CreateVulkanInterface(renderWindow);
  #else
          return plume::CreateVulkanInterface();
-@@ -316,16 +328,62 @@ namespace RT64 {
+@@ -316,16 +329,62 @@ namespace RT64 {
          workloadExtrasUploader = std::make_unique<BufferUploader>(device.get());
          workloadVelocityUploader = std::make_unique<BufferUploader>(device.get());
          workloadTilesUploader = std::make_unique<BufferUploader>(device.get());
@@ -244,7 +262,24 @@ index ee8bc1f..8be8657 100644
          swapChainDesc.textureCount = (userConfig.displayBuffering == UserConfiguration::DisplayBuffering::Triple) ? 3 : 2;
  
          // Enable present wait if supported by the device. We specify a max latency of 1 as we use it to wait right before the next
-@@ -392,6 +450,9 @@ namespace RT64 {
+@@ -362,6 +421,16 @@ namespace RT64 {
+         const uint32_t rasterShaderThreads = std::max(threadsAvailable / 2U, 1U);
+         const uint32_t ubershaderThreads = uint32_t(std::max(int(threadsAvailable) - 2, 1));
+         rasterShaderCache = std::make_unique<RasterShaderCache>(rasterShaderThreads, ubershaderThreads);
++#   if defined(__ANDROID__)
++        {
++            // Video > Draw Batching (needs geometryShader for the pixel shader's SV_PrimitiveID).
++            const bool wanted = (rt64_android_draw_batching != nullptr) && rt64_android_draw_batching();
++            const bool supported = device->getCapabilities().geometryShader;
++            RasterShader::androidBatching.store(wanted && supported, std::memory_order_relaxed);
++            fprintf(stdout, "Draw batching: %s\n", (wanted && supported) ? "on" : (wanted ? "off (the GPU has no geometry shaders)" : "off"));
++            fflush(stdout);
++        }
++#   endif
+         rasterShaderCache->setup(device.get(), renderInterface->getCapabilities().shaderFormat, shaderLibrary.get(), multisampling);
+ 
+ #   if RT_ENABLED
+@@ -392,6 +461,9 @@ namespace RT64 {
  
          // Create the queues.
          workloadQueue = std::make_unique<WorkloadQueue>();
@@ -254,7 +289,7 @@ index ee8bc1f..8be8657 100644
          presentQueue = std::make_unique<PresentQueue>();
  
          // Create the shared resources for the queues.
-@@ -441,6 +502,7 @@ namespace RT64 {
+@@ -441,6 +513,7 @@ namespace RT64 {
          stateExt.device = device.get();
          stateExt.swapChain = swapChain.get();
          stateExt.framebufferGraphicsWorker = framebufferGraphicsWorker.get();
@@ -262,7 +297,7 @@ index ee8bc1f..8be8657 100644
          stateExt.shaderLibrary = shaderLibrary.get();
          stateExt.drawDataUploader = drawDataUploader.get();
          stateExt.transformsUploader = transformsUploader.get();
-@@ -522,6 +584,48 @@ namespace RT64 {
+@@ -522,6 +595,50 @@ namespace RT64 {
          appWindow->sdlCheckFilterInstallation();
          screenApiProfiler.logAndRestart();
          state->updateScreen(core.decodeVI(), false);
@@ -285,6 +320,7 @@ index ee8bc1f..8be8657 100644
 +            const uint64_t waitMicros = AndroidRenderStats::waitMicros.exchange(0);
 +            const uint64_t uberDraws = AndroidRenderStats::uberDraws.exchange(0);
 +            const uint64_t pipelineSwitches = AndroidRenderStats::pipelineSwitches.exchange(0);
++            const uint64_t batchedDraws = AndroidRenderStats::batchedDraws.exchange(0);
 +            if (renders > 0) {
 +                const double n = double(renders);
 +                const UserConfiguration &config = sharedQueueResources->userConfig;
@@ -295,8 +331,9 @@ index ee8bc1f..8be8657 100644
 +                // Draws that fell back to the general (slow) shader while their own was being made.
 +                // Pipeline switches cost the most per draw on a tiled GPU (each one is redone for
 +                // every screen tile); Video > Shader Mode trades them for heavier pixels.
-+                fprintf(stdout, "Perf shaders: %.1f ubershader draws per frame (%.1f%% of draws), %.0f pipeline switches per frame\n",
-+                    double(uberDraws) / n, (draws > 0) ? (100.0 * double(uberDraws) / double(draws)) : 0.0, double(pipelineSwitches) / n);
++                fprintf(stdout, "Perf shaders: %.1f ubershader draws per frame (%.1f%% of draws), %.0f pipeline switches per frame, %.0f draws batched away per frame (%.0f GPU draws left)\n",
++                    double(uberDraws) / n, (draws > 0) ? (100.0 * double(uberDraws) / double(draws)) : 0.0, double(pipelineSwitches) / n,
++                    double(batchedDraws) / n, double(draws - std::min(draws, batchedDraws)) / n);
 +            }
 +            const uint64_t syncs = AndroidRenderStats::dlSyncs.exchange(0);
 +            if (syncs > 0) {
@@ -1633,10 +1670,10 @@ index 69a82ac..3f7dd70 100644
              if (device != nullptr) {
                  create(device);
 diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
-index ff85358..69379fb 100644
+index ff85358..2645707 100644
 --- a/src/render/rt64_framebuffer_renderer.cpp
 +++ b/src/render/rt64_framebuffer_renderer.cpp
-@@ -53,6 +53,30 @@ namespace interop {
+@@ -53,6 +53,31 @@ namespace interop {
  };
  
  namespace RT64 {
@@ -1648,6 +1685,7 @@ index ff85358..69379fb 100644
 +    std::atomic<uint64_t> AndroidRenderStats::uberDraws{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::ditherDraws{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::pipelineSwitches{ 0 };
++    std::atomic<uint64_t> AndroidRenderStats::batchedDraws{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::passPixels{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::readingPasses{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::tileCopies{ 0 };
@@ -1667,7 +1705,7 @@ index ff85358..69379fb 100644
      // TEMPORARY diagnostic (Banjo-Tooie port). RT64 takes the widescreen decision
      // twice: the projection processor widens the projection's field of view, and
      // this file decides whether the viewport is stretched instead. The two must
-@@ -337,7 +361,14 @@ namespace RT64 {
+@@ -337,7 +362,14 @@ namespace RT64 {
          
          const bool createSet = (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
          if (createSet) {
@@ -1682,7 +1720,7 @@ index ff85358..69379fb 100644
          }
  
          if (createSet || (descriptorTextureReplacementMapEnabled != textureCacheReplacementMapEnabled)) {
-@@ -487,6 +518,9 @@ namespace RT64 {
+@@ -487,6 +519,9 @@ namespace RT64 {
          worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(fbStorage->depthTarget->texture.get(), readOnly ? depthReadState : RenderTextureLayout::DEPTH_WRITE));
          worker->commandList->setFramebuffer(renderFramebuffer);
          depthState = readOnly;
@@ -1692,7 +1730,24 @@ index ff85358..69379fb 100644
          return true;
      }
      
-@@ -579,7 +613,12 @@ namespace RT64 {
+@@ -537,8 +572,15 @@ namespace RT64 {
+             switchToGraphicsPipeline();
+         }
+         
+-        for (uint32_t i : rasterScene.instanceIndices) {
++        const std::vector<uint32_t> &sceneIndices = rasterScene.instanceIndices;
++        for (size_t sceneCursor = 0; sceneCursor < sceneIndices.size(); sceneCursor++) {
++            const uint32_t i = sceneIndices[sceneCursor];
+             const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
++#       if defined(__ANDROID__)
++            const uint32_t batchCount = (i < androidBatchCount.size()) ? androidBatchCount[i] : 0;
++#       else
++            const uint32_t batchCount = 0;
++#       endif
+             switch (drawCall.type) {
+             case InstanceDrawCall::Type::IndexedTriangles: 
+             case InstanceDrawCall::Type::RawTriangles:
+@@ -579,7 +621,12 @@ namespace RT64 {
                  const interop::OtherMode otherMode = triangles.shaderDesc.otherMode;
                  bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
                  bool depthWrite = otherMode.zUpd();
@@ -1706,7 +1761,7 @@ index ff85358..69379fb 100644
                      switchToDepthRead();
                  }
                  else if (!depthDecal && depthWrite) {
-@@ -594,8 +633,26 @@ namespace RT64 {
+@@ -594,17 +641,53 @@ namespace RT64 {
                  if (previousPipeline != triangles.pipeline) {
                      worker->commandList->setPipeline(triangles.pipeline);
                      previousPipeline = triangles.pipeline;
@@ -1731,9 +1786,26 @@ index ff85358..69379fb 100644
 +                AndroidRenderStats::draws.fetch_add(1, std::memory_order_relaxed);
 +#           endif
                  rasterParams.renderIndex = i;
++                rasterParams.padding = interop::uint3(0, 0, 0);
                  rasterParams.screenScale = triangles.screenScale;
                  rasterParams.screenOffset = triangles.screenOffset;
-@@ -605,6 +662,9 @@ namespace RT64 {
++#           if defined(__ANDROID__)
++                if (batchCount >= 2) {
++                    // The whole run with one call (androidPlanBatches); the pixel shader finds each
++                    // triangle's own draw from its primitive ID.
++                    rasterParams.renderIndex = androidBatchBase[i];
++                    rasterParams.padding = interop::uint3(1, 0, 0);
++                    worker->commandList->setGraphicsPushConstants(0, &rasterParams);
++                    worker->commandList->drawIndexedInstanced(androidBatchFaces[i] * 3, 1, triangles.indexStart, 0, 0);
++                    AndroidRenderStats::draws.fetch_add(batchCount - 1, std::memory_order_relaxed);
++                    AndroidRenderStats::batchedDraws.fetch_add(batchCount - 1, std::memory_order_relaxed);
++                    sceneCursor += (batchCount - 1);
++                    break;
++                }
++#           endif
+                 worker->commandList->setGraphicsPushConstants(0, &rasterParams);
+ 
+                 drawCallTriangles(drawCall);
  
                  // Simulate dither noise.
                  if (triangles.postBlendDitherNoise) {
@@ -1743,7 +1815,7 @@ index ff85358..69379fb 100644
                      if (triangles.postBlendDitherNoiseNegative) {
                          worker->commandList->setPipeline(postBlendDitherNoiseSubNegativePipeline);
                      }
-@@ -1254,6 +1314,9 @@ namespace RT64 {
+@@ -1254,6 +1337,9 @@ namespace RT64 {
      }
  
      void FramebufferRenderer::recordFramebuffer(RenderWorker *worker, uint32_t framebufferIndex) {
@@ -1753,7 +1825,7 @@ index ff85358..69379fb 100644
          // Submit all transition barriers first.
          thread_local std::vector<RenderTextureBarrier> startBarriers;
          startBarriers.clear();
-@@ -1269,6 +1332,14 @@ namespace RT64 {
+@@ -1269,6 +1355,14 @@ namespace RT64 {
          if (colorTarget != nullptr) {
              startBarriers.emplace_back(RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE));
          }
@@ -1768,7 +1840,7 @@ index ff85358..69379fb 100644
  
          startBarriers.emplace_back(RenderTextureBarrier(depthTarget->texture.get(), RenderTextureLayout::DEPTH_WRITE));
          worker->commandList->barriers(RenderBarrierStage::GRAPHICS, startBarriers);
-@@ -1467,6 +1538,7 @@ namespace RT64 {
+@@ -1467,6 +1561,7 @@ namespace RT64 {
          const float originalWidth = p.fbWidth * p.resolutionScale.y;
          const float commonHeight = float(p.targetHeight);
          framebuffer.viewport = RenderViewport(0.0f, 0.0f, wideWidth, commonHeight);
@@ -1776,7 +1848,7 @@ index ff85358..69379fb 100644
          
          const interop::float2 halfViewportSize = { framebuffer.viewport.width / 2.0f, framebuffer.viewport.height / 2.0f };
          const interop::float2 halfPixelOffset = { 1.0f / framebuffer.viewport.width, -1.0f / framebuffer.viewport.height };
-@@ -1713,10 +1785,15 @@ namespace RT64 {
+@@ -1713,10 +1808,15 @@ namespace RT64 {
                          triangles.shaderDesc = call.shaderDesc;
  
                          RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
@@ -1792,8 +1864,101 @@ index ff85358..69379fb 100644
                              const bool copyMode = (call.shaderDesc.otherMode.cycleType() == G_CYC_COPY);
                              triangles.pipeline = rasterShaderUber->getPipeline(
                                  !copyMode && call.shaderDesc.otherMode.zCmp() && (call.shaderDesc.otherMode.zMode() != ZMODE_DEC),
+@@ -1865,7 +1965,92 @@ namespace RT64 {
+         checkRasterScene(rasterScene);
+     }
+ 
++#   if defined(__ANDROID__)
++    void FramebufferRenderer::androidPlanBatches() {
++        const size_t callCount = instanceDrawCallVector.size();
++        androidBatchCount.assign(callCount, 0);
++        androidBatchBase.assign(callCount, 0);
++        androidBatchFaces.assign(callCount, 0);
++        if (!RasterShader::androidBatching.load(std::memory_order_relaxed)) {
++            return;
++        }
++
++        // A draw can join the one before it when nothing submitRasterScene does between draws
++        // would differ: same pipeline, scissor and screen transform, the same depth handling,
++        // and its triangles right after the previous draw's in the index buffer. Draws using
++        // the primitive's depth (read through renderIndex by the vertex shader), the vertex
++        // Z test or the dither noise passes stay on their own.
++        auto batchable = [&](const InstanceDrawCall &call) {
++            if ((call.type != InstanceDrawCall::Type::IndexedTriangles) || call.triangles.vertexTestZ || call.triangles.postBlendDitherNoise ||
++                (call.triangles.faceCount == 0) || call.triangles.scissor.isEmpty() || (call.triangles.pipeline == nullptr))
++            {
++                return false;
++            }
++
++            const interop::OtherMode &om = call.triangles.shaderDesc.otherMode;
++            return (om.zSource() != G_ZS_PRIM);
++        };
++
++        auto depthClass = [](const InstanceDrawCall &call) {
++            const interop::OtherMode &om = call.triangles.shaderDesc.otherMode;
++            return (uint32_t(om.zMode() == ZMODE_DEC) << 0) | (uint32_t(call.triangles.hardwareDecal) << 1) | (uint32_t(om.zUpd() != 0) << 2);
++        };
++
++        auto joins = [&](const InstanceDrawCall &prev, const InstanceDrawCall &next) {
++            return (next.triangles.pipeline == prev.triangles.pipeline) && (next.triangles.scissor == prev.triangles.scissor) &&
++                (next.triangles.screenScale.x == prev.triangles.screenScale.x) && (next.triangles.screenScale.y == prev.triangles.screenScale.y) &&
++                (next.triangles.screenOffset.x == prev.triangles.screenOffset.x) && (next.triangles.screenOffset.y == prev.triangles.screenOffset.y) &&
++                (depthClass(next) == depthClass(prev)) &&
++                (next.triangles.indexStart == (prev.triangles.indexStart + prev.triangles.faceCount * 3));
++        };
++
++        for (uint32_t f = 0; f < framebufferCount; f++) {
++            for (const RasterScene &scene : framebufferVector[f].renderTargetDrawCall.rasterScenes) {
++                const std::vector<uint32_t> &indices = scene.instanceIndices;
++                size_t k = 0;
++                while (k < indices.size()) {
++                    const uint32_t first = indices[k];
++                    if ((first >= callCount) || !batchable(instanceDrawCallVector[first])) {
++                        k++;
++                        continue;
++                    }
++
++                    size_t end = k + 1;
++                    while ((end < indices.size()) && (indices[end] < callCount) && batchable(instanceDrawCallVector[indices[end]]) &&
++                        joins(instanceDrawCallVector[indices[end - 1]], instanceDrawCallVector[indices[end]]))
++                    {
++                        end++;
++                    }
++
++                    if ((end - k) >= 2) {
++                        // One copy of each draw's RenderIndices per triangle, in draw order: the
++                        // pixel shader adds its primitive ID to the batch's renderIndex.
++                        const uint32_t base = uint32_t(renderIndicesVector.size());
++                        uint32_t faces = 0;
++                        for (size_t m = k; m < end; m++) {
++                            const uint32_t i = indices[m];
++                            const interop::RenderIndices entry = renderIndicesVector[i];
++                            const uint32_t count = instanceDrawCallVector[i].triangles.faceCount;
++                            renderIndicesVector.insert(renderIndicesVector.end(), count, entry);
++                            faces += count;
++                        }
++
++                        androidBatchCount[first] = uint32_t(end - k);
++                        androidBatchBase[first] = base;
++                        androidBatchFaces[first] = faces;
++                    }
++
++                    k = end;
++                }
++            }
++        }
++    }
++#   endif
++
+     void FramebufferRenderer::endFramebuffers(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, bool rtEnabled) {
++#   if defined(__ANDROID__)
++        androidPlanBatches();
++#   endif
+         bool shaderViewRtEnabled = false;
+         std::vector<BufferUploader::Upload> shaderUploads = {
+             { renderIndicesVector.data(), { 0, renderIndicesVector.size() }, sizeof(interop::RenderIndices), RenderBufferFlag::STORAGE, { }, &renderIndicesBuffer},
 diff --git a/src/render/rt64_framebuffer_renderer.h b/src/render/rt64_framebuffer_renderer.h
-index 3add9c3..7ad603a 100644
+index 3add9c3..dd69a9d 100644
 --- a/src/render/rt64_framebuffer_renderer.h
 +++ b/src/render/rt64_framebuffer_renderer.h
 @@ -4,6 +4,8 @@
@@ -1805,7 +1970,7 @@ index 3add9c3..7ad603a 100644
  #include <stdint.h>
  
  #include "common/rt64_emulator_configuration.h"
-@@ -30,6 +32,39 @@
+@@ -30,6 +32,40 @@
  #endif
  
  namespace RT64 {
@@ -1825,6 +1990,7 @@ index 3add9c3..7ad603a 100644
 +        static std::atomic<uint64_t> uberDraws;      // draws using the general (slow) ubershader
 +        static std::atomic<uint64_t> ditherDraws;    // extra draws simulating dither noise
 +        static std::atomic<uint64_t> pipelineSwitches; // pipeline binds between scene draws
++        static std::atomic<uint64_t> batchedDraws;   // draws folded into a batch's single call
 +        static std::atomic<uint64_t> passPixels;     // colour-target pixels of all passes
 +        static std::atomic<uint64_t> readingPasses;  // passes that sample another render target
 +        static std::atomic<uint64_t> tileCopies;     // framebuffer -> texture copies
@@ -1845,7 +2011,23 @@ index 3add9c3..7ad603a 100644
      struct DynamicTextureView {
          const RenderTexture *texture = nullptr;
          uint32_t dstIndex = 0;
-@@ -118,6 +153,7 @@ namespace RT64 {
+@@ -69,6 +105,15 @@ namespace RT64 {
+         std::vector<InstanceDrawCall> instanceDrawCallVector;
+         std::vector<RenderPipelineProgram> hitGroupVector;
+         std::vector<interop::RenderIndices> renderIndicesVector;
++#   if defined(__ANDROID__)
++        // Draw batching (RasterShader::androidBatching), per instance draw call: at the first draw
++        // of a run, how many draws it covers, the renderIndex of its per-triangle entries and its
++        // total triangles; 0 elsewhere. Planned in endFramebuffers, used in submitRasterScene.
++        std::vector<uint32_t> androidBatchCount;
++        std::vector<uint32_t> androidBatchBase;
++        std::vector<uint32_t> androidBatchFaces;
++        void androidPlanBatches();
++#   endif
+         std::vector<DynamicTextureView> dynamicTextureViewVector;
+         std::vector<RenderTextureBarrier> dynamicTextureBarrierVector;
+         std::unique_ptr<BufferUploader> shaderUploader;
+@@ -118,6 +163,7 @@ namespace RT64 {
              std::set<RenderTarget *> transitionRenderTargetSet;
              RenderTargetDrawCall renderTargetDrawCall;
              RenderViewport viewport;
@@ -1866,15 +2048,46 @@ index f2eee70..b64d898 100644
  
              struct {
 diff --git a/src/render/rt64_raster_shader.cpp b/src/render/rt64_raster_shader.cpp
-index 721a01e..4776d70 100644
+index 721a01e..7b90d73 100644
 --- a/src/render/rt64_raster_shader.cpp
 +++ b/src/render/rt64_raster_shader.cpp
-@@ -84,6 +84,21 @@ namespace RT64 {
+@@ -19,6 +19,14 @@
+ #include "shaders/PostBlendDitherNoiseAddPS.hlsl.spirv.h"
+ #include "shaders/PostBlendDitherNoiseSubPS.hlsl.spirv.h"
+ #include "shaders/PostBlendDitherNoiseSubNegativePS.hlsl.spirv.h"
++#if defined(__ANDROID__)
++#   include "shaders/RasterPSDynamicBatch.hlsl.spirv.h"
++#   include "shaders/RasterPSDynamicBatchMS.hlsl.spirv.h"
++#   include "shaders/RasterPSSpecConstantBatch.hlsl.spirv.h"
++#   include "shaders/RasterPSSpecConstantBatchMS.hlsl.spirv.h"
++#   include "shaders/RasterPSSpecConstantFlatBatch.hlsl.spirv.h"
++#   include "shaders/RasterPSSpecConstantFlatBatchMS.hlsl.spirv.h"
++#endif
+ #ifdef _WIN32
+ #   include "shaders/RasterPSLibrary.hlsl.dxil.h"
+ #   include "shaders/RasterPSLibraryMS.hlsl.dxil.h"
+@@ -74,6 +82,14 @@ namespace RT64 {
+         rasterPSMS.parse(RasterPSSpecConstantMSBlobSPIRV, std::size(RasterPSSpecConstantMSBlobSPIRV));
+         rasterPSFlat.parse(RasterPSSpecConstantFlatBlobSPIRV, std::size(RasterPSSpecConstantFlatBlobSPIRV));
+         rasterPSFlatMS.parse(RasterPSSpecConstantFlatMSBlobSPIRV, std::size(RasterPSSpecConstantFlatMSBlobSPIRV));
++#   if defined(__ANDROID__)
++        if (RasterShader::androidBatching.load(std::memory_order_relaxed)) {
++            rasterPSBatch.parse(RasterPSSpecConstantBatchBlobSPIRV, std::size(RasterPSSpecConstantBatchBlobSPIRV));
++            rasterPSBatchMS.parse(RasterPSSpecConstantBatchMSBlobSPIRV, std::size(RasterPSSpecConstantBatchMSBlobSPIRV));
++            rasterPSFlatBatch.parse(RasterPSSpecConstantFlatBatchBlobSPIRV, std::size(RasterPSSpecConstantFlatBatchBlobSPIRV));
++            rasterPSFlatBatchMS.parse(RasterPSSpecConstantFlatBatchMSBlobSPIRV, std::size(RasterPSSpecConstantFlatBatchMSBlobSPIRV));
++        }
++#   endif
+         assert(!rasterVS.empty());
+         assert(!rasterVSFlat.empty());
+         assert(!rasterPS.empty());
+@@ -84,6 +100,22 @@ namespace RT64 {
  
      // RasterShader
  
 +#   if defined(__ANDROID__)
 +    std::atomic<bool> RasterShader::androidHardwareDepthClip{ true };
++    std::atomic<bool> RasterShader::androidBatching{ false };
 +#   endif
 +
 +    bool RasterShader::useHardwareDecal(const ShaderDescription &desc) {
@@ -1891,7 +2104,24 @@ index 721a01e..4776d70 100644
      RasterShader::RasterShader(RenderDevice *device, const ShaderDescription &desc, const RenderPipelineLayout *pipelineLayout, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, 
          const ShaderCompiler *shaderCompiler, const OptimizerCacheSPIRV *optimizerCacheSPIRV)
      {
-@@ -124,8 +139,16 @@ namespace RT64 {
+@@ -111,6 +143,16 @@ namespace RT64 {
+             else {
+                 PS = useMSAA ? &optimizerCacheSPIRV->rasterPSFlatMS : &optimizerCacheSPIRV->rasterPSFlat;
+             }
++#       if defined(__ANDROID__)
++            if (androidBatching.load(std::memory_order_relaxed)) {
++                if (desc.flags.smoothShade) {
++                    PS = useMSAA ? &optimizerCacheSPIRV->rasterPSBatchMS : &optimizerCacheSPIRV->rasterPSBatch;
++                }
++                else {
++                    PS = useMSAA ? &optimizerCacheSPIRV->rasterPSFlatBatchMS : &optimizerCacheSPIRV->rasterPSFlatBatch;
++                }
++            }
++#       endif
+ 
+             thread_local std::vector<respv::SpecConstant> specConstants;
+             thread_local bool specConstantsSetup = false;
+@@ -124,8 +166,16 @@ namespace RT64 {
                  specConstantsSetup = true;
              }
              
@@ -1909,7 +2139,7 @@ index 721a01e..4776d70 100644
              specConstants[2].values[0] = desc.colorCombiner.L;
              specConstants[3].values[0] = desc.colorCombiner.H;
              specConstants[4].values[0] = desc.flags.value;
-@@ -227,7 +250,9 @@ namespace RT64 {
+@@ -227,7 +277,9 @@ namespace RT64 {
          creation.pixelShader = pixelShader.get();
          creation.alphaBlend = !copyMode && interop::Blender::usesAlphaBlend(desc.otherMode);
          creation.culling = !copyMode && desc.flags.culling;
@@ -1920,7 +2150,7 @@ index 721a01e..4776d70 100644
          creation.zUpd = !copyMode && desc.otherMode.zUpd();
          creation.cvgAdd = (desc.otherMode.cvgDst() == CVG_DST_WRAP) || (desc.otherMode.cvgDst() == CVG_DST_SAVE);
          creation.NoN = desc.flags.NoN;
-@@ -315,6 +340,15 @@ namespace RT64 {
+@@ -315,6 +367,15 @@ namespace RT64 {
          pipelineDesc.depthClipEnabled = !c.NoN;
          pipelineDesc.depthEnabled = c.zCmp || c.zUpd;
          pipelineDesc.depthFunction = c.zCmp ? RenderComparisonFunction::LESS : RenderComparisonFunction::ALWAYS;
@@ -1936,7 +2166,20 @@ index 721a01e..4776d70 100644
          pipelineDesc.depthWriteEnabled = c.zUpd;
          pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
          pipelineDesc.multisampling = c.multisampling;
-@@ -609,3 +643,10 @@ namespace RT64 {
+@@ -427,6 +488,12 @@ namespace RT64 {
+             PSBlob = useMSAA ? RasterPSDynamicMSBlobSPIRV : RasterPSDynamicBlobSPIRV;
+             VSBlobSize = uint32_t(std::size(RasterVSDynamicBlobSPIRV));
+             PSBlobSize = uint32_t(useMSAA ? std::size(RasterPSDynamicMSBlobSPIRV) : std::size(RasterPSDynamicBlobSPIRV));
++#       if defined(__ANDROID__)
++            if (RasterShader::androidBatching.load(std::memory_order_relaxed)) {
++                PSBlob = useMSAA ? RasterPSDynamicBatchMSBlobSPIRV : RasterPSDynamicBatchBlobSPIRV;
++                PSBlobSize = uint32_t(useMSAA ? std::size(RasterPSDynamicBatchMSBlobSPIRV) : std::size(RasterPSDynamicBatchBlobSPIRV));
++            }
++#       endif
+             break;
+ #   ifdef __APPLE__
+         case RenderShaderFormat::METAL:
+@@ -609,3 +676,10 @@ namespace RT64 {
          return pipelines[pipelineStateIndex(zCmp, zUpd, cvgAdd)].get();
      }
  };
@@ -1948,7 +2191,7 @@ index 721a01e..4776d70 100644
 +}
 +#endif
 diff --git a/src/render/rt64_raster_shader.h b/src/render/rt64_raster_shader.h
-index 3b991ff..54a26f7 100644
+index 3b991ff..8b2ee29 100644
 --- a/src/render/rt64_raster_shader.h
 +++ b/src/render/rt64_raster_shader.h
 @@ -4,6 +4,8 @@
@@ -1960,7 +2203,20 @@ index 3b991ff..54a26f7 100644
  #include "rt64_shader_common.h"
  
  #include <condition_variable>
-@@ -51,6 +53,7 @@ namespace RT64 {
+@@ -35,6 +37,12 @@ namespace RT64 {
+         respv::Shader rasterPSFlatDepthMS;
+         respv::Shader rasterPSFlat;
+         respv::Shader rasterPSFlatMS;
++#   if defined(__ANDROID__)
++        respv::Shader rasterPSBatch;
++        respv::Shader rasterPSBatchMS;
++        respv::Shader rasterPSFlatBatch;
++        respv::Shader rasterPSFlatBatchMS;
++#   endif
+ 
+         void initialize();
+     };
+@@ -51,6 +59,7 @@ namespace RT64 {
          bool zUpd;
          bool cvgAdd;
          bool usesHDR;
@@ -1968,7 +2224,7 @@ index 3b991ff..54a26f7 100644
          std::vector<RenderSpecConstant> specConstants;
          RenderMultisampling multisampling;
      };
-@@ -65,6 +68,19 @@ namespace RT64 {
+@@ -65,6 +74,24 @@ namespace RT64 {
          RenderDevice *device;
          std::unique_ptr<RenderPipeline> pipeline;
  
@@ -1983,6 +2239,11 @@ index 3b991ff..54a26f7 100644
 +        // Video > Early Depth Test: leave the shader's copy of the depth clip out (RasterPS.hlsl,
 +        // rpAndroidFlags). Read when a shader is made, so it takes effect at the next start.
 +        static std::atomic<bool> androidHardwareDepthClip;
++
++        // Video > Draw Batching, on a device with geometryShader (for SV_PrimitiveID): every
++        // raster shader is made from the ANDROID_BATCHING variant, and FramebufferRenderer may
++        // draw runs of draws with one call. Set before the shader cache is set up.
++        static std::atomic<bool> androidBatching;
 +#   endif
 +
          RasterShader(RenderDevice *device, const ShaderDescription &desc, const RenderPipelineLayout *pipelineLayout, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, 
@@ -2390,10 +2651,10 @@ index 973ee67..51aea3b 100644
  
  // This endian swapping function generates a DXC-LLVM code generation bug when optimizations are enabled. All files that include this 
 diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
-index 6655c86..8dac229 100644
+index 6655c86..bd89da2 100644
 --- a/src/shaders/RasterPS.hlsl
 +++ b/src/shaders/RasterPS.hlsl
-@@ -14,6 +14,14 @@
+@@ -14,6 +14,30 @@
  
  [[vk::push_constant]] ConstantBuffer<RasterParams> gConstants : register(b0, space0);
  
@@ -2405,10 +2666,35 @@ index 6655c86..8dac229 100644
 +// hidden pixel of the scene was shaded in full.
 +#define ANDROID_OMH_HARDWARE_DEPTH_CLIP (1u << 24)
 +
++// Android draw batching (ANDROID_BATCHING variants, FramebufferRenderer): consecutive draws that
++// share a pipeline and scissor and whose triangles follow each other in the index buffer are
++// drawn with one call. Each triangle then finds its own draw's RenderIndices through its
++// primitive ID: the renderer appends one copy of the draw's entry per triangle, starting at the
++// push constant's renderIndex, and sets padding.x. Every other draw works as before.
++#if defined(ANDROID_BATCHING)
++static uint gBatchPrimitive = 0u;
++uint rasterRenderIndex() {
++    return gConstants.renderIndex + ((gConstants.padding.x != 0u) ? gBatchPrimitive : 0u);
++}
++#else
++uint rasterRenderIndex() {
++    return gConstants.renderIndex;
++}
++#endif
++
  #if defined(MULTISAMPLING)
  Texture2DMS<float> gBackgroundDepth : register(t2, space3);
  
-@@ -83,7 +91,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+@@ -55,7 +79,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+     }
+ #endif
+     
+-    const uint instanceIndex = instanceRenderIndices[gConstants.renderIndex].instanceIndex;
++    const uint instanceIndex = instanceRenderIndices[rasterRenderIndex()].instanceIndex;
+     const float4 vertexColor = renderFlagSmoothShade(rp.flags) ? vertexSmoothColor : float4(vertexFlatColor.rgb, vertexSmoothColor.a);
+     const ColorCombiner colorCombiner = { rp.ccL, rp.ccH };
+     const bool depthClampNear = renderFlagNoN(rp.flags);
+@@ -83,7 +107,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
          }
      }
      // Do depth clipping manually on the fragment shader if pipeline's depth bounds are not being used due to lack of hardware support.
@@ -2417,7 +2703,31 @@ index 6655c86..8dac229 100644
          if ((vertexPosition.z < 0.0f) || (vertexPosition.z > MaxDepth)) {
              return false;
          }
-@@ -218,9 +226,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+@@ -129,12 +153,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+         lodScale = FbParams.resolutionScale.y;
+     }
+     
+-    computeLOD(otherMode, instanceRenderIndices[gConstants.renderIndex].rdpTileCount, instanceRDPParams[instanceIndex].primLOD, lodScale, ddxVertexUV, ddyVertexUV, tileIndex0, tileIndex1, lodFraction);
++    computeLOD(otherMode, instanceRenderIndices[rasterRenderIndex()].rdpTileCount, instanceRDPParams[instanceIndex].primLOD, lodScale, ddxVertexUV, ddyVertexUV, tileIndex0, tileIndex1, lodFraction);
+ 
+     float4 texVal0 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+     float4 texVal1 = float4(0.0f, 0.0f, 0.0f, 1.0f);
+     if (renderFlagUsesTexture0(rp.flags)) {
+-        const uint globalTileIndex = instanceRenderIndices[gConstants.renderIndex].rdpTileIndex + tileIndex0;
++        const uint globalTileIndex = instanceRenderIndices[rasterRenderIndex()].rdpTileIndex + tileIndex0;
+         RDPTile rdpTile = RDPTiles[globalTileIndex];
+         if (!renderFlagDynamicTiles(rp.flags)) {
+             rdpTile.cms = renderCMS0(rp.flags);
+@@ -149,7 +173,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+     
+     if (renderFlagUsesTexture1(rp.flags)) {
+         const bool oneCycleHardwareBug = (otherMode.cycleType() == G_CYC_1CYCLE);
+-        const uint globalTileIndex = instanceRenderIndices[gConstants.renderIndex].rdpTileIndex + (oneCycleHardwareBug ? tileIndex0 : tileIndex1);
++        const uint globalTileIndex = instanceRenderIndices[rasterRenderIndex()].rdpTileIndex + (oneCycleHardwareBug ? tileIndex0 : tileIndex1);
+         RDPTile rdpTile = RDPTiles[globalTileIndex];
+         if (!renderFlagDynamicTiles(rp.flags)) {
+             rdpTile.cms = oneCycleHardwareBug ? renderCMS0(rp.flags) : renderCMS1(rp.flags);
+@@ -218,9 +242,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
      const float cvgRange = usesHDR ? 65535.0f : 255.0f;
      float resultCvg = (8.0f / cvgRange) * (otherMode.cvgXAlpha() ? combinerColor.a : 1.0f);
      
@@ -2432,3 +2742,41 @@ index 6655c86..8dac229 100644
          return false;
      }
      
+@@ -256,7 +283,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+     }
+     
+     // Add highlight color to the last step.
+-    uint highlightColorUint = instanceRenderIndices[gConstants.renderIndex].highlightColor;
++    uint highlightColorUint = instanceRenderIndices[rasterRenderIndex()].highlightColor;
+     if (highlightColorUint > 0) {
+         float4 highlightColor = RGBA32ToFloat4(highlightColorUint);
+         resultColor = lerp(resultColor, highlightColor, highlightColor.a);
+@@ -273,7 +300,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+ 
+ #if defined(DYNAMIC_RENDER_PARAMS)
+ RenderParams getRenderParams() {
+-    uint instanceIndex = instanceRenderIndices[gConstants.renderIndex].instanceIndex;
++    uint instanceIndex = instanceRenderIndices[rasterRenderIndex()].instanceIndex;
+     return DynamicRenderParams[instanceIndex];
+ }
+ #elif defined(SPEC_CONSTANT_RENDER_PARAMS)
+@@ -290,6 +317,9 @@ void PSMain(
+ #endif
+ #if defined(DYNAMIC_RENDER_PARAMS)
+     , bool isFrontFace : SV_IsFrontFace
++#endif
++#if defined(ANDROID_BATCHING)
++    , uint primitiveId : SV_PrimitiveID
+ #endif
+     , [[vk::location(0)]] [[vk::index(0)]] out float4 pixelColor : SV_TARGET0
+     , [[vk::location(0)]] [[vk::index(1)]] out float4 pixelAlpha : SV_TARGET1
+@@ -300,6 +330,9 @@ void PSMain(
+     float4 vertexFlatColor = 0.0f;
+ #endif
+     bool isFrontFace = false;
++#endif
++#if defined(ANDROID_BATCHING)
++    gBatchPrimitive = primitiveId;
+ #endif
+     float4 resultColor;
+     float4 resultAlpha;
