@@ -194,6 +194,18 @@ extern "C" bool rt64_android_shared_gpu_queue() {
     return g_shared_queue.load();
 }
 
+// Video > Overlap Frames: RT64 submits each frame without waiting for the GPU to finish it
+// (rt64_workload_queue.cpp, androidOverlap). Read once when RT64 starts.
+static std::atomic<bool> g_overlap{true};
+
+extern "C" void bt_android_set_overlap_frames(bool on) {
+    g_overlap.store(on);
+}
+
+extern "C" bool rt64_android_overlap_frames() {
+    return g_overlap.load();
+}
+
 // Video > Fast Clears: plume begins a render pass with loadOp CLEAR when it starts with a
 // full-target clear (lib/rt64 plume patch). Read on every clear, so it changes live.
 namespace plume { extern bool vulkanClearOnBegin; }
