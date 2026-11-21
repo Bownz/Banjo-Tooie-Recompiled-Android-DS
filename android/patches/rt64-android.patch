@@ -134,7 +134,7 @@ index 7006549..cec813b 100644
              return nullptr;
          }
 diff --git a/src/hle/rt64_application.cpp b/src/hle/rt64_application.cpp
-index ee8bc1f..402e8fe 100644
+index ee8bc1f..e7cbea0 100644
 --- a/src/hle/rt64_application.cpp
 +++ b/src/hle/rt64_application.cpp
 @@ -3,6 +3,10 @@
@@ -230,7 +230,7 @@ index ee8bc1f..402e8fe 100644
          stateExt.shaderLibrary = shaderLibrary.get();
          stateExt.drawDataUploader = drawDataUploader.get();
          stateExt.transformsUploader = transformsUploader.get();
-@@ -522,6 +559,41 @@ namespace RT64 {
+@@ -522,6 +559,45 @@ namespace RT64 {
          appWindow->sdlCheckFilterInstallation();
          screenApiProfiler.logAndRestart();
          state->updateScreen(core.decodeVI(), false);
@@ -251,6 +251,7 @@ index ee8bc1f..402e8fe 100644
 +            const uint64_t draws = AndroidRenderStats::draws.exchange(0);
 +            const uint64_t recordMicros = AndroidRenderStats::recordMicros.exchange(0);
 +            const uint64_t waitMicros = AndroidRenderStats::waitMicros.exchange(0);
++            const uint64_t uberDraws = AndroidRenderStats::uberDraws.exchange(0);
 +            if (renders > 0) {
 +                const double n = double(renders);
 +                const UserConfiguration &config = sharedQueueResources->userConfig;
@@ -258,6 +259,9 @@ index ee8bc1f..402e8fe 100644
 +                    n / 5.0, AndroidRenderStats::targetWidth.load(), AndroidRenderStats::targetHeight.load(),
 +                    double(passes) / n, double(depthSwitches) / n, double(draws) / n, double(recordMicros) / n / 1000.0, double(waitMicros) / n / 1000.0,
 +                    int(config.refreshRate), config.refreshRateTarget, int(config.resolution), config.resolutionMultiplier);
++                // Draws that fell back to the general (slow) shader while their own was being made.
++                fprintf(stdout, "Perf shaders: %.1f ubershader draws per frame (%.1f%% of draws)\n",
++                    double(uberDraws) / n, (draws > 0) ? (100.0 * double(uberDraws) / double(draws)) : 0.0);
 +            }
 +            const uint64_t syncs = AndroidRenderStats::dlSyncs.exchange(0);
 +            if (syncs > 0) {
@@ -776,10 +780,10 @@ index 7a8c13b..bd198be 100644
          VI lastScreenVI;
          uint64_t lastScreenHash;
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..d1e8628 100644
+index 5a331aa..5bb2c50 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -4,13 +4,220 @@
+@@ -4,13 +4,342 @@
  
  #include "rt64_workload_queue.h"
  
@@ -804,6 +808,117 @@ index 5a331aa..d1e8628 100644
 +#   include "common/rt64_elapsed_timer.h"
 +namespace plume { extern std::atomic<uint64_t> vulkanClearOnBeginCount; }   // plume_vulkan.cpp
 +namespace {
++    // GPU time of the latest rendered frames (AndroidPassTimes::collect), smoothed.
++    std::atomic<float> androidGpuFrameMs{ 0.0f };
++
++    // Android "Dynamic Resolution" (Video, with Resolution on Auto). At the Thor's Standard
++    // performance mode the GPU clock stays at 401-475 MHz, where a 1080p frame of Jinjo Village
++    // (10-13.5 ms for the scene alone) doesn't leave room for 60. Rather than drop to 30, the
++    // resolution steps down while frames run over budget and back up once a higher step would
++    // fit again; each step change rebuilds the render targets once (as changing the Resolution
++    // setting does), so steps are few and changes are spaced out.
++    struct AndroidDynRes {
++        static constexpr int stepCount = 4;
++        static constexpr float scales[stepCount] = { 1.0f, 0.917f, 0.833f, 0.75f };   // 1080, 990, 900, 810 lines
++        std::atomic<bool> enabled{ true };
++        std::atomic<int> step{ 0 };
++        int appliedStep = 0;   // workload thread: the step the render targets were made for
++        // Render thread only, over 1-second windows.
++        RT64::ElapsedTimer clock;
++        double windowStartMs = 0.0;
++        uint64_t wanted = 0, rendered = 0, samples = 0;
++        double gpuMs = 0.0;
++        int64_t windowMicro = 0;
++        int overWindows = 0, underWindows = 0;
++        double lastUpMs = -1e9, lastChangeMs = -1e9, nextUpMs = 0.0, upBackoffMs = 5000.0;
++
++        float scale() const {
++            return enabled.load(std::memory_order_relaxed) ? scales[std::clamp(step.load(std::memory_order_relaxed), 0, stepCount - 1)] : 1.0f;
++        }
++
++        // True when it can't go lower (or is off): only then may Auto drop to 30.
++        bool atFloor() const {
++            return !enabled.load(std::memory_order_relaxed) || (step.load(std::memory_order_relaxed) >= (stepCount - 1));
++        }
++
++        void resetWindow(double nowMs) {
++            windowStartMs = nowMs;
++            wanted = rendered = samples = 0;
++            gpuMs = 0.0;
++            windowMicro = 0;
++        }
++
++        void update(bool eligible, bool paused, uint32_t wantedFrames, uint32_t renderedFrames, int64_t gameFrameMicro) {
++            const double nowMs = clock.elapsedMilliseconds();
++            if (!eligible || !enabled.load(std::memory_order_relaxed)) {
++                if (step.exchange(0, std::memory_order_relaxed) != 0) {
++                    fprintf(stdout, "Dynamic resolution: off, full resolution\n");
++                    fflush(stdout);
++                }
++                overWindows = underWindows = 0;
++                resetWindow(nowMs);
++                return;
++            }
++            if (paused) {
++                return;
++            }
++            if ((renderedFrames > 0) && (gameFrameMicro > 0)) {
++                wanted += wantedFrames;
++                rendered += renderedFrames;
++                gpuMs += double(androidGpuFrameMs.load(std::memory_order_relaxed));
++                windowMicro += gameFrameMicro;
++                samples++;
++            }
++            if ((nowMs - windowStartMs) < 1000.0) {
++                return;
++            }
++            const bool gameStalled = (samples >= 10) && ((double(windowMicro) / double(samples)) > 40000.0);
++            if ((samples >= 10) && !gameStalled) {
++                const int s = step.load(std::memory_order_relaxed);
++                const double gpu = gpuMs / double(samples);
++                const double missed = (wanted > samples) ? (1.0 - double(rendered) / double(wanted)) : 0.0;
++                // A 60 Hz frame is 16.7 ms; keep the GPU's share under ~15.
++                const bool over = (gpu > 15.0) || (missed > 0.05);
++                overWindows = over ? (overWindows + 1) : 0;
++                if ((overWindows >= 2) && (s < (stepCount - 1))) {
++                    if ((nowMs - lastUpMs) < 10000.0) {
++                        upBackoffMs = std::min(upBackoffMs * 2.0, 64000.0);   // went up too soon
++                    }
++                    step.store(s + 1, std::memory_order_relaxed);
++                    lastChangeMs = nowMs;
++                    nextUpMs = nowMs + upBackoffMs;
++                    overWindows = underWindows = 0;
++                    fprintf(stdout, "Dynamic resolution: %.0f%% (GPU %.1f ms per frame, missed %.0f%%; next try up in %.0f s)\n",
++                        scales[s + 1] * 100.0f, gpu, missed * 100.0, upBackoffMs / 1000.0);
++                    fflush(stdout);
++                }
++                else if ((s > 0) && !over) {
++                    // The GPU's time grows with the pixel count: would the step above fit?
++                    const double ratio = double(scales[s - 1]) / double(scales[s]);
++                    const double predicted = gpu * ratio * ratio;
++                    const bool fits = (predicted <= 13.0) && (missed < 0.01);
++                    underWindows = fits ? (underWindows + 1) : 0;
++                    if ((underWindows >= 3) && (nowMs >= nextUpMs)) {
++                        if ((nowMs - lastChangeMs) > 30000.0) {
++                            upBackoffMs = 5000.0;
++                        }
++                        step.store(s - 1, std::memory_order_relaxed);
++                        lastUpMs = lastChangeMs = nowMs;
++                        overWindows = underWindows = 0;
++                        fprintf(stdout, "Dynamic resolution: %.0f%% (GPU %.1f ms per frame, about %.1f ms there)\n",
++                            scales[s - 1] * 100.0f, gpu, predicted);
++                        fflush(stdout);
++                    }
++                }
++                else {
++                    underWindows = 0;
++                }
++            }
++            resetWindow(nowMs);
++        }
++    };
++    AndroidDynRes androidDynRes;
++
 +    // Android "60 FPS: Auto". While the device can't render two frames per game frame, drop the
 +    // in-between frames (a steady 30, which looks smoother than 60 with frames skipped
 +    // unevenly); go back to 60 once one frame costs clearly less than half a game frame. Each
@@ -861,7 +976,8 @@ index 5a331aa..d1e8628 100644
 +                if (!capped.load(std::memory_order_relaxed)) {
 +                    const double missed = (wanted > 0) ? (1.0 - double(rendered) / double(wanted)) : 0.0;
 +                    const double busy = double(busyMicro) / double(samples);
-+                    const bool bad = (wanted > samples) && ((missed > 0.10) || (busy > 0.95 * window));
++                    // While Dynamic Resolution can still step down, it handles slow frames first.
++                    const bool bad = androidDynRes.atFloor() && (wanted > samples) && ((missed > 0.10) || (busy > 0.95 * window));
 +                    badWindows = bad ? (badWindows + 1) : 0;
 +                    if (badWindows >= 3) {   // was 2: one hitch (a map build, a texture upload) cost the 60
 +                        if ((nowMs - lastChangeMs) < 6000.0) {
@@ -929,6 +1045,11 @@ index 5a331aa..d1e8628 100644
 +            }
 +            frames++;
 +            totalMs += double(ts[1] - ts[0]) / 1e6;
++            {
++                const float frameMs = float(double(ts[1] - ts[0]) / 1e6);
++                const float prev = androidGpuFrameMs.load(std::memory_order_relaxed);
++                androidGpuFrameMs.store((prev <= 0.0f) ? frameMs : (prev * 0.85f + frameMs * 0.15f), std::memory_order_relaxed);
++            }
 +            if ((pendingCount > 0) && (ts[2] >= ts[0])) {
 +                setupMs += double(ts[2] - ts[0]) / 1e6;
 +            }
@@ -989,6 +1110,11 @@ index 5a331aa..d1e8628 100644
 +    androidAutoRate.enabled.store(enabled != 0, std::memory_order_relaxed);
 +}
 +
++// Video > Dynamic Resolution (src/android_config.cpp).
++extern "C" void rt64_android_set_dynamic_resolution(int enabled) {
++    androidDynRes.enabled.store(enabled != 0, std::memory_order_relaxed);
++}
++
 +// Whether Auto has dropped to 30 right now.
 +extern "C" int rt64_android_auto_framerate_capped() {
 +    return androidAutoRate.capped.load(std::memory_order_relaxed) ? 1 : 0;
@@ -1000,7 +1126,7 @@ index 5a331aa..d1e8628 100644
      // WorkloadQueue
  
      WorkloadQueue::WorkloadQueue() {
-@@ -102,7 +309,11 @@ namespace RT64 {
+@@ -102,7 +431,11 @@ namespace RT64 {
          vertexProcessor = std::make_unique<VertexProcessor>(ext.device);
          framebufferRenderer = std::make_unique<FramebufferRenderer>(ext.workloadGraphicsWorker, true, ext.createdGraphicsAPI, ext.shaderLibrary);
          renderFramebufferManager = std::make_unique<RenderFramebufferManager>(ext.device);
@@ -1012,7 +1138,7 @@ index 5a331aa..d1e8628 100644
  
          projectionProcessor.setup(ext.workloadGraphicsWorker);
          transformProcessor.setup(ext.workloadGraphicsWorker);
-@@ -188,7 +399,18 @@ namespace RT64 {
+@@ -188,7 +521,25 @@ namespace RT64 {
          switch (resolutionMode) {
          case UserConfiguration::Resolution::WindowIntegerScale:
              if (ext.sharedResources->swapChainHeight > 0) {
@@ -1024,14 +1150,21 @@ index 5a331aa..d1e8628 100644
 +                // more than phone GPUs keep up with at 60 FPS; 1080 still looks sharp there.
 +                static constexpr float maxAutoHeight = 1080.0f;
 +                const float autoHeight = std::min(float(ext.sharedResources->swapChainHeight), maxAutoHeight);
-+                resolutionMultiplier = std::max(autoHeight / float(referenceHeight), 1.0f);
++                // Dynamic Resolution: a step change rebuilds the render targets (below), as a
++                // change of the Resolution setting does.
++                const int dynStep = androidDynRes.enabled.load(std::memory_order_relaxed) ? androidDynRes.step.load(std::memory_order_relaxed) : 0;
++                if (dynStep != androidDynRes.appliedStep) {
++                    androidDynRes.appliedStep = dynStep;
++                    ext.sharedResources->fbConfigChanged = true;
++                }
++                resolutionMultiplier = std::max(autoHeight * AndroidDynRes::scales[std::clamp(dynStep, 0, AndroidDynRes::stepCount - 1)] / float(referenceHeight), 1.0f);
 +#           else
                  resolutionMultiplier = std::max(float((ext.sharedResources->swapChainHeight + referenceHeight - 1) / referenceHeight), 1.0f);
 +#           endif
              }
              else {
                  resolutionMultiplier = 1.0f;
-@@ -226,6 +448,12 @@ namespace RT64 {
+@@ -226,6 +577,12 @@ namespace RT64 {
                  workloadConfig.targetRate = ext.sharedResources->swapChainRate;
              }
  
@@ -1044,7 +1177,7 @@ index 5a331aa..d1e8628 100644
              break;
          case UserConfiguration::RefreshRate::Original:
          default:
-@@ -273,12 +501,26 @@ namespace RT64 {
+@@ -273,12 +630,26 @@ namespace RT64 {
              ext.sharedResources->interpolatedColorTargets.clear();
          }
  
@@ -1071,7 +1204,7 @@ index 5a331aa..d1e8628 100644
      }
  
      void WorkloadQueue::threadConfigurationValidate() {
-@@ -301,6 +543,10 @@ namespace RT64 {
+@@ -301,6 +672,10 @@ namespace RT64 {
          const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
  
          rendererCPUProfiler.start();
@@ -1082,7 +1215,7 @@ index 5a331aa..d1e8628 100644
  
          const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
          const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
-@@ -484,6 +730,10 @@ namespace RT64 {
+@@ -484,6 +859,10 @@ namespace RT64 {
  
                      if (colorTarget != nullptr) {
                          rtWidth = std::max(rtWidth, colorTarget->width);
@@ -1093,7 +1226,7 @@ index 5a331aa..d1e8628 100644
                          rtHeight = std::max(rtHeight, colorTarget->height);
                          chosenRt = colorTarget;
                      }
-@@ -699,7 +949,12 @@ namespace RT64 {
+@@ -699,7 +1078,12 @@ namespace RT64 {
  
              workerMutex.lock();
              ext.workloadGraphicsWorker->commandList->begin();
@@ -1106,7 +1239,7 @@ index 5a331aa..d1e8628 100644
              ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 0);
              framebufferRenderer->endFramebuffers(ext.workloadGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, workloadConfig.raytracingEnabled);
              framebufferRenderer->recordSetup(ext.workloadGraphicsWorker, bufferUploaders, processRSP ? rspProcessor.get() : nullptr, processWorldVertices ? vertexProcessor.get() : nullptr, &workload.outputBuffers, workloadConfig.raytracingEnabled);
-@@ -708,6 +963,13 @@ namespace RT64 {
+@@ -708,6 +1092,13 @@ namespace RT64 {
              uint32_t framebufferIndex = 0;
              for (uint32_t f = 0; f < fbPairCount; f++) {
                  const FramebufferPair &fbPair = workload.fbPairs[f];
@@ -1120,7 +1253,7 @@ index 5a331aa..d1e8628 100644
                  bool validTargets = getTargetsFromPair(f);
                  fbManager.recordOperations(ext.workloadGraphicsWorker, &workload.fbChangePool, &workload.fbStorage, ext.shaderLibrary, ext.textureCache,
                      fbPair.startFbOperations, targetManager, fixedResScale, f, workload.submissionFrame);
-@@ -835,19 +1097,49 @@ namespace RT64 {
+@@ -835,19 +1226,49 @@ namespace RT64 {
                  
                  fbManager.recordOperations(ext.workloadGraphicsWorker, &workload.fbChangePool, &workload.fbStorage, ext.shaderLibrary, ext.textureCache,
                      fbPair.endFbOperations, targetManager, fixedResScale, f, workload.submissionFrame);
@@ -1170,7 +1303,7 @@ index 5a331aa..d1e8628 100644
  
              // Indicate to the texture cache it's safe to delete the textures if no locks are active.
              ext.textureCache->decrementLock();
-@@ -880,6 +1172,12 @@ namespace RT64 {
+@@ -880,6 +1301,12 @@ namespace RT64 {
  
      void WorkloadQueue::renderThreadLoop() {
          Thread::setCurrentThreadName("RT64 Workload");
@@ -1183,7 +1316,7 @@ index 5a331aa..d1e8628 100644
  
          WorkloadConfiguration workloadConfig;
          int64_t logicalTicks = 0;
-@@ -1070,7 +1368,19 @@ namespace RT64 {
+@@ -1070,7 +1497,19 @@ namespace RT64 {
                          const int64_t currentTimeMicro = workloadTimer.elapsedMicroseconds() - setupTimeMicro;
                          const int64_t expectedTimeMicro = frame * maxTimePerFrameMicro;
                          const int64_t measuredFrameMicro = renderTimeTotalMicro / framesRendered;
@@ -1204,7 +1337,7 @@ index 5a331aa..d1e8628 100644
                              displayTicks += workload.viOriginalRate;
                              skippedFrames = true;
                              continue;
-@@ -1117,11 +1427,22 @@ namespace RT64 {
+@@ -1117,11 +1556,22 @@ namespace RT64 {
                      }
  
                      int64_t renderTimeMicro = workloadTimer.elapsedMicroseconds();
@@ -1227,7 +1360,7 @@ index 5a331aa..d1e8628 100644
  
                      // After one frame is rendered, we indicate the workload has been processed so the present thread can start presenting frames as soon as it can.
                      if (frame == 0) {
-@@ -1162,6 +1483,17 @@ namespace RT64 {
+@@ -1162,6 +1612,19 @@ namespace RT64 {
                      ext.sharedResources->interpolatedCondition.notify_all();
                  }
  
@@ -1239,6 +1372,8 @@ index 5a331aa..d1e8628 100644
 +                    const bool eligible = (androidConfig.refreshRate == UserConfiguration::RefreshRate::Manual) &&
 +                        (androidConfig.refreshRateTarget > 30);
 +                    androidAutoRate.update(eligible, workload.paused || (workload.viOriginalRate == 0), displayFrames, framesRendered, renderTimeTotalMicro, originalTimeMicro);
++                    const bool dynEligible = eligible && (androidConfig.resolution == UserConfiguration::Resolution::WindowIntegerScale);
++                    androidDynRes.update(dynEligible, workload.paused || (workload.viOriginalRate == 0), displayFrames, framesRendered, originalTimeMicro);
 +                }
 +#           endif
 +
@@ -1524,13 +1659,17 @@ index f2eee70..b64d898 100644
  
              struct {
 diff --git a/src/render/rt64_raster_shader.cpp b/src/render/rt64_raster_shader.cpp
-index 721a01e..f23dc17 100644
+index 721a01e..4776d70 100644
 --- a/src/render/rt64_raster_shader.cpp
 +++ b/src/render/rt64_raster_shader.cpp
-@@ -84,6 +84,17 @@ namespace RT64 {
+@@ -84,6 +84,21 @@ namespace RT64 {
  
      // RasterShader
  
++#   if defined(__ANDROID__)
++    std::atomic<bool> RasterShader::androidHardwareDepthClip{ true };
++#   endif
++
 +    bool RasterShader::useHardwareDecal(const ShaderDescription &desc) {
 +#   if defined(__ANDROID__)
 +        const bool copyMode = (desc.otherMode.cycleType() == G_CYC_COPY);
@@ -1545,17 +1684,25 @@ index 721a01e..f23dc17 100644
      RasterShader::RasterShader(RenderDevice *device, const ShaderDescription &desc, const RenderPipelineLayout *pipelineLayout, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, 
          const ShaderCompiler *shaderCompiler, const OptimizerCacheSPIRV *optimizerCacheSPIRV)
      {
-@@ -124,7 +135,8 @@ namespace RT64 {
+@@ -124,8 +139,16 @@ namespace RT64 {
                  specConstantsSetup = true;
              }
              
 -            specConstants[0].values[0] = desc.otherMode.L;
 +            // Android hardware decals: the shader doesn't do the decal depth check itself.
 +            specConstants[0].values[0] = useHardwareDecal(desc) ? (desc.otherMode.L & ~uint32_t(ZMODE_MASK)) : desc.otherMode.L;
++            // Android Early Depth Test: bit 24 (unused by the N64) tells RasterPS.hlsl the pipeline
++            // clips depth itself (always, unless the draw has no near clipping).
++#       if defined(__ANDROID__)
++            const bool hardwareDepthClip = androidHardwareDepthClip.load(std::memory_order_relaxed);
++            specConstants[1].values[0] = desc.otherMode.H | (hardwareDepthClip ? (1u << 24) : 0u);
++#       else
              specConstants[1].values[0] = desc.otherMode.H;
++#       endif
              specConstants[2].values[0] = desc.colorCombiner.L;
              specConstants[3].values[0] = desc.colorCombiner.H;
-@@ -227,7 +239,9 @@ namespace RT64 {
+             specConstants[4].values[0] = desc.flags.value;
+@@ -227,7 +250,9 @@ namespace RT64 {
          creation.pixelShader = pixelShader.get();
          creation.alphaBlend = !copyMode && interop::Blender::usesAlphaBlend(desc.otherMode);
          creation.culling = !copyMode && desc.flags.culling;
@@ -1566,7 +1713,7 @@ index 721a01e..f23dc17 100644
          creation.zUpd = !copyMode && desc.otherMode.zUpd();
          creation.cvgAdd = (desc.otherMode.cvgDst() == CVG_DST_WRAP) || (desc.otherMode.cvgDst() == CVG_DST_SAVE);
          creation.NoN = desc.flags.NoN;
-@@ -315,6 +329,15 @@ namespace RT64 {
+@@ -315,6 +340,15 @@ namespace RT64 {
          pipelineDesc.depthClipEnabled = !c.NoN;
          pipelineDesc.depthEnabled = c.zCmp || c.zUpd;
          pipelineDesc.depthFunction = c.zCmp ? RenderComparisonFunction::LESS : RenderComparisonFunction::ALWAYS;
@@ -1582,11 +1729,31 @@ index 721a01e..f23dc17 100644
          pipelineDesc.depthWriteEnabled = c.zUpd;
          pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
          pipelineDesc.multisampling = c.multisampling;
+@@ -609,3 +643,10 @@ namespace RT64 {
+         return pipelines[pipelineStateIndex(zCmp, zUpd, cvgAdd)].get();
+     }
+ };
++
++#if defined(__ANDROID__)
++// Video > Early Depth Test (src/android_config.cpp in the game); read when shaders are made.
++extern "C" void rt64_android_set_hardware_depth_clip(int enabled) {
++    RT64::RasterShader::androidHardwareDepthClip.store(enabled != 0, std::memory_order_relaxed);
++}
++#endif
 diff --git a/src/render/rt64_raster_shader.h b/src/render/rt64_raster_shader.h
-index 3b991ff..2829369 100644
+index 3b991ff..54a26f7 100644
 --- a/src/render/rt64_raster_shader.h
 +++ b/src/render/rt64_raster_shader.h
-@@ -51,6 +51,7 @@ namespace RT64 {
+@@ -4,6 +4,8 @@
+ 
+ #pragma once
+ 
++#include <atomic>
++
+ #include "rt64_shader_common.h"
+ 
+ #include <condition_variable>
+@@ -51,6 +53,7 @@ namespace RT64 {
          bool zUpd;
          bool cvgAdd;
          bool usesHDR;
@@ -1594,7 +1761,7 @@ index 3b991ff..2829369 100644
          std::vector<RenderSpecConstant> specConstants;
          RenderMultisampling multisampling;
      };
-@@ -65,6 +66,14 @@ namespace RT64 {
+@@ -65,6 +68,19 @@ namespace RT64 {
          RenderDevice *device;
          std::unique_ptr<RenderPipeline> pipeline;
  
@@ -1605,6 +1772,11 @@ index 3b991ff..2829369 100644
 +        // a draw that wrote depth: about 50 times a frame in busy DK64 scenes.
 +        bool hardwareDecal = false;
 +        static bool useHardwareDecal(const ShaderDescription &desc);
++#   if defined(__ANDROID__)
++        // Video > Early Depth Test: leave the shader's copy of the depth clip out (RasterPS.hlsl,
++        // rpAndroidFlags). Read when a shader is made, so it takes effect at the next start.
++        static std::atomic<bool> androidHardwareDepthClip;
++#   endif
 +
          RasterShader(RenderDevice *device, const ShaderDescription &desc, const RenderPipelineLayout *pipelineLayout, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, 
              const ShaderCompiler *shaderCompiler, const OptimizerCacheSPIRV *optimizerCacheSPIRV);
@@ -1999,3 +2171,46 @@ index 973ee67..51aea3b 100644
  }
  
  // This endian swapping function generates a DXC-LLVM code generation bug when optimizations are enabled. All files that include this 
+diff --git a/src/shaders/RasterPS.hlsl b/src/shaders/RasterPS.hlsl
+index 6655c86..8dac229 100644
+--- a/src/shaders/RasterPS.hlsl
++++ b/src/shaders/RasterPS.hlsl
+@@ -14,6 +14,14 @@
+ 
+ [[vk::push_constant]] ConstantBuffer<RasterParams> gConstants : register(b0, space0);
+ 
++// Android (RasterShader, Video > Early Depth Test): bit 24 of the other mode's high word, which
++// the N64 doesn't use, set only on the shaders made for a draw, means the pipeline's own depth
++// clipping already removes everything outside 0..1, so the shader's copy of that check (the
++// only discard left in an opaque draw's shader) is left out. A shader that can discard makes
++// Adreno run the depth test after the shader and turns off its low-resolution Z, so every
++// hidden pixel of the scene was shaded in full.
++#define ANDROID_OMH_HARDWARE_DEPTH_CLIP (1u << 24)
++
+ #if defined(MULTISAMPLING)
+ Texture2DMS<float> gBackgroundDepth : register(t2, space3);
+ 
+@@ -83,7 +91,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+         }
+     }
+     // Do depth clipping manually on the fragment shader if pipeline's depth bounds are not being used due to lack of hardware support.
+-    else if (!pipelineDepthBounds) {
++    else if (!pipelineDepthBounds && (((otherMode.H & ANDROID_OMH_HARDWARE_DEPTH_CLIP) == 0u) || (MaxDepth < 1.0f))) {
+         if ((vertexPosition.z < 0.0f) || (vertexPosition.z > MaxDepth)) {
+             return false;
+         }
+@@ -218,9 +226,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
+     const float cvgRange = usesHDR ? 65535.0f : 255.0f;
+     float resultCvg = (8.0f / cvgRange) * (otherMode.cvgXAlpha() ? combinerColor.a : 1.0f);
+     
+-    // Discard all pixels without coverage.
++    // Discard all pixels without coverage. Without coverage times alpha, the coverage is the
++    // full 8 and never under the threshold: testing that first lets a specialized shader drop the
++    // discard entirely (re-spirv only removes branches on its constants), which Adreno needs to
++    // test depth before shading.
+     const float CoverageThreshold = 1.0f / cvgRange;
+-    if (resultCvg < CoverageThreshold) {
++    if (otherMode.cvgXAlpha() && (resultCvg < CoverageThreshold)) {
+         return false;
+     }
+     
