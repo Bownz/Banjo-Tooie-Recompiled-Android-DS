@@ -27,7 +27,7 @@
 #ifndef BT_MAP_TEST
 #include <jni.h>
 namespace recomp { std::span<const uint8_t> get_rom(); }
-uint8_t* bt_android_running_rdram();
+extern "C" uint8_t* bt_android_running_rdram();
 #endif
 
 bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t key, std::vector<int32_t>& out, float meta[5]);
