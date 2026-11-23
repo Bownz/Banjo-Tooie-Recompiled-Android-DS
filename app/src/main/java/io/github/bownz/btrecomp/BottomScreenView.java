@@ -2819,7 +2819,10 @@ public final class BottomScreenView extends View {
             }
             if (made == null) {
                 if (talonFallback == null && kazooie != null) talonFallback = trimmed(kazooie);
-                return talonFallback;   // moveIcons[2] stays empty: the foot is tried again
+                if (pad != null) {
+                    moveIcons[2] = talonFallback;   // the cut-out failed: don't redo it every frame
+                }
+                return talonFallback;   // until the pad is drawn, the foot is tried again
             }
         } else if (i == 3 && gold != null) {
             made = trimmed(gold);

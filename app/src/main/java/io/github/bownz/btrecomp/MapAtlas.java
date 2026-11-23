@@ -52,6 +52,26 @@ final class MapAtlas {
     private static volatile File dir;
     private static boolean started;
     private static int threads = 1;
+    private static android.os.PowerManager power;
+
+    /**
+     * Whether the device is warm enough that drawing should wait: Android's thermal status
+     * (light throttling or worse) or, where it's reported, the headroom forecast past 80%.
+     */
+    private static boolean tooWarm() {
+        android.os.PowerManager pm = power;
+        if (pm == null || android.os.Build.VERSION.SDK_INT < 29) return false;
+        try {
+            if (pm.getCurrentThermalStatus() >= android.os.PowerManager.THERMAL_STATUS_LIGHT) return true;
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                float headroom = pm.getThermalHeadroom(10);
+                return !Float.isNaN(headroom) && headroom > 0.8f;
+            }
+        } catch (RuntimeException ignored) {
+            // not reported on this device
+        }
+        return false;
+    }
 
     private MapAtlas() {
     }
@@ -74,7 +94,9 @@ final class MapAtlas {
             am.getMemoryInfo(mi);
             ram = mi.totalMem;
         }
-        int byRam = ram >= (10L << 30) ? 3 : ram >= (6L << 30) ? 2 : 1;
+        // Two at most: three kept the Thor hot enough to throttle the game afterwards (0.9.38).
+        int byRam = ram >= (6L << 30) ? 2 : 1;
+        power = (android.os.PowerManager) context.getApplicationContext().getSystemService(Context.POWER_SERVICE);
         threads = Math.max(1, Math.min(byRam, Runtime.getRuntime().availableProcessors() - 2));
         Thread t = new Thread(MapAtlas::run, "BT atlas");
         t.setDaemon(true);
@@ -237,11 +259,16 @@ final class MapAtlas {
                     slow = true;
                     GameState.backgroundThread();   // a slow core, lowest priority
                 }
-                boolean idle = GameState.paused() || GameState.onMenu();
-                if (!idle && SystemClock.uptimeMillis() - lastEnd < 8000) {
-                    SystemClock.sleep(500);
+                // In play nothing is drawn (0.9.38: it kept a warm device throttled, 10 fps);
+                // only while the game is paused or on the title screen.
+                if (!(GameState.paused() || GameState.onMenu())) {
+                    SystemClock.sleep(1000);
                     continue;
                 }
+            }
+            if (tooWarm()) {
+                SystemClock.sleep(5000);   // let it cool first
+                continue;
             }
             Integer asset = queue.poll();
             if (asset == null) {
