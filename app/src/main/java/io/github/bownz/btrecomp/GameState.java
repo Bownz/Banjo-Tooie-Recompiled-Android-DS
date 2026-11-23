@@ -454,14 +454,19 @@ final class GameState {
      * that thread). Cached; null for good if it can't be drawn.
      */
     static android.graphics.Bitmap modelIcon(int asset, Runnable onReady) {
+        return modelIcon(asset, 128, onReady);
+    }
+
+    static android.graphics.Bitmap modelIcon(int asset, int size, Runnable onReady) {
+        final int key = asset * 4096 + size;
         synchronized (modelIcons) {
-            if (modelIcons.containsKey(asset)) return modelIcons.get(asset);
-            modelIcons.put(asset, null);
+            if (modelIcons.containsKey(key)) return modelIcons.get(key);
+            modelIcons.put(key, null);
         }
         iconWorker.execute(() -> {
             android.graphics.Bitmap b = null;
             try {
-                int[] d = nativeModelIcon(asset, 128);
+                int[] d = nativeModelIcon(asset, size);
                 if (d != null && d.length > 2 && d[0] > 0 && d[1] > 0 && d.length == 2 + d[0] * d[1]) {
                     b = android.graphics.Bitmap.createBitmap(d, 2, d[0], d[0], d[1], android.graphics.Bitmap.Config.ARGB_8888);
                 }
@@ -470,7 +475,7 @@ final class GameState {
             }
             if (b != null) {
                 synchronized (modelIcons) {
-                    modelIcons.put(asset, b);
+                    modelIcons.put(key, b);
                 }
                 if (onReady != null) onReady.run();
             }

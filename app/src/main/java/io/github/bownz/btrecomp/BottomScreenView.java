@@ -2794,14 +2794,33 @@ public final class BottomScreenView extends View {
     // Fire Egg: a blue egg shot out in front of Kazooie; Lay Egg: out behind her; Talon Trot:
     // Kazooie; Wonderwing: the gold feather. Null (text only) until the sprites can be read.
     private final android.graphics.Bitmap[] moveIcons = new android.graphics.Bitmap[4];
+    private android.graphics.Bitmap talonFallback;
 
     private android.graphics.Bitmap moveIcon(int i) {
         if (i < 0 || i >= moveIcons.length) return null;
         if (moveIcons[i] != null) return moveIcons[i];
         android.graphics.Bitmap kazooie = GameState.sprite(0x0B8B), egg = GameState.sprite(0x0B81), gold = GameState.sprite(0x0B4B);
         android.graphics.Bitmap made = null;
-        if (i == 2 && kazooie != null) {
-            made = trimmed(kazooie);
+        if (i == 2) {
+            // The orange bird foot from the shock jump pad's picture (model 1589), cut out; until
+            // that's drawn (a moment, in the background), Kazooie's head.
+            android.graphics.Bitmap pad = GameState.modelIcon(1589, 384, () -> post(() -> {
+                moveIcons[2] = null;
+                invalidate();
+            }));
+            if (pad != null) {
+                int w = pad.getWidth(), h = pad.getHeight();
+                int[] px = new int[w * h];
+                pad.getPixels(px, 0, w, 0, 0, w, h);
+                int[] foot = MapLayers.footCutout(px, w, h);
+                if (foot != null) {
+                    made = android.graphics.Bitmap.createBitmap(foot, 2, foot[0], foot[0], foot[1], android.graphics.Bitmap.Config.ARGB_8888);
+                }
+            }
+            if (made == null) {
+                if (talonFallback == null && kazooie != null) talonFallback = trimmed(kazooie);
+                return talonFallback;   // moveIcons[2] stays empty: the foot is tried again
+            }
         } else if (i == 3 && gold != null) {
             made = trimmed(gold);
         } else if ((i == 0 || i == 1) && kazooie != null && egg != null) {

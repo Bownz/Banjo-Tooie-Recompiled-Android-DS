@@ -131,6 +131,83 @@ final class MapLayers {
         return out;
     }
 
+    /**
+     * The orange bird foot on the shock jump pad's picture, cut out (Talon Trot's button): the
+     * biggest patch of orange plus the white claw tips touching it, holes filled, a thin dark
+     * edge round it, cropped. Returns {w, h, ARGB...} or null.
+     */
+    static int[] footCutout(int[] px, int w, int h) {
+        final int n = w * h;
+        boolean[] orange = new boolean[n], white = new boolean[n];
+        for (int i = 0; i < n; i++) {
+            int a = px[i] >>> 24, r = (px[i] >> 16) & 255, g = (px[i] >> 8) & 255, b = px[i] & 255;
+            orange[i] = a > 128 && r > 140 && r > g + 25 && g > b + 10;
+            white[i] = a > 128 && r > 190 && g > 180 && b > 160 && Math.abs(r - g) < 40;
+        }
+        // The biggest orange patch.
+        int[] label = new int[n];
+        int[] stack = new int[n];
+        int best = 0, bestSize = 0, next = 0;
+        for (int s = 0; s < n; s++) {
+            if (!orange[s] || label[s] != 0) continue;
+            next++;
+            int top = 0, size = 0;
+            stack[top++] = s;
+            label[s] = next;
+            while (top > 0) {
+                int i = stack[--top];
+                size++;
+                int x = i % w, y = i / w;
+                if (x > 0 && orange[i - 1] && label[i - 1] == 0) { label[i - 1] = next; stack[top++] = i - 1; }
+                if (x < w - 1 && orange[i + 1] && label[i + 1] == 0) { label[i + 1] = next; stack[top++] = i + 1; }
+                if (y > 0 && orange[i - w] && label[i - w] == 0) { label[i - w] = next; stack[top++] = i - w; }
+                if (y < h - 1 && orange[i + w] && label[i + w] == 0) { label[i + w] = next; stack[top++] = i + w; }
+            }
+            if (size > bestSize) { bestSize = size; best = next; }
+        }
+        if (best == 0) return null;
+        boolean[] keep = new boolean[n];
+        for (int i = 0; i < n; i++) keep[i] = label[i] == best;
+        boolean[] near = growMask(keep, w, h, Math.max(2, w / 60));
+        for (int i = 0; i < n; i++) if (white[i] && near[i]) keep[i] = true;
+        // Fill holes: whatever the outside can't reach.
+        // (Each pixel is marked as it's pushed, so the stack never holds one twice.)
+        boolean[] outside = new boolean[n];
+        int top = 0;
+        for (int i = 0; i < n; i++) {
+            int x = i % w, y = i / w;
+            if ((x == 0 || y == 0 || x == w - 1 || y == h - 1) && !keep[i]) { outside[i] = true; stack[top++] = i; }
+        }
+        while (top > 0) {
+            int i = stack[--top];
+            int x = i % w, y = i / w;
+            if (x > 0 && !outside[i - 1] && !keep[i - 1]) { outside[i - 1] = true; stack[top++] = i - 1; }
+            if (x < w - 1 && !outside[i + 1] && !keep[i + 1]) { outside[i + 1] = true; stack[top++] = i + 1; }
+            if (y > 0 && !outside[i - w] && !keep[i - w]) { outside[i - w] = true; stack[top++] = i - w; }
+            if (y < h - 1 && !outside[i + w] && !keep[i + w]) { outside[i + w] = true; stack[top++] = i + w; }
+        }
+        for (int i = 0; i < n; i++) if (!outside[i]) keep[i] = true;
+        // A thin dark edge, then crop.
+        int edge = Math.max(1, w / 100);
+        boolean[] ring = growMask(keep, w, h, edge);
+        int x0 = w, y0 = h, x1 = -1, y1 = -1;
+        for (int i = 0; i < n; i++) {
+            if (!ring[i]) continue;
+            int x = i % w, y = i / w;
+            x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+        }
+        int ow = x1 - x0 + 1, oh = y1 - y0 + 1;
+        int[] out = new int[2 + ow * oh];
+        out[0] = ow; out[1] = oh;
+        for (int y = 0; y < oh; y++) {
+            for (int x = 0; x < ow; x++) {
+                int i = (y + y0) * w + x + x0;
+                out[2 + y * ow + x] = keep[i] ? (0xFF000000 | (px[i] & 0xFFFFFF)) : ring[i] ? 0xE0341C0C : 0;
+            }
+        }
+        return out;
+    }
+
     /** The mask grown by r pixels (separable, running counts). */
     private static boolean[] growMask(boolean[] m, int w, int h, int r) {
         boolean[] t = new boolean[m.length], o = new boolean[m.length];
