@@ -1373,7 +1373,7 @@ public final class BottomScreenView extends View {
             case GameState.OBJ_FLIGHT_PAD: return 1590;
             case GameState.OBJ_MUMBO_PAD: return 2009;
             case GameState.OBJ_JUMP_PAD: return 1876;
-            case GameState.OBJ_WARP_PAD: return 2008;
+            case GameState.OBJ_WARP_PAD: return 2015;   // purple-blue (2008 is a bluer one)
             default: return -1;
         }
     }
