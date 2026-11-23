@@ -473,9 +473,8 @@ public final class BottomScreenView extends View {
             if (!viewMoving) {
                 updateDetail(m, r, cx, cz, viewScale);   // not while zooming: the tile would be out of date at once
             }
-            if (fadeIn >= 1f) {
-                drawShimmer(c, r, m, cx, cz, viewScale);
-            }
+            // (The water shimmer is off since 0.9.36: it only showed on some pictures, so it
+            // gave away every swap between them. drawShimmer is kept for now.)
 
             // Where you came in (each entrance used in this area this session; the latest brighter).
             float iconScale = 0.75f + 0.25f * (1 - bl);
@@ -1365,20 +1364,57 @@ public final class BottomScreenView extends View {
     }
 
     /**
-     * The pads' own models (from the player's ROM, drawn from above): flight pad, Mumbo pad,
-     * shock jump pad, warp pad. Asset numbers found by rendering the ROM's small round models.
+     * The pads' own models (from the player's ROM, drawn from above, each on its own): flight
+     * pad 1590, Mumbo pad 2009 (2008-2016 are the same pad in other colours), shock jump pad
+     * 1589 (1874 is it in a stone frame), warp pad 1601 (an empty octagon: the game paints its
+     * swirl on as it runs, so drawWarpSwirl adds a still one).
      */
     private static int padModel(int kind) {
         switch (kind) {
             case GameState.OBJ_FLIGHT_PAD: return 1590;
             case GameState.OBJ_MUMBO_PAD: return 2009;
-            case GameState.OBJ_JUMP_PAD: return 1876;
-            case GameState.OBJ_WARP_PAD: return 2015;   // purple-blue (2008 is a bluer one)
+            case GameState.OBJ_JUMP_PAD: return 1589;
+            case GameState.OBJ_WARP_PAD: return 1601;
             default: return -1;
         }
     }
 
     private final Runnable redraw = this::postInvalidate;
+    private final Path swirlPath = new Path();
+    private final Paint swirlPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+    /** The warp pad's swirl, still: purple at the rim to bright blue in the middle. */
+    private void drawWarpSwirl(Canvas c, float x, float y, float rad) {
+        swirlPath.reset();
+        for (int i = 0; i < 8; i++) {   // the pad's octagon, just inside its rim
+            double a = Math.PI / 8 + i * Math.PI / 4;
+            float px = x + (float) (rad * Math.cos(a)), py = y + (float) (rad * Math.sin(a));
+            if (i == 0) swirlPath.moveTo(px, py); else swirlPath.lineTo(px, py);
+        }
+        swirlPath.close();
+        swirlPaint.setStyle(Paint.Style.FILL);
+        swirlPaint.setShader(new RadialGradient(x, y, rad, new int[] { Color.rgb(90, 150, 255), Color.rgb(60, 70, 230), Color.rgb(110, 40, 200) },
+            new float[] { 0f, 0.55f, 1f }, Shader.TileMode.CLAMP));
+        c.drawPath(swirlPath, swirlPaint);
+        swirlPaint.setShader(null);
+        // Two spiral arms, lighter, winding in to the middle.
+        swirlPaint.setStyle(Paint.Style.STROKE);
+        swirlPaint.setStrokeCap(Paint.Cap.ROUND);
+        swirlPaint.setStrokeWidth(Math.max(1f, rad * 0.12f));
+        swirlPaint.setColor(Color.argb(140, 160, 205, 255));
+        for (int arm = 0; arm < 2; arm++) {
+            Path p = new Path();
+            for (int k = 0; k <= 40; k++) {
+                float t = k / 40f;
+                double a = arm * Math.PI + t * Math.PI * 2.6;
+                float rr = rad * 0.9f * (1f - t);
+                float px = x + (float) (rr * Math.cos(a)), py = y + (float) (rr * Math.sin(a));
+                if (k == 0) p.moveTo(px, py); else p.lineTo(px, py);
+            }
+            c.drawPath(p, swirlPaint);
+        }
+        swirlPaint.setStyle(Paint.Style.FILL);
+    }
 
     private void drawObject(Canvas c, int kind, float x, float y, float s) {
         int pad = padModel(kind);
@@ -1395,6 +1431,9 @@ public final class BottomScreenView extends View {
                     c.restore();
                 } else {
                     c.drawBitmap(b, null, spriteRect, spritePaint);
+                    if (kind == GameState.OBJ_WARP_PAD) {
+                        drawWarpSwirl(c, x, y, Math.min(spriteRect.width(), spriteRect.height()) * 0.30f);
+                    }
                 }
                 return;
             }

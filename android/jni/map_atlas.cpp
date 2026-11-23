@@ -558,6 +558,7 @@ bool g_levelModelsScanned = false;
 }   // namespace
 
 #ifdef BT_MAP_TEST
+bool bt_test_load(std::span<const uint8_t> rom, int asset, std::vector<uint8_t>& out) { return loadAnyAsset(rom, asset, out); }
 // Test harness: a model asset's box and collision triangle count (false if not a model).
 bool bt_test_model_box(std::span<const uint8_t> rom, int asset, int& tris, int16_t vmin[3], int16_t vmax[3], bool& ownTextures) {
     std::vector<uint8_t> d;
