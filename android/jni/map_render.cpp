@@ -1940,7 +1940,11 @@ int bt_area_objects(const uint8_t* rdram, float* out, int max) {
             case 0x04A6: kind = 8; break;   // feather nest switching between red and gold
             case 0x01CF: kind = 13; break;   // gold feather refill (Spiral Mountain, 13 Nov)
             case 0x02B0: kind = 9; break;
-            case 0x0309: case 0x030B: kind = 10; break;
+            // Jamjars (0x0309/0x030B): only where he pops out beside his silo, not where he
+            // stands; the silo itself is drawn instead (23 Nov).
+            case 0x019D: kind = 16; break;   // silo: Isle o' Hags' warp domes (marks 23 Nov: Banjo
+                                             // inside it stood exactly on its entry; 0x0004 beside it
+                                             // is probably where it leads)
             case 0x0234: kind = 11; break;   // flight pad (Spiral Mountain's island top, 13 Nov)
             case 0x01E5: kind = 15; break;   // warp pad (Mayahem Temple, 13 Nov)
             case 0x01F7: kind = 14; break;   // empty honeycomb (Mayahem Temple, 13 Nov)

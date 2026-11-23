@@ -1374,7 +1374,7 @@ public final class BottomScreenView extends View {
             case GameState.OBJ_FLIGHT_PAD: return 1590;
             case GameState.OBJ_MUMBO_PAD: return 2009;
             case GameState.OBJ_JUMP_PAD: return 1589;
-            case GameState.OBJ_WARP_PAD: return 1601;
+            case GameState.OBJ_WARP_PAD: case GameState.OBJ_SILO: return 1601;   // silo: the warp dome
             default: return -1;
         }
     }
@@ -1431,7 +1431,7 @@ public final class BottomScreenView extends View {
                     c.restore();
                 } else {
                     c.drawBitmap(b, null, spriteRect, spritePaint);
-                    if (kind == GameState.OBJ_WARP_PAD) {
+                    if (kind == GameState.OBJ_WARP_PAD || kind == GameState.OBJ_SILO) {
                         drawWarpSwirl(c, x, y, Math.min(spriteRect.width(), spriteRect.height()) * 0.30f);
                     }
                 }
@@ -1582,7 +1582,7 @@ public final class BottomScreenView extends View {
                 c.drawPath(q, stroke);
                 break;
             }
-            case GameState.OBJ_WARP_PAD: {
+            case GameState.OBJ_WARP_PAD: case GameState.OBJ_SILO: {
                 // A warp pad: blue ring, pale blue centre.
                 fill.setColor(Color.rgb(170, 220, 255));
                 c.drawCircle(x, y, 0.9f * s, fill);
