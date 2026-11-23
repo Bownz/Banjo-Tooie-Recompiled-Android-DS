@@ -416,6 +416,7 @@ final class GameState {
         OBJ_HONEYCOMB = 6, OBJ_EGGS = 7, OBJ_FEATHERS = 8, OBJ_MUMBO_PAD = 9, OBJ_JAMJARS = 10, OBJ_FLIGHT_PAD = 11, OBJ_JUMP_PAD = 12, OBJ_GOLD_FEATHERS = 13, OBJ_EMPTY_HONEYCOMB = 14, OBJ_WARP_PAD = 15;
 
     private static native int[] nativeSprite(int index, int frame);
+    private static native int[] nativeModelIcon(int asset, int size);
 
     private static final java.util.HashMap<Integer, android.graphics.Bitmap> sprites = new java.util.HashMap<>();
 
@@ -438,6 +439,43 @@ final class GameState {
             sprites.put(index, b);
             return b;
         }
+    }
+
+    private static final java.util.HashMap<Integer, android.graphics.Bitmap> modelIcons = new java.util.HashMap<>();
+    private static final java.util.concurrent.ExecutorService iconWorker = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "BT icons");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /**
+     * A small model from the player's ROM (a pad) drawn from above, as an icon (map_atlas.cpp).
+     * Null until it's drawn: the first call starts it in the background (then onReady runs on
+     * that thread). Cached; null for good if it can't be drawn.
+     */
+    static android.graphics.Bitmap modelIcon(int asset, Runnable onReady) {
+        synchronized (modelIcons) {
+            if (modelIcons.containsKey(asset)) return modelIcons.get(asset);
+            modelIcons.put(asset, null);
+        }
+        iconWorker.execute(() -> {
+            android.graphics.Bitmap b = null;
+            try {
+                int[] d = nativeModelIcon(asset, 128);
+                if (d != null && d.length > 2 && d[0] > 0 && d[1] > 0 && d.length == 2 + d[0] * d[1]) {
+                    b = android.graphics.Bitmap.createBitmap(d, 2, d[0], d[0], d[1], android.graphics.Bitmap.Config.ARGB_8888);
+                }
+            } catch (UnsatisfiedLinkError | RuntimeException e) {
+                b = null;
+            }
+            if (b != null) {
+                synchronized (modelIcons) {
+                    modelIcons.put(asset, b);
+                }
+                if (onReady != null) onReady.run();
+            }
+        });
+        return null;
     }
 
     private static final float[] objectBuffer = new float[4 * 512];

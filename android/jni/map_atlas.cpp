@@ -426,7 +426,7 @@ struct Scratch {
 
 // Lays a level model (and its see-through partner, if the next asset is one over the same
 // ground) out in a scratch RDRAM as the game would. Returns false if it isn't a level model.
-bool layOut(std::span<const uint8_t> rom, int asset, Scratch& s, std::vector<uint8_t>& model) {
+bool layOut(std::span<const uint8_t> rom, int asset, Scratch& s, std::vector<uint8_t>& model, bool withSecond = true) {
     if (!loadAnyAsset(rom, asset, model)) return false;
     ModelInfo m;
     if (!modelInfo(model, m) || m.coll == 0) return false;
@@ -444,7 +444,7 @@ bool layOut(std::span<const uint8_t> rom, int asset, Scratch& s, std::vector<uin
     }
     std::vector<uint8_t> second;
     ModelInfo m2;
-    if (loadAnyAsset(rom, asset + 1, second) && modelInfo(second, m2) && second.size() <= kSecondBlockAt - kSecondAt) {
+    if (withSecond && loadAnyAsset(rom, asset + 1, second) && modelInfo(second, m2) && second.size() <= kSecondBlockAt - kSecondAt) {
         // Over the same ground: the x/z boxes overlap by most of the smaller one.
         const float ox = float(std::min(m.vmax[0], m2.vmax[0]) - std::max(m.vmin[0], m2.vmin[0]));
         const float oz = float(std::min(m.vmax[2], m2.vmax[2]) - std::max(m.vmin[2], m2.vmin[2]));
@@ -558,11 +558,21 @@ bool g_levelModelsScanned = false;
 }   // namespace
 
 #ifdef BT_MAP_TEST
+// Test harness: a model asset's box and collision triangle count (false if not a model).
+bool bt_test_model_box(std::span<const uint8_t> rom, int asset, int& tris, int16_t vmin[3], int16_t vmax[3], bool& ownTextures) {
+    std::vector<uint8_t> d;
+    ModelInfo m;
+    if (!loadAnyAsset(rom, asset, d) || !modelInfo(d, m)) return false;
+    tris = m.coll ? m.tris : 0;
+    for (int k = 0; k < 3; k++) { vmin[k] = m.vmin[k]; vmax[k] = m.vmax[k]; }
+    ownTextures = assembleTextures(rom, d).empty();
+    return true;
+}
 // Test harness: the scratch RAM with this model laid out as the game does.
 const uint8_t* bt_atlas_test_ram(std::span<const uint8_t> rom, int asset) {
     static Scratch s;
     std::vector<uint8_t> model;
-    return layOut(rom, asset, s, model) ? s.ram.data() : nullptr;
+    return layOut(rom, asset, s, model, std::getenv("BT_NO_SECOND") == nullptr) ? s.ram.data() : nullptr;
 }
 #endif
 
@@ -702,6 +712,38 @@ Java_io_github_bownz_btrecomp_GameState_nativeCurrentFingerprint(JNIEnv*, jclass
     return jint(bt_atlas_current_fingerprint(bt_android_running_rdram()));
 } catch (...) {
     return 0;
+}
+
+// A small object model (a pad) drawn from above as an icon, size pixels across, cropped to
+// what's drawn: {width, height, ARGB...} like nativeSprite, or null. From the player's ROM.
+extern "C" JNIEXPORT jintArray JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeModelIcon(JNIEnv* env, jclass, jint asset, jint size) try {
+    const std::span<const uint8_t> rom = atlasRom();
+    if (rom.empty()) return nullptr;
+    thread_local Scratch scratch;
+    std::vector<uint8_t> model;
+    if (!layOut(rom, asset, scratch, model, false)) return nullptr;
+    std::vector<int32_t> px, backdrop;
+    std::vector<uint8_t> kind;
+    std::vector<int16_t> gy;
+    float meta[5], bd[5];
+    if (!bt_build_map_private(scratch.ram.data(), std::clamp(int(size), 16, 512), 1e9f, px, meta, kind, gy, backdrop, bd)) return nullptr;
+    const int W = int(meta[0]), H = int(meta[1]);
+    int x0 = W, y0 = H, x1 = -1, y1 = -1;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++)
+            if ((uint32_t(px[size_t(y) * W + x]) >> 24) > 16) { x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y); }
+    if (x1 < x0) return nullptr;
+    const int w = x1 - x0 + 1, h = y1 - y0 + 1;
+    std::vector<jint> out(size_t(2) + size_t(w) * h);
+    out[0] = w; out[1] = h;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) out[2 + size_t(y) * w + x] = px[size_t(y + y0) * W + x + x0];
+    jintArray a = env->NewIntArray(jsize(out.size()));
+    if (a != nullptr) env->SetIntArrayRegion(a, 0, jsize(out.size()), out.data());
+    return a;
+} catch (...) {
+    return nullptr;
 }
 
 // Both styles of one model's map: {classic ARGB, atlas ARGB, backdrop ARGB (may be empty)}.

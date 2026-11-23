@@ -1364,7 +1364,34 @@ public final class BottomScreenView extends View {
         return true;
     }
 
+    /**
+     * The pads' own models (from the player's ROM, drawn from above): flight pad, Mumbo pad,
+     * shock jump pad, warp pad. Asset numbers found by rendering the ROM's small round models.
+     */
+    private static int padModel(int kind) {
+        switch (kind) {
+            case GameState.OBJ_FLIGHT_PAD: return 1590;
+            case GameState.OBJ_MUMBO_PAD: return 2009;
+            case GameState.OBJ_JUMP_PAD: return 1876;
+            case GameState.OBJ_WARP_PAD: return 2008;
+            default: return -1;
+        }
+    }
+
+    private final Runnable redraw = this::postInvalidate;
+
     private void drawObject(Canvas c, int kind, float x, float y, float s) {
+        int pad = padModel(kind);
+        if (pad >= 0) {
+            android.graphics.Bitmap b = GameState.modelIcon(pad, redraw);
+            if (b != null) {
+                float half = 1.75f * s;
+                float k = half / Math.max(b.getWidth(), b.getHeight()) * 2f;
+                spriteRect.set(x - b.getWidth() * k / 2, y - b.getHeight() * k / 2, x + b.getWidth() * k / 2, y + b.getHeight() * k / 2);
+                c.drawBitmap(b, null, spriteRect, spritePaint);
+                return;
+            }
+        }
         if (kind == GameState.OBJ_FLIGHT_PAD) {   // the pad's red ring, the feather in it
             stroke.setColor(Color.rgb(200, 50, 40));
             stroke.setStrokeWidth(0.4f * s);
@@ -2713,13 +2740,96 @@ public final class BottomScreenView extends View {
             stroke.setColor(on ? HONEY : WOOD_EDGE);
             stroke.setStrokeWidth((on ? 0.6f : 0.3f) * u);
             c.drawRoundRect(m.rect, rad, rad, stroke);
-            fitText(m.name, bw * 0.88f, Math.min(3.6f * u, area.height() * 0.3f));
-            text.setColor(on ? HONEY : CREAM);
-            drawCentered(c, m.name, m.rect.centerX(), m.rect.centerY() - area.height() * 0.12f);
-            fitText(m.keys, bw * 0.88f, Math.min(2.6f * u, area.height() * 0.22f));
-            text.setColor(TAN);
-            drawCentered(c, m.keys, m.rect.centerX(), m.rect.centerY() + area.height() * 0.22f);
+            drawMoveLabel(c, i, m, on, bw, area.height());
         }
+    }
+
+    // ---- The move buttons' pictures (the game's own sprites, from the player's ROM) -------
+    // Fire Egg: a blue egg shot out in front of Kazooie; Lay Egg: out behind her; Talon Trot:
+    // Kazooie; Wonderwing: the gold feather. Null (text only) until the sprites can be read.
+    private final android.graphics.Bitmap[] moveIcons = new android.graphics.Bitmap[4];
+
+    private android.graphics.Bitmap moveIcon(int i) {
+        if (i < 0 || i >= moveIcons.length) return null;
+        if (moveIcons[i] != null) return moveIcons[i];
+        android.graphics.Bitmap kazooie = GameState.sprite(0x0B8B), egg = GameState.sprite(0x0B81), gold = GameState.sprite(0x0B4B);
+        android.graphics.Bitmap made = null;
+        if (i == 2 && kazooie != null) {
+            made = trimmed(kazooie);
+        } else if (i == 3 && gold != null) {
+            made = trimmed(gold);
+        } else if ((i == 0 || i == 1) && kazooie != null && egg != null) {
+            // 150 x 100: Kazooie facing right, the egg in front of her or behind, speed lines
+            // on the side it came from.
+            boolean forward = i == 0;
+            made = android.graphics.Bitmap.createBitmap(150, 100, android.graphics.Bitmap.Config.ARGB_8888);
+            Canvas k = new Canvas(made);
+            Paint p = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
+            android.graphics.Bitmap kz = trimmed(kazooie), eg = trimmed(egg);
+            float kw = 70f, kh = kw * kz.getHeight() / kz.getWidth();
+            float kx = forward ? 40f : 70f;
+            k.drawBitmap(kz, null, new RectF(kx, (100 - kh) / 2, kx + kw, (100 + kh) / 2), p);
+            float ex = forward ? 112f : 6f, ey = 40f;
+            p.setColor(Color.argb(200, 255, 244, 214));
+            p.setStrokeWidth(3f);
+            p.setStrokeCap(Paint.Cap.ROUND);
+            for (int j = 0; j < 3; j++) {
+                float y = 48 + 9 * j, len = 18 + (j % 2) * 6;
+                if (forward) k.drawLine(ex - 6 - len, y, ex - 4, y, p);
+                else k.drawLine(ex + 38, y, ex + 40 + len, y, p);
+            }
+            k.drawBitmap(eg, null, new RectF(ex, ey, ex + 34, ey + 34), p);
+        }
+        moveIcons[i] = made;
+        return made;
+    }
+
+    /** The sprite cropped to what's drawn in it. */
+    private static android.graphics.Bitmap trimmed(android.graphics.Bitmap b) {
+        int w = b.getWidth(), h = b.getHeight();
+        int[] px = new int[w * h];
+        b.getPixels(px, 0, w, 0, 0, w, h);
+        int x0 = w, y0 = h, x1 = -1, y1 = -1;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                if ((px[y * w + x] >>> 24) > 16) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+        if (x1 < x0) return b;
+        return android.graphics.Bitmap.createBitmap(b, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+    }
+
+    private final RectF moveIconRect = new RectF();
+
+    /** A move button's picture (left) and name and keys; text only when there's no room. */
+    private void drawMoveLabel(Canvas c, int i, Move m, boolean on, float bw, float bh) {
+        android.graphics.Bitmap icon = moveIcon(i);
+        float iconH = bh * 0.72f;
+        float iconW = icon == null ? 0 : iconH * icon.getWidth() / icon.getHeight();
+        if (icon != null && bw - iconW - 3 * u < bw * 0.45f) {
+            icon = null;   // too narrow: text only
+        }
+        if (icon == null) {
+            fitText(m.name, bw * 0.86f, Math.min(3.6f * u, bh * 0.32f));
+            text.setColor(on ? HONEY : CREAM);
+            drawCentered(c, m.name, m.rect.centerX(), m.rect.centerY() - bh * 0.12f);
+            fitText(m.keys, bw * 0.86f, Math.min(2.6f * u, bh * 0.22f));
+            text.setColor(TAN);
+            drawCentered(c, m.keys, m.rect.centerX(), m.rect.centerY() + bh * 0.24f);
+            return;
+        }
+        float left = m.rect.left + bh * 0.16f;
+        moveIconRect.set(left, m.rect.centerY() - iconH / 2, left + iconW, m.rect.centerY() + iconH / 2);
+        spritePaint.setAlpha(on ? 255 : 235);
+        c.drawBitmap(icon, null, moveIconRect, spritePaint);
+        spritePaint.setAlpha(255);
+        float tx = moveIconRect.right + 1.6f * u, room = m.rect.right - tx - 1.6f * u;
+        text.setTextAlign(Paint.Align.LEFT);
+        fitText(m.name, room, Math.min(3.6f * u, bh * 0.32f));
+        text.setColor(on ? HONEY : CREAM);
+        c.drawText(m.name, tx, m.rect.centerY() - bh * 0.12f - (text.descent() + text.ascent()) / 2f, text);
+        fitText(m.keys, room, Math.min(2.6f * u, bh * 0.22f));
+        text.setColor(TAN);
+        c.drawText(m.keys, tx, m.rect.centerY() + bh * 0.22f - (text.descent() + text.ascent()) / 2f, text);
+        text.setTextAlign(Paint.Align.CENTER);
     }
 
     // Hold Z animation: each button takes BUTTON_IN_MS to come in, the next one starting
@@ -2757,12 +2867,7 @@ public final class BottomScreenView extends View {
             stroke.setColor(on ? HONEY : WOOD_EDGE);
             stroke.setStrokeWidth((on ? 0.6f : 0.3f) * u);
             c.drawRoundRect(m.rect, rad, rad, stroke);
-            fitText(m.name, bw * 0.86f, Math.min(3.6f * u, bh * 0.32f));
-            text.setColor(on ? HONEY : CREAM);
-            drawCentered(c, m.name, m.rect.centerX(), m.rect.centerY() - bh * 0.12f);
-            fitText(m.keys, bw * 0.86f, Math.min(2.6f * u, bh * 0.22f));
-            text.setColor(TAN);
-            drawCentered(c, m.keys, m.rect.centerX(), m.rect.centerY() + bh * 0.24f);
+            drawMoveLabel(c, i, m, on, bw, bh);
             c.restore();
         }
     }
