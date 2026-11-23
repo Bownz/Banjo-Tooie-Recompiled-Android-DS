@@ -41,6 +41,7 @@
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="true"
         android:hardwareAccelerated="true"
+        android:largeHeap="true"
         android:isGame="true"
         android:appCategory="game"
         android:hasFragileUserData="true"

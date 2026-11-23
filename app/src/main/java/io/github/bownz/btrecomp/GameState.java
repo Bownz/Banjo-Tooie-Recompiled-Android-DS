@@ -28,7 +28,9 @@ final class GameState {
     private static native int[] nativeAtlasModels();
     private static native int nativeAtlasFingerprint(int asset);
     private static native int nativeCurrentFingerprint();
-    private static native int[] nativeAtlasBuild(int asset, float capY, int key, float[] info);
+    private static native Object[] nativeAtlasBuildBoth(int asset, float capY, float[] info);
+    private static native boolean nativeGameRunning();
+    private static native void nativeFastThread();
     private static native int[] nativeBuildDetail(int key, float x0, float z0, float x1, float z1, int maxSize, float[] info);
     private static native byte[] nativeWaterMask(int key);
     private static native int[] nativeBackdrop(int key, float[] info);
@@ -36,6 +38,7 @@ final class GameState {
     private static native int nativeAreaObjects(float[] out);
     private static native boolean nativeMapShowsLevelAbove(int key, float x, float y, float z);
     private static native boolean nativeFloorAbove(float x, float y, float z);
+    private static native float nativeOverhead(float x, float y, float z);
     private static native String nativeAreaName();
     private static native int nativeN64Buttons();
     private static native int nativeMapGeometryId();
@@ -235,41 +238,59 @@ final class GameState {
         }
     }
 
-    /**
-     * One level model's map drawn from the ROM in the atlas style (capY as for buildMap).
-     * storeysOut (3 floats) gets the heights between its storeys (NaN where none).
-     */
-    static MapImage atlasBuild(int asset, float capY, float[] storeysOut) {
-        float[] info = new float[8];
-        int key = buildKeys.getAndIncrement();
-        int[] pixels;
+    /** Whether the game has started (the launcher is done). */
+    static boolean gameRunning() {
         try {
-            pixels = nativeAtlasBuild(asset, capY, key, info);
+            return nativeGameRunning();
+        } catch (UnsatisfiedLinkError e) {
+            return true;
+        }
+    }
+
+    /** The calling thread runs on the faster cores at normal priority (see nativeFastThread). */
+    static void fastThread() {
+        try {
+            nativeFastThread();
+        } catch (UnsatisfiedLinkError e) {
+            // older library
+        }
+    }
+
+    /**
+     * One level model's map drawn from the ROM, in both styles: {classic, atlas} (sharing one
+     * backdrop), or null. storeysOut (3 floats) gets the heights between its storeys (NaN where none).
+     */
+    static MapImage[] atlasBuildBoth(int asset, float capY, float[] storeysOut) {
+        float[] info = new float[13];
+        Object[] parts;
+        try {
+            parts = nativeAtlasBuildBoth(asset, capY, info);
         } catch (UnsatisfiedLinkError e) {
             return null;
         }
         int w = (int) info[0], h = (int) info[1];
-        if (pixels == null || w <= 0 || h <= 0 || pixels.length != w * h) {
+        if (parts == null || parts.length < 3 || w <= 0 || h <= 0) {
+            return null;
+        }
+        int[] classic = (int[]) parts[0], atlas = (int[]) parts[1], bd = (int[]) parts[2];
+        if (classic == null || atlas == null || classic.length != w * h || atlas.length != w * h) {
             return null;
         }
         if (storeysOut != null) {
             System.arraycopy(info, 5, storeysOut, 0, Math.min(3, storeysOut.length));
         }
-        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(pixels, w, h, android.graphics.Bitmap.Config.ARGB_8888);
-        MapImage map = new MapImage(bitmap, info[2], info[3], info[4]);
-        float[] bdInfo = new float[5];
-        int[] bd;
-        try {
-            bd = nativeBackdrop(key, bdInfo);
-        } catch (UnsatisfiedLinkError e) {
-            bd = null;
-        }
-        int bw = (int) bdInfo[0], bh = (int) bdInfo[1];
+        MapImage backdrop = null;
+        int bw = (int) info[8], bh = (int) info[9];
         if (bd != null && bw > 0 && bh > 0 && bd.length == bw * bh) {
-            map.backdrop = new MapImage(android.graphics.Bitmap.createBitmap(bd, bw, bh, android.graphics.Bitmap.Config.ARGB_8888),
-                bdInfo[2], bdInfo[3], bdInfo[4]);
+            backdrop = new MapImage(android.graphics.Bitmap.createBitmap(bd, bw, bh, android.graphics.Bitmap.Config.ARGB_8888),
+                info[10], info[11], info[12]);
         }
-        return map;
+        MapImage[] out = new MapImage[2];
+        out[0] = new MapImage(android.graphics.Bitmap.createBitmap(classic, w, h, android.graphics.Bitmap.Config.ARGB_8888), info[2], info[3], info[4]);
+        out[1] = new MapImage(android.graphics.Bitmap.createBitmap(atlas, w, h, android.graphics.Bitmap.Config.ARGB_8888), info[2], info[3], info[4]);
+        out[0].backdrop = backdrop;
+        out[1].backdrop = backdrop;
+        return out;
     }
 
     /** An alpha-only bitmap from one byte per pixel, or null. */
@@ -339,6 +360,15 @@ final class GameState {
     }
 
     /** Whether walkable floor lies directly above (x, z), more than 200 units over y. */
+    /** Height of the lowest solid thing right over (x, y, z) (roof, arch, hat), or NaN. */
+    static float overhead(float x, float y, float z) {
+        try {
+            return nativeOverhead(x, y, z);
+        } catch (UnsatisfiedLinkError e) {
+            return Float.NaN;
+        }
+    }
+
     static boolean floorAbove(float x, float y, float z) {
         try {
             return nativeFloorAbove(x, y, z);

@@ -448,7 +448,9 @@ namespace {
 
     struct Floor { float p[3][3]; };
 
-    bool collectFloors(const Ram& ram, std::vector<Floor>& floors) {
+    // minUp: how upward the surface must face (ny of its unit normal): 0.6 = walkable floors.
+    // Negative: |ny| at least -minUp, either way up (roofs and ceilings too, not walls).
+    bool collectFloors(const Ram& ram, std::vector<Floor>& floors, float minUp = 0.6f) {
         const uint32_t base = ram.u32(kModelPtr);
         const uint32_t col = ram.u32(kCollisionPtr);
         if (!ram.ok(base, 0x20) || !ram.ok(col, 0x18)) return false;
@@ -479,7 +481,7 @@ namespace {
             const float bx = f.p[2][0] - f.p[0][0], by = f.p[2][1] - f.p[0][1], bz = f.p[2][2] - f.p[0][2];
             const float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
             const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-            if (len > 0 && ny / len > 0.6f) floors.push_back(f);
+            if (len > 0 && (minUp >= 0 ? ny / len > minUp : std::fabs(ny / len) > -minUp)) floors.push_back(f);
         }
         return !floors.empty();
     }
@@ -748,6 +750,9 @@ namespace {
     };
     constexpr int16_t kNoGround = INT16_MIN;
     MapCache g_cache;
+    // A build on a thread with this set keeps what it worked out here instead of in g_cache (the
+    // atlas, drawn on several threads at once while the game's own map keeps its cache).
+    thread_local MapCache* t_buildInto = nullptr;
     // The last whole-area map's ground and kinds, kept apart from g_cache (which holds the last
     // build of any storey): the level-above and seed checks are about the whole-area map, and
     // this lets the bottom screen switch back to a whole-area map it built earlier without
@@ -1561,33 +1566,36 @@ bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t 
     }
 
     {
-        std::unique_lock lock{ g_cacheMutex };
-        g_cache.backdrop = std::move(backdrop);
-        g_cache.bdW = BW; g_cache.bdH = BH;
-        g_cache.bdScale = scale / float(cell);
-        g_cache.bdMinX = minX - float(pad) / g_cache.bdScale;
-        g_cache.bdMinZ = minZ - float(pad) / g_cache.bdScale;
-        g_cache.valid = true;
-        g_cache.key = key;
-        g_cache.tris = std::move(tris);
-        g_cache.textures = std::move(textures);   // std::map nodes stay put: the triangles' texture pointers stay valid
-        g_cache.W = W; g_cache.H = H; g_cache.minX = minX; g_cache.minZ = minZ; g_cache.scale = scale;
-        g_cache.kind = std::move(kind); g_cache.edge = std::move(edgeOut); g_cache.light = std::move(lightOut);
-        g_cache.alpha = std::move(alphaOut); g_cache.colourK = std::move(kOut);
-        g_cache.groundY.assign(N, kNoGround);
+        MapCache* const into = t_buildInto;
+        std::unique_lock lock{ g_cacheMutex, std::defer_lock };
+        if (into == nullptr) lock.lock();
+        MapCache& dst = into != nullptr ? *into : g_cache;
+        dst.backdrop = std::move(backdrop);
+        dst.bdW = BW; dst.bdH = BH;
+        dst.bdScale = scale / float(cell);
+        dst.bdMinX = minX - float(pad) / dst.bdScale;
+        dst.bdMinZ = minZ - float(pad) / dst.bdScale;
+        dst.valid = true;
+        dst.key = key;
+        dst.tris = std::move(tris);
+        dst.textures = std::move(textures);   // std::map nodes stay put: the triangles' texture pointers stay valid
+        dst.W = W; dst.H = H; dst.minX = minX; dst.minZ = minZ; dst.scale = scale;
+        dst.kind = std::move(kind); dst.edge = std::move(edgeOut); dst.light = std::move(lightOut);
+        dst.alpha = std::move(alphaOut); dst.colourK = std::move(kOut);
+        dst.groundY.assign(N, kNoGround);
         for (size_t i = 0; i < N; i++) {
             const float g = lower[i] ? lowest[i] : ground[i];   // the level the map shows there
-            if (walk[i] && g > -30000.0f && g < 30000.0f) g_cache.groundY[i] = int16_t(std::lround(g));
+            if (walk[i] && g > -30000.0f && g < 30000.0f) dst.groundY[i] = int16_t(std::lround(g));
         }
-        g_cache.mapId = ram.u16(0x80132DC2u);
-        g_cache.roofCap = std::move(roofCap);
-        if (capY >= 1e8f) {
+        dst.mapId = ram.u16(0x80132DC2u);
+        dst.roofCap = std::move(roofCap);
+        if (capY >= 1e8f && into == nullptr) {
             g_whole.valid = true;
             g_whole.key = key;
             g_whole.W = W; g_whole.H = H; g_whole.minX = minX; g_whole.minZ = minZ; g_whole.scale = scale;
-            g_whole.kind = g_cache.kind;
-            g_whole.groundY = g_cache.groundY;
-            g_whole.mapId = g_cache.mapId;
+            g_whole.kind = dst.kind;
+            g_whole.groundY = dst.groundY;
+            g_whole.mapId = dst.mapId;
         }
     }
 
@@ -1640,6 +1648,24 @@ bool bt_cache_layers(uint32_t key, int& W, int& H, float& minX, float& minZ, flo
     W = g_cache.W; H = g_cache.H; minX = g_cache.minX; minZ = g_cache.minZ; scale = g_cache.scale;
     kind = g_cache.kind.data();
     groundY = g_cache.groundY.data();
+    return true;
+}
+
+// A map build that touches no shared state (safe on several threads at once): the picture,
+// and the per-pixel kinds, ground heights and backdrop the atlas painter and the saved files use.
+bool bt_build_map_private(const uint8_t* rdram, int maxSize, float capY, std::vector<int32_t>& out, float meta[5],
+                          std::vector<uint8_t>& kind, std::vector<int16_t>& groundY,
+                          std::vector<int32_t>& backdrop, float bdMeta[5]) {
+    MapCache local;
+    t_buildInto = &local;
+    const bool ok = bt_build_map_keyed(rdram, maxSize, capY, 1, out, meta);
+    t_buildInto = nullptr;
+    if (!ok || local.kind.size() != out.size() || local.groundY.size() != out.size()) return false;
+    kind = std::move(local.kind);
+    groundY = std::move(local.groundY);
+    backdrop = std::move(local.backdrop);
+    bdMeta[0] = float(local.bdW); bdMeta[1] = float(local.bdH);
+    bdMeta[2] = local.bdMinX; bdMeta[3] = local.bdMinZ; bdMeta[4] = local.bdScale;
     return true;
 }
 
@@ -1807,6 +1833,44 @@ bool bt_floor_above(const uint8_t* rdram, float x, float y, float z) {
     return count >= 7;
 }
 
+// Whether anything solid is right over Banjo (x, y, z): a collision surface that isn't a wall
+// (roof, ceiling, floor, the underside of an arch or bridge) 250 to 6000 units above him at
+// (x, z). Unlike bt_floor_above this counts overhangs too (Gruntilda's hat, bridges): the map
+// cuts out only the structure over him now (BottomScreenView.composeLayer), so walking under
+// one no longer changes the rest of the map. Returns the lowest such height in *over.
+bool bt_overhead(const uint8_t* rdram, float x, float y, float z, float* over) {
+    const Ram ram{ rdram };
+    std::vector<Floor> surfaces;
+    if (!collectFloors(ram, surfaces, -0.25f)) return false;
+    float best = 1e9f;
+    for (const Floor& f : surfaces) {
+        const float* a = f.p[0]; const float* b = f.p[1]; const float* c = f.p[2];
+        if (x < std::min({ a[0], b[0], c[0] }) || x > std::max({ a[0], b[0], c[0] }) ||
+            z < std::min({ a[2], b[2], c[2] }) || z > std::max({ a[2], b[2], c[2] })) continue;
+        const float d = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+        if (std::fabs(d) < 1e-6f) continue;
+        const float l0 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / d;
+        const float l1 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / d;
+        const float l2 = 1.0f - l0 - l1;
+        if (l0 < 0 || l1 < 0 || l2 < 0) continue;
+        const float h = l0 * a[1] + l1 * b[1] + l2 * c[1];
+        if (h > y + 250.0f && h < y + 6000.0f) best = std::min(best, h);
+    }
+    if (over != nullptr) *over = best;
+    return best < 1e9f;
+}
+
+#ifdef BT_MAP_TEST
+// Test harness: walkable floor triangles (9 floats each) of the area in rdram.
+void bt_test_floors(const uint8_t* rdram, std::vector<float>& out) {
+    const Ram ram{ rdram };
+    std::vector<Floor> floors;
+    collectFloors(ram, floors);
+    for (const Floor& f : floors)
+        for (const auto& p : f.p) out.insert(out.end(), { p[0], p[1], p[2] });
+}
+#endif
+
 #ifndef BT_MAP_TEST
 // GameState.buildMap: runs on a background thread. capY: leave out what's entirely above it
 // (a lower storey's map), or >= 1e8 for the whole area.
@@ -1971,6 +2035,14 @@ Java_io_github_bownz_btrecomp_GameState_nativeBackdrop(JNIEnv* env, jclass, jint
     env->SetIntArrayRegion(a, 0, jsize(px.size()), reinterpret_cast<const jint*>(px.data()));
     env->SetFloatArrayRegion(info, 0, 5, meta);
     return a;
+}
+
+// Height of the lowest solid thing right over Banjo (see bt_overhead), or NaN if none.
+extern "C" JNIEXPORT jfloat JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeOverhead(JNIEnv*, jclass, jfloat x, jfloat y, jfloat z) {
+    uint8_t* rdram = bt_android_running_rdram();
+    float over = 0;
+    return rdram != nullptr && bt_overhead(rdram, x, y, z, &over) ? over : NAN;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

@@ -121,6 +121,9 @@ public class BTActivity extends SDLActivity
             mLayout.addView(overlay, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             addFpsCounter();
+            addMapsProgress();
+            // Every level's map, drawn from the imported ROM while the launcher is up.
+            MapAtlas.start(this);
         }
     }
 
@@ -457,6 +460,42 @@ public class BTActivity extends SDLActivity
     private int fpsLastFrame = -1;
     private int fpsLastGameFrame = -1;
     private long fpsLastTime;
+
+    // "Drawing maps n/N" in the corner while the maps are drawn before the game starts (during
+    // play the bottom screen shows it instead).
+    private TextView mapsView;
+
+    private void addMapsProgress() {
+        mapsView = new TextView(this);
+        mapsView.setTextColor(0xFFFFF4D6);
+        mapsView.setTextSize(13);
+        mapsView.setShadowLayer(4f, 0f, 1f, 0xFF000000);
+        mapsView.setBackgroundColor(0x66000000);
+        int pad = Math.round(4 * getResources().getDisplayMetrics().density);
+        mapsView.setPadding(pad * 2, pad, pad * 2, pad);
+        mapsView.setVisibility(View.GONE);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            android.view.Gravity.BOTTOM | android.view.Gravity.START);
+        lp.leftMargin = lp.bottomMargin = pad * 2;
+        mLayout.addView(mapsView, lp);
+        fpsHandler.post(mapsTick);
+    }
+
+    private final Runnable mapsTick = new Runnable() {
+        @Override
+        public void run() {
+            boolean show = MapAtlas.drawing() && !GameState.gameRunning();
+            if (show) {
+                mapsView.setText("Drawing maps from your ROM  " + MapAtlas.done() + " / " + MapAtlas.total());
+                mapsView.setVisibility(View.VISIBLE);
+                mapsView.bringToFront();
+            } else {
+                mapsView.setVisibility(View.GONE);
+            }
+            fpsHandler.postDelayed(this, show || !GameState.gameRunning() ? 500 : 5000);
+        }
+    };
 
     private void addFpsCounter() {
         fpsView = new TextView(this);

@@ -506,6 +506,44 @@ Java_io_github_bownz_btrecomp_GameState_nativeEntryPoint(JNIEnv* env, jclass, jf
     return JNI_TRUE;
 }
 
+// Whether the game has started (the launcher is done).
+JNIEXPORT jboolean JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeGameRunning(JNIEnv*, jclass) {
+    return running_rdram() != nullptr ? JNI_TRUE : JNI_FALSE;
+}
+
+// The calling thread runs at normal priority on the faster cores (all but the slowest
+// cluster): drawing the maps before the game starts, when nothing else needs them.
+JNIEXPORT void JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeFastThread(JNIEnv*, jclass) {
+    setpriority(PRIO_PROCESS, 0, 0);
+    const long count = sysconf(_SC_NPROCESSORS_CONF);
+    if (count <= 1 || count > CPU_SETSIZE) return;
+    std::vector<long> maxFreq(static_cast<size_t>(count), 0);
+    long slowest = 0;
+    for (long i = 0; i < count; i++) {
+        std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(i) + "/cpufreq/cpuinfo_max_freq");
+        long khz = 0;
+        if (f >> khz) {
+            maxFreq[static_cast<size_t>(i)] = khz;
+            slowest = slowest == 0 ? khz : std::min(slowest, khz);
+        }
+    }
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    int chosen = 0;
+    for (long i = 0; i < count; i++) {
+        if (slowest == 0 || maxFreq[static_cast<size_t>(i)] > slowest) {
+            CPU_SET(i, &set);
+            chosen++;
+        }
+    }
+    if (chosen == 0) {   // all alike: any core
+        for (long i = 0; i < count; i++) CPU_SET(i, &set);
+    }
+    sched_setaffinity(0, sizeof(set), &set);
+}
+
 // Called first on the app's own background threads (the bottom screen's map builders): run
 // them on the slowest cores at the lowest priority, so building a map never takes a fast core
 // from the game or the renderer (13 Nov: frame drops at 60 FPS lined up with map builds).

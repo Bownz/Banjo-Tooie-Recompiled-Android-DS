@@ -238,7 +238,7 @@ public final class BottomScreenView extends View {
         h = 31 * h + (Float.isNaN(shownDegrees) ? -1 : Math.round(shownDegrees * 4f));
         h = 31 * h + System.identityHashCode(mapImage);
         h = 31 * h + world;
-        h = 31 * h + atlasDone.size();
+        h = 31 * h + MapAtlas.done();
         h = 31 * h + (areaLabel == null ? 0 : areaLabel.hashCode());
         h = 31 * h + GameState.bottomSettings();
         h = 31 * h + ((paused ? 1 : 0) | (cutscene ? 2 : 0) | (bookOpen ? 4 : 0) | (zHeld ? 8 : 0) | (mapOff ? 16 : 0) | (onMenu ? 32 : 0));
@@ -502,7 +502,7 @@ public final class BottomScreenView extends View {
 
         if (m != null) {
             drawMapControls(c, r);
-            if (mapCap < GameState.WHOLE) {
+            if (mapCap < GameState.WHOLE && m != wholeImage) {
                 text.setTextAlign(Paint.Align.LEFT);
                 text.setTextSize(2.6f * u);
                 text.setColor(Color.argb(220, 255, 236, 170));
@@ -1575,6 +1575,8 @@ public final class BottomScreenView extends View {
     private float mapCap = GameState.WHOLE;
     private float wantedCap = GameState.WHOLE;
     private long layerCheckedAt;
+    private int underMisses;
+    private float layerY, layerOver;   // Banjo's height and what's over him, at the last check
 
     /**
      * Builds a new area's map (and once more 1.5 s later, in case the area was still loading),
@@ -1607,7 +1609,15 @@ public final class BottomScreenView extends View {
         }
         int id = onMenu ? 0 : GameState.mapGeometryId();   // title screen / file select: no map
         long now = SystemClock.uptimeMillis();
-        stepAtlas(now);
+        // A map just drawn from the ROM may be the area on screen (built live so far): show it.
+        int drawnNow = MapAtlas.done();
+        if (drawnNow != atlasSeen) {
+            if (atlasSeen >= 0 && atlasStyle && mapImage != null && mapImage.key >= 0 && mapCap >= GameState.WHOLE) {
+                mapRebuilt = false;
+                mapGeometryAt = 0;
+            }
+            atlasSeen = drawnNow;
+        }
         if (mapCap >= GameState.WHOLE && mapImage != null) {
             wholeImage = mapImage;   // what a lower floor is cut into (composeLayer)
         }
@@ -1656,7 +1666,13 @@ public final class BottomScreenView extends View {
             layerCheckedAt = now;
             float[] p = GameState.position();
             if (p != null) {
-                boolean under = GameState.floorAbove(p[0], p[1], p[2]);
+                // 0.9.32: anything solid right over him (a roof, an arch, Gruntilda's hat), not
+                // only a whole floor across a wide patch: the map cuts out just that structure
+                // now. The two older checks still count (a floor above with nothing found right
+                // over the middle of him, e.g. at a gap).
+                float over = GameState.overhead(p[0], p[1], p[2]);
+                boolean under = !Float.isNaN(over) || GameState.floorAbove(p[0], p[1], p[2]);
+                if (Float.isNaN(over)) over = p[1] + 2000f;
                 // Or the whole-area map shows a level well above him right where he is (checked
                 // against the last build, which is the whole area while it's shown). Once that
                 // switched to the lower level, stay there while he keeps near that spot and height.
@@ -1670,8 +1686,27 @@ public final class BottomScreenView extends View {
                     under = dx * dx + dz * dz < 1500f * 1500f && Math.abs(p[1] - belowAt[1]) < 300f;
                 }
                 if (!under) belowAt = null;
-                // Round the cap so small height changes on one storey don't redraw the map.
-                wantedCap = under ? (float) (Math.ceil((p[1] + 250f) / 500f) * 500f) : GameState.WHOLE;
+                // Out from under for a whole second before the map goes back (stepping along
+                // the edge of a roof doesn't flick it).
+                if (under) {
+                    underMisses = 0;
+                } else if (mapCap != GameState.WHOLE && ++underMisses < 2) {
+                    under = true;
+                    over = layerOver;
+                }
+                if (under) {
+                    // The cut goes between his floor and what's over him, rounded so walking
+                    // about on one floor doesn't redraw the map.
+                    float mid = Math.max(p[1] + 200f, (p[1] + over) / 2f);
+                    float cap = (float) (Math.floor(mid / 250f) * 250f);
+                    if (cap < p[1] + 150f) cap += 250f;
+                    layerY = p[1];
+                    layerOver = over;
+                    wantedCap = mapCap != GameState.WHOLE && Math.abs(mapCap - cap) <= 250f && mapCap > p[1] + 100f && mapCap < over
+                        ? mapCap : cap;   // the cut shown still lies between them: keep it
+                } else {
+                    wantedCap = GameState.WHOLE;
+                }
             }
         }
         if (mapBuilding) {
@@ -1735,7 +1770,7 @@ public final class BottomScreenView extends View {
             int areaBefore = GameState.area();
             // Atlas style: the area's map drawn from the ROM, when it's been drawn (found by the
             // fingerprint of the collision list loaded now). Otherwise a live build (atlas-painted).
-            GameState.MapImage built = atlas ? loadAtlas(GameState.currentFingerprint(), cap) : null;
+            GameState.MapImage built = atlas && cap >= GameState.WHOLE ? MapAtlas.load(GameState.currentFingerprint(), "all", true) : null;
             boolean fromAtlas = built != null;
             if (built == null) {
                 built = GameState.buildMap(2048, cap);
@@ -1799,15 +1834,22 @@ public final class BottomScreenView extends View {
             invalidate();
             return;
         }
-        mapWorker.execute(() -> {
+        final boolean atlas = atlasStyle;
+        layerWorker.execute(() -> {
             GameState.MapImage loaded = loadMap(key);
+            if (loaded == null && cap >= GameState.WHOLE) {
+                // Not seen before: the map drawn from the ROM, if it's done (Classic refines it
+                // with a live build a few seconds later; Atlas keeps it).
+                loaded = MapAtlas.load(GameState.currentFingerprint(), "all", atlas);
+            }
             if (loaded == null) {
                 return;
             }
+            final GameState.MapImage got = loaded;
             post(() -> {
                 if (id == mapGeometry && mapImage == null) {
-                    mapImage = loaded;
-                    mapMemory.put(key, loaded);
+                    mapImage = got;
+                    mapMemory.put(key, got);
                     invalidate();
                 }
             });
@@ -1932,12 +1974,26 @@ public final class BottomScreenView extends View {
         final GameState.MapImage whole = wholeImage;
         final boolean atlas = atlasStyle;
         final int area = GameState.area();
+        final float y = layerY, over = layerOver;
         layerWorker.execute(() -> {
             GameState.MapImage raw = storey;
-            if (raw == null && atlas) {
-                raw = loadAtlas(GameState.currentFingerprint(), cap);
+            Object[] composed = null;
+            try {
+                if (raw == null) {
+                    // The storey drawn from the ROM between his floor and what's over him.
+                    int fp = GameState.currentFingerprint();
+                    MapAtlas.Entry e = MapAtlas.lookup(fp);
+                    String layer = e != null ? MapAtlas.storeyFor(e, y, over) : null;
+                    raw = layer != null ? MapAtlas.load(fp, layer, atlas) : null;
+                }
+                composed = raw != null && whole != null && p != null ? composeLayer(whole, raw, p) : null;
+            } catch (Throwable t) {
+                // Out of memory or a bad file: show the storey map as it is rather than nothing,
+                // and never leave layerBusy set (it would stop floor switching for good).
+                android.util.Log.w("BTMap", "lower floor cut failed", t);
+                composed = null;
             }
-            Object[] composed = raw != null && whole != null && p != null ? composeLayer(whole, raw, p) : null;
+            final Object[] done = composed;
             final GameState.MapImage got = raw;
             post(() -> {
                 layerBusy = false;
@@ -1953,9 +2009,9 @@ public final class BottomScreenView extends View {
                 }
                 layerRaw = got;
                 mapCap = cap;
-                if (composed != null) {
-                    mapImage = (GameState.MapImage) composed[0];
-                    layerMask = (LayerMask) composed[1];
+                if (done != null) {
+                    mapImage = (GameState.MapImage) done[0];
+                    layerMask = (LayerMask) done[1];
                 } else if (whole != null && p != null) {
                     // Nothing over him differs on the map: the whole area already shows his floor.
                     mapImage = whole;
@@ -1980,84 +2036,9 @@ public final class BottomScreenView extends View {
         whole.bitmap.getPixels(a, 0, w, 0, 0, w, h);
         int[] sp = new int[sw * sh];
         storey.bitmap.getPixels(sp, 0, sw, 0, 0, sw, sh);
-        // (About 60 MB for a 2048² map while it runs; it runs once per floor switch.)
-        // The storey map resampled onto the whole map's pixels (same world place).
-        int[] b = new int[w * h];
-        final float k = storey.scale / whole.scale;
-        final float ox = (whole.minX - storey.minX) * storey.scale, oz = (whole.minZ - storey.minZ) * storey.scale;
-        boolean[] diff = new boolean[w * h];
-        for (int z = 0; z < h; z++) {
-            int sz = (int) (oz + (z + 0.5f) * k);
-            for (int x = 0; x < w; x++) {
-                int sx = (int) (ox + (x + 0.5f) * k);
-                int v = sx >= 0 && sz >= 0 && sx < sw && sz < sh ? sp[sz * sw + sx] : 0;
-                int i = z * w + x;
-                b[i] = v;
-                int u = a[i];
-                int da = Math.abs((u >>> 24) - (v >>> 24));
-                int d = Math.abs(((u >> 16) & 255) - ((v >> 16) & 255)) + Math.abs(((u >> 8) & 255) - ((v >> 8) & 255)) + Math.abs((u & 255) - (v & 255));
-                diff[i] = da > 64 || d > 54;
-            }
-        }
-        // Grown a few pixels, so the pieces of one structure (rings of steps, a bridge's planks)
-        // join up: measured on Spiral Mountain, 1727 pieces become 242 whole structures.
-        diff = growMask(diff, w, h, Math.max(2, Math.round(Math.max(w, h) / 680f)));
-        // The differing patch Banjo is under (or the nearest one, a little way off).
-        int px = (int) ((p[0] - whole.minX) * whole.scale), pz = (int) ((p[2] - whole.minZ) * whole.scale);
-        int seed = -1;
-        int maxR = Math.max(4, Math.round(250f * whole.scale));
-        for (int rr = 0; rr <= maxR && seed < 0; rr++) {
-            for (int dz = -rr; dz <= rr && seed < 0; dz++) {
-                for (int dx = -rr; dx <= rr; dx++) {
-                    if (Math.max(Math.abs(dx), Math.abs(dz)) != rr) continue;
-                    int x = px + dx, z = pz + dz;
-                    if (x < 0 || z < 0 || x >= w || z >= h) continue;
-                    if (diff[z * w + x]) {
-                        seed = z * w + x;
-                        break;
-                    }
-                }
-            }
-        }
-        if (seed < 0) {
+        boolean[] cut = MapLayers.compose(a, w, h, whole.minX, whole.minZ, whole.scale, sp, sw, sh, storey.minX, storey.minZ, storey.scale, p[0], p[2]);
+        if (cut == null) {
             return null;
-        }
-        boolean[] cut = new boolean[w * h];
-        int[] stack = new int[1 << 16];
-        int top = 0, x0 = w, z0 = h, x1 = -1, z1 = -1;
-        stack[top++] = seed;
-        cut[seed] = true;
-        while (top > 0) {
-            int i = stack[--top];
-            int x = i % w, z = i / w;
-            if (x < x0) x0 = x;
-            if (x > x1) x1 = x;
-            if (z < z0) z0 = z;
-            if (z > z1) z1 = z;
-            if (top + 4 > stack.length) stack = java.util.Arrays.copyOf(stack, stack.length * 2);
-            if (x > 0 && diff[i - 1] && !cut[i - 1]) { cut[i - 1] = true; stack[top++] = i - 1; }
-            if (x < w - 1 && diff[i + 1] && !cut[i + 1]) { cut[i + 1] = true; stack[top++] = i + 1; }
-            if (z > 0 && diff[i - w] && !cut[i - w]) { cut[i - w] = true; stack[top++] = i - w; }
-            if (z < h - 1 && diff[i + w] && !cut[i + w]) { cut[i + w] = true; stack[top++] = i + w; }
-        }
-        // Soft edge: the cut grown by r pixels, then blurred over r (box, twice).
-        final int r = Math.max(2, Math.round(Math.min(w, h) / 400f));
-        final int bx0 = Math.max(0, x0 - 3 * r), bz0 = Math.max(0, z0 - 3 * r);
-        final int bx1 = Math.min(w - 1, x1 + 3 * r), bz1 = Math.min(h - 1, z1 + 3 * r);
-        final int bw = bx1 - bx0 + 1, bh = bz1 - bz0 + 1;
-        float[] m = new float[bw * bh];
-        for (int z = 0; z < bh; z++)
-            for (int x = 0; x < bw; x++)
-                if (cut[(z + bz0) * w + x + bx0]) m[z * bw + x] = 1f;
-        m = boxMax(m, bw, bh, r);
-        m = boxBlur(boxBlur(m, bw, bh, r), bw, bh, r);
-        for (int z = 0; z < bh; z++) {
-            for (int x = 0; x < bw; x++) {
-                float t = m[z * bw + x];
-                if (t <= 0.004f) continue;
-                int i = (z + bz0) * w + x + bx0;
-                a[i] = t >= 0.996f ? b[i] : mixArgb(a[i], b[i], t);
-            }
         }
         android.graphics.Bitmap out = android.graphics.Bitmap.createBitmap(a, w, h, android.graphics.Bitmap.Config.ARGB_8888);
         GameState.MapImage img = new GameState.MapImage(out, whole.minX, whole.minZ, whole.scale);
@@ -2065,305 +2046,19 @@ public final class BottomScreenView extends View {
         return new Object[] { img, new LayerMask(cut, w, h, whole.minX, whole.minZ, whole.scale) };
     }
 
-    /** The mask grown by r pixels (separable, running counts). */
-    private static boolean[] growMask(boolean[] m, int w, int h, int r) {
-        boolean[] t = new boolean[m.length], o = new boolean[m.length];
-        for (int z = 0; z < h; z++) {
-            int n = 0, row = z * w;
-            for (int x = 0; x <= Math.min(w - 1, r); x++) if (m[row + x]) n++;
-            for (int x = 0; x < w; x++) {
-                t[row + x] = n > 0;
-                if (x + r + 1 < w && m[row + x + r + 1]) n++;
-                if (x - r >= 0 && m[row + x - r]) n--;
-            }
-        }
-        for (int x = 0; x < w; x++) {
-            int n = 0;
-            for (int z = 0; z <= Math.min(h - 1, r); z++) if (t[z * w + x]) n++;
-            for (int z = 0; z < h; z++) {
-                o[z * w + x] = n > 0;
-                if (z + r + 1 < h && t[(z + r + 1) * w + x]) n++;
-                if (z - r >= 0 && t[(z - r) * w + x]) n--;
-            }
-        }
-        return o;
-    }
-
-    private static int mixArgb(int u, int v, float t) {
-        float s = 1f - t;
-        int aa = Math.round((u >>> 24) * s + (v >>> 24) * t);
-        int rr = Math.round(((u >> 16) & 255) * s + ((v >> 16) & 255) * t);
-        int gg = Math.round(((u >> 8) & 255) * s + ((v >> 8) & 255) * t);
-        int bb = Math.round((u & 255) * s + (v & 255) * t);
-        return (aa << 24) | (rr << 16) | (gg << 8) | bb;
-    }
-
-    /** Separable max over (2r+1)² (grows the cut). */
-    private static float[] boxMax(float[] m, int w, int h, int r) {
-        float[] t = new float[m.length], o = new float[m.length];
-        for (int z = 0; z < h; z++)
-            for (int x = 0; x < w; x++) {
-                float v = 0;
-                for (int d = Math.max(0, x - r); d <= Math.min(w - 1, x + r) && v < 1f; d++) v = Math.max(v, m[z * w + d]);
-                t[z * w + x] = v;
-            }
-        for (int z = 0; z < h; z++)
-            for (int x = 0; x < w; x++) {
-                float v = 0;
-                for (int d = Math.max(0, z - r); d <= Math.min(h - 1, z + r) && v < 1f; d++) v = Math.max(v, t[d * w + x]);
-                o[z * w + x] = v;
-            }
-        return o;
-    }
-
-    /** Separable box blur over (2r+1)² (running sums). */
-    private static float[] boxBlur(float[] m, int w, int h, int r) {
-        float[] t = new float[m.length], o = new float[m.length];
-        final float n = 2 * r + 1;
-        for (int z = 0; z < h; z++) {
-            float s = 0;
-            for (int x = -r; x <= r; x++) s += m[z * w + Math.min(w - 1, Math.max(0, x))];
-            for (int x = 0; x < w; x++) {
-                t[z * w + x] = s / n;
-                s += m[z * w + Math.min(w - 1, x + r + 1)] - m[z * w + Math.max(0, x - r)];
-            }
-        }
-        for (int x = 0; x < w; x++) {
-            float s = 0;
-            for (int z = -r; z <= r; z++) s += t[Math.min(h - 1, Math.max(0, z)) * w + x];
-            for (int z = 0; z < h; z++) {
-                o[z * w + x] = s / n;
-                s += t[Math.min(h - 1, z + r + 1) * w + x] - t[Math.max(0, z - r) * w + x];
-            }
-        }
-        return o;
-    }
-
-    // ---- The atlas: every level's map drawn from the ROM ---------------------------------
-    // Map Style Atlas: once the ROM is loaded, each level model in it is drawn (map_atlas.cpp)
-    // in the background, one build at a time, with its storeys (heights splitting floors over
-    // floors), and kept in files/atlas-v1. An area is matched to its model by a fingerprint of
-    // the collision list, which is the same in the ROM and in RAM. Areas not in the atlas yet
-    // are built live (also atlas-painted). Bump ATLAS_DIR when the painter changes.
-    private static final String ATLAS_DIR = "atlas-v1";
+    // ---- Maps drawn from the ROM (MapAtlas) ----------------------------------------------
     private boolean atlasStyle = true, styleSet;
-
-    private static final class AtlasEntry {
-        final int asset;
-        final float[] storeys;   // ascending
-
-        AtlasEntry(int asset, float[] storeys) {
-            this.asset = asset;
-            this.storeys = storeys;
-        }
-    }
-
-    private static final class AtlasJob {
-        final int asset;
-        int fp;
-        int layer = -1;           // -1: the whole model; then each storey
-        float[] storeys = new float[0];
-        boolean failed;
-
-        AtlasJob(int asset) {
-            this.asset = asset;
-        }
-    }
-
-    private final java.util.concurrent.ConcurrentHashMap<Integer, AtlasEntry> atlasIndex = new java.util.concurrent.ConcurrentHashMap<>();
-    private final java.util.HashSet<Integer> atlasDone = new java.util.HashSet<>();   // UI thread
-    private int[] atlasModels;
-    private boolean atlasLoaded, atlasStepping;
-    private long atlasStepEnd, atlasRetryAt;
-    private AtlasJob atlasJob;
-
-    private java.io.File atlasDir() {
-        java.io.File dir = new java.io.File(getContext().getFilesDir(), ATLAS_DIR);
-        //noinspection ResultOfMethodCallIgnored
-        dir.mkdirs();
-        return dir;
-    }
-
-    private java.io.File atlasFile(int fp, String layer, String ext) {
-        return new java.io.File(atlasDir(), Integer.toHexString(fp) + "-" + layer + ext);
-    }
-
-    /** The atlas map for this fingerprint and cap (map worker thread), or null. */
-    private GameState.MapImage loadAtlas(int fp, float cap) {
-        AtlasEntry e = fp == 0 ? null : atlasIndex.get(fp);
-        if (e == null) {
-            return null;
-        }
-        String layer = "all";
-        if (cap < GameState.WHOLE) {
-            // Banjo is somewhere in (cap - 750, cap - 250]: the lowest split above him.
-            layer = null;
-            for (int k = 0; k < e.storeys.length; k++) {
-                if (e.storeys[k] > cap - 600f) {
-                    layer = Integer.toString(k);
-                    break;
-                }
-            }
-            if (layer == null) {
-                return null;   // under something the atlas has no storey for: build it live
-            }
-        }
-        return loadImage(atlasFile(fp, layer, ".img"), atlasFile(fp, layer, ".txt"), atlasFile(fp, layer, "-bd.img"));
-    }
-
-    /** Runs the next atlas build (one per call, between live builds), at most every 8 s in play. */
-    private void stepAtlas(long now) {
-        if (!atlasStyle || atlasStepping || mapBuilding || now < atlasRetryAt) {
-            return;
-        }
-        if (!atlasLoaded) {
-            atlasStepping = true;
-            mapWorker.execute(() -> {
-                int[] models = GameState.atlasModels();
-                java.util.HashSet<Integer> done = new java.util.HashSet<>();
-                if (models != null) {
-                    readAtlasIndex(done);
-                }
-                post(() -> {
-                    atlasStepping = false;
-                    if (models == null) {
-                        atlasRetryAt = SystemClock.uptimeMillis() + 5000;   // the ROM isn't loaded yet
-                        return;
-                    }
-                    atlasModels = models;
-                    atlasDone.addAll(done);
-                    atlasLoaded = true;
-                    if (!atlasIndex.isEmpty() && mapImage != null && mapImage.key >= 0) {
-                        mapRebuilt = false;   // show the area from the atlas if it's in it
-                        mapGeometryAt = 0;
-                    }
-                });
-            });
-            return;
-        }
-        if (atlasModels == null || atlasDone.size() >= atlasModels.length) {
-            return;
-        }
-        boolean idle = paused || onMenu;
-        if (now - atlasStepEnd < (idle ? 100 : 8000)) {
-            return;
-        }
-        if (atlasJob == null) {
-            for (int a : atlasModels) {
-                if (!atlasDone.contains(a)) {
-                    atlasJob = new AtlasJob(a);
-                    break;
-                }
-            }
-            if (atlasJob == null) {
-                return;
-            }
-        }
-        final AtlasJob job = atlasJob;
-        atlasStepping = true;
-        mapWorker.execute(() -> {
-            boolean finished = runAtlasStep(job);
-            post(() -> {
-                atlasStepping = false;
-                atlasStepEnd = SystemClock.uptimeMillis();
-                if (finished) {
-                    atlasDone.add(job.asset);
-                    atlasJob = null;
-                    if (!job.failed) {
-                        atlasIndex.put(job.fp, new AtlasEntry(job.asset, job.storeys));
-                        if (mapImage != null && mapImage.key >= 0 && job.fp == GameState.currentFingerprint()) {
-                            mapRebuilt = false;   // the area on screen was just drawn: show it
-                            mapGeometryAt = 0;
-                        }
-                    }
-                }
-                invalidate();
-            });
-        });
-    }
-
-    /** One build of the job (map worker thread); true when the model is finished. */
-    private boolean runAtlasStep(AtlasJob job) {
-        if (job.layer < 0) {
-            float[] st = new float[3];
-            GameState.MapImage m = GameState.atlasBuild(job.asset, GameState.WHOLE, st);
-            job.fp = GameState.atlasFingerprint(job.asset);
-            if (m == null || job.fp == 0
-                    || !saveImage(m, atlasFile(job.fp, "all", ".img"), atlasFile(job.fp, "all", ".txt"), atlasFile(job.fp, "all", "-bd.img"), atlasFormat(), 90)) {
-                job.failed = true;
-            } else {
-                int n = 0;
-                for (float s : st) if (!Float.isNaN(s)) n++;
-                job.storeys = new float[n];
-                n = 0;
-                for (float s : st) if (!Float.isNaN(s)) job.storeys[n++] = s;
-                java.util.Arrays.sort(job.storeys);
-            }
-        } else if (job.layer < job.storeys.length) {
-            GameState.MapImage m = GameState.atlasBuild(job.asset, job.storeys[job.layer], null);
-            String layer = Integer.toString(job.layer);
-            if (m == null || !saveImage(m, atlasFile(job.fp, layer, ".img"), atlasFile(job.fp, layer, ".txt"), atlasFile(job.fp, layer, "-bd.img"), atlasFormat(), 90)) {
-                // This storey couldn't be drawn: drop it and the ones above (layer numbers are by order).
-                job.storeys = java.util.Arrays.copyOf(job.storeys, job.layer);
-            }
-        }
-        job.layer++;
-        if (!job.failed && job.layer < job.storeys.length) {
-            return false;
-        }
-        StringBuilder line = new StringBuilder();
-        line.append(job.asset).append(' ').append(job.failed ? "0" : Integer.toHexString(job.fp));
-        if (!job.failed) for (float s : job.storeys) line.append(' ').append(s);
-        try (java.io.FileWriter w = new java.io.FileWriter(new java.io.File(atlasDir(), "index.txt"), true)) {
-            w.write(line.append('\n').toString());
-        } catch (java.io.IOException ignored) {
-            // drawn again next time
-        }
-        return true;
-    }
-
-    private static android.graphics.Bitmap.CompressFormat atlasFormat() {
-        // Lossy WebP: a painted map is a fifth of its PNG (the whole atlas is ~100 files).
-        return android.os.Build.VERSION.SDK_INT >= 30 ? android.graphics.Bitmap.CompressFormat.WEBP_LOSSY
-            : android.graphics.Bitmap.CompressFormat.WEBP;
-    }
-
-    /** Reads index.txt (lines: asset fp storeys...) into atlasIndex; done gets every asset tried. */
-    private void readAtlasIndex(java.util.Set<Integer> done) {
-        java.io.File f = new java.io.File(atlasDir(), "index.txt");
-        if (!f.isFile()) {
-            return;
-        }
-        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(f))) {
-            for (String line; (line = r.readLine()) != null; ) {
-                String[] v = line.trim().split(" ");
-                if (v.length < 2) continue;
-                try {
-                    int asset = Integer.parseInt(v[0]);
-                    int fp = (int) Long.parseLong(v[1], 16);
-                    done.add(asset);
-                    if (fp == 0 || !atlasFile(fp, "all", ".img").isFile()) continue;
-                    float[] st = new float[v.length - 2];
-                    for (int k = 0; k < st.length; k++) st[k] = Float.parseFloat(v[k + 2]);
-                    atlasIndex.put(fp, new AtlasEntry(asset, st));
-                } catch (NumberFormatException ignored) {
-                    // a torn line
-                }
-            }
-        } catch (java.io.IOException ignored) {
-            // start again
-        }
-    }
+    private int atlasSeen = -1;
 
     /** "Drawing maps n/N" under the map while the atlas is being drawn. */
     private void drawAtlasProgress(Canvas c, RectF r) {
-        if (!atlasStyle || atlasModels == null || atlasDone.size() >= atlasModels.length) {
+        if (!MapAtlas.drawing()) {
             return;
         }
         text.setTextAlign(Paint.Align.RIGHT);
         text.setTextSize(2.4f * u);
         text.setColor(Color.argb(200, 255, 236, 170));
-        c.drawText("Drawing maps " + atlasDone.size() + "/" + atlasModels.length, r.right - 3f * u, r.bottom - 3.2f * u, text);
+        c.drawText("Drawing maps " + MapAtlas.done() + "/" + MapAtlas.total(), r.right - 3f * u, r.bottom - 3.2f * u, text);
         text.setTextAlign(Paint.Align.CENTER);
     }
 

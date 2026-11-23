@@ -25,15 +25,18 @@
 #include <zlib.h>
 
 #ifndef BT_MAP_TEST
+#include <filesystem>
+#include <mutex>
 #include <jni.h>
 namespace recomp { std::span<const uint8_t> get_rom(); }
+namespace recompui::file { std::filesystem::path get_app_folder_path(); }
 extern "C" uint8_t* bt_android_running_rdram();
 #endif
 
-bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t key, std::vector<int32_t>& out, float meta[5]);
-// map_render.cpp: the last build's per-pixel kinds and ground heights (see MapCache).
-bool bt_cache_layers(uint32_t key, int& W, int& H, float& minX, float& minZ, float& scale,
-                     const uint8_t*& kind, const int16_t*& groundY);
+// map_render.cpp: a build that keeps nothing shared (safe on several threads at once).
+bool bt_build_map_private(const uint8_t* rdram, int maxSize, float capY, std::vector<int32_t>& out, float meta[5],
+                          std::vector<uint8_t>& kind, std::vector<int16_t>& groundY,
+                          std::vector<int32_t>& backdrop, float bdMeta[5]);
 
 namespace {
 
@@ -554,6 +557,15 @@ bool g_levelModelsScanned = false;
 
 }   // namespace
 
+#ifdef BT_MAP_TEST
+// Test harness: the scratch RAM with this model laid out as the game does.
+const uint8_t* bt_atlas_test_ram(std::span<const uint8_t> rom, int asset) {
+    static Scratch s;
+    std::vector<uint8_t> model;
+    return layOut(rom, asset, s, model) ? s.ram.data() : nullptr;
+}
+#endif
+
 // Level map models in the ROM (asset indices): with a collision list of 1500+ triangles over
 // 6000+ units. 85 in the US ROM.
 const std::vector<int>& bt_atlas_level_models(std::span<const uint8_t> rom) {
@@ -593,25 +605,62 @@ uint32_t bt_atlas_current_fingerprint(const uint8_t* rdram) {
     return fingerprint(c.data(), c.size());
 }
 
-// Builds one level model's map from the ROM (capY as for live maps), in the atlas style.
-bool bt_atlas_build(std::span<const uint8_t> rom, int asset, float capY, uint32_t key, std::vector<int32_t>& out, float meta[5],
-                    std::vector<float>* storeyOut) {
-    static Scratch scratch;
+// Builds one level model's map from the ROM (capY as for live maps), in both styles: the
+// classic picture (the game's textures) and the atlas painting, plus the backdrop. Safe on
+// several threads at once (each has its own scratch RAM; the build keeps nothing shared).
+bool bt_atlas_build_both(std::span<const uint8_t> rom, int asset, float capY, std::vector<int32_t>& classic,
+                         std::vector<int32_t>& atlas, float meta[5], std::vector<float>* storeyOut,
+                         std::vector<int32_t>& backdrop, float bdMeta[5]) {
+    thread_local Scratch scratch;
     std::vector<uint8_t> model;
     if (!layOut(rom, asset, scratch, model)) return false;
     if (storeyOut != nullptr) *storeyOut = storeys(model);
-    std::vector<int32_t> classic;
-    if (!bt_build_map_keyed(scratch.ram.data(), 2048, capY, key, classic, meta)) return false;
-    int W, H;
-    float minX, minZ, scale;
-    const uint8_t* kind;
-    const int16_t* gy;
-    if (!bt_cache_layers(key, W, H, minX, minZ, scale, kind, gy) || size_t(W) * H != classic.size()) return false;
-    bt_atlas_paint(W, H, minX, minZ, scale, kind, gy, classic.data(), out);
+    std::vector<uint8_t> kind;
+    std::vector<int16_t> gy;
+    const bool ok = bt_build_map_private(scratch.ram.data(), 2048, capY, classic, meta, kind, gy, backdrop, bdMeta);
+    if (!ok) return false;
+    bt_atlas_paint(int(meta[0]), int(meta[1]), meta[2], meta[3], meta[4], kind.data(), gy.data(), classic.data(), atlas);
     return true;
 }
 
+// The atlas style only (the PC test harness).
+bool bt_atlas_build(std::span<const uint8_t> rom, int asset, float capY, uint32_t, std::vector<int32_t>& out, float meta[5],
+                    std::vector<float>* storeyOut) {
+    std::vector<int32_t> classic, backdrop;
+    float bd[5];
+    return bt_atlas_build_both(rom, asset, capY, classic, out, meta, storeyOut, backdrop, bd);
+}
+
 #ifndef BT_MAP_TEST
+namespace {
+// The ROM: the game's once it has started, else the one imported (stored by the launcher as
+// bt.n64.us.1.0.z64 in the app's folder), read once, so every map can be drawn before the
+// game starts.
+std::mutex g_romMutex;
+std::vector<uint8_t> g_storedRom;
+bool g_storedRomTried = false;
+
+std::span<const uint8_t> atlasRom() {
+    const std::span<const uint8_t> live = recomp::get_rom();
+    if (!live.empty()) return live;
+    std::lock_guard lock{ g_romMutex };
+    if (!g_storedRomTried || g_storedRom.empty()) {
+        g_storedRomTried = true;
+        const std::filesystem::path file = recompui::file::get_app_folder_path() / "bt.n64.us.1.0.z64";
+        std::FILE* f = std::fopen(file.string().c_str(), "rb");
+        if (f != nullptr) {
+            std::vector<uint8_t> d;
+            uint8_t buf[1 << 16];
+            for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0; ) d.insert(d.end(), buf, buf + n);
+            std::fclose(f);
+            // A big-endian .z64 (the launcher stores it so): 80 37 12 40.
+            if (d.size() >= (16u << 20) && d[0] == 0x80 && d[1] == 0x37 && d[2] == 0x12 && d[3] == 0x40) g_storedRom = std::move(d);
+        }
+    }
+    return g_storedRom;
+}
+}   // namespace
+
 // Map Style (Input > Dual Screen): 1 = atlas (default), 0 = classic. Read by nativeBuildMap.
 int g_btMapStyle = 1;
 
@@ -620,9 +669,11 @@ Java_io_github_bownz_btrecomp_GameState_nativeSetMapStyle(JNIEnv*, jclass, jint 
     g_btMapStyle = style;
 }
 
+// The ROM's level models (asset numbers), or null when there's no ROM yet. Call from one
+// thread first (the scan isn't guarded).
 extern "C" JNIEXPORT jintArray JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeAtlasModels(JNIEnv* env, jclass) {
-    const std::span<const uint8_t> rom = recomp::get_rom();
+    const std::span<const uint8_t> rom = atlasRom();
     if (rom.empty()) return nullptr;
     const std::vector<int>& models = bt_atlas_level_models(rom);
     jintArray a = env->NewIntArray(jsize(models.size()));
@@ -632,7 +683,7 @@ Java_io_github_bownz_btrecomp_GameState_nativeAtlasModels(JNIEnv* env, jclass) {
 
 extern "C" JNIEXPORT jint JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeAtlasFingerprint(JNIEnv*, jclass, jint asset) {
-    const std::span<const uint8_t> rom = recomp::get_rom();
+    const std::span<const uint8_t> rom = atlasRom();
     return rom.empty() ? 0 : jint(bt_atlas_fingerprint(rom, asset));
 }
 
@@ -641,20 +692,31 @@ Java_io_github_bownz_btrecomp_GameState_nativeCurrentFingerprint(JNIEnv*, jclass
     return jint(bt_atlas_current_fingerprint(bt_android_running_rdram()));
 }
 
-// info: W, H, minX, minZ, scale, then up to 3 storey heights (NaN where none).
-extern "C" JNIEXPORT jintArray JNICALL
-Java_io_github_bownz_btrecomp_GameState_nativeAtlasBuild(JNIEnv* env, jclass, jint asset, jfloat capY, jint key, jfloatArray info) {
-    const std::span<const uint8_t> rom = recomp::get_rom();
-    if (rom.empty() || info == nullptr || env->GetArrayLength(info) < 8) return nullptr;
-    std::vector<int32_t> out;
+// Both styles of one model's map: {classic ARGB, atlas ARGB, backdrop ARGB (may be empty)}.
+// info (13): W, H, minX, minZ, scale, 3 storey heights (NaN where none), then the backdrop's
+// W, H, minX, minZ, scale.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_io_github_bownz_btrecomp_GameState_nativeAtlasBuildBoth(JNIEnv* env, jclass, jint asset, jfloat capY, jfloatArray info) {
+    const std::span<const uint8_t> rom = atlasRom();
+    if (rom.empty() || info == nullptr || env->GetArrayLength(info) < 13) return nullptr;
+    std::vector<int32_t> classic, atlas, backdrop;
     std::vector<float> st;
-    float meta[8];
-    if (!bt_atlas_build(rom, asset, capY, uint32_t(key), out, meta, &st)) return nullptr;
+    float meta[13];
+    if (!bt_atlas_build_both(rom, asset, capY, classic, atlas, meta, &st, backdrop, meta + 8)) return nullptr;
     for (int k = 0; k < 3; k++) meta[5 + k] = k < int(st.size()) ? st[size_t(k)] : NAN;
-    jintArray pixels = env->NewIntArray(jsize(out.size()));
-    if (pixels == nullptr) return nullptr;
-    env->SetIntArrayRegion(pixels, 0, jsize(out.size()), reinterpret_cast<const jint*>(out.data()));
-    env->SetFloatArrayRegion(info, 0, 8, meta);
-    return pixels;
+    jclass intArray = env->FindClass("[I");
+    if (intArray == nullptr) return nullptr;
+    jobjectArray result = env->NewObjectArray(3, intArray, nullptr);
+    if (result == nullptr) return nullptr;
+    const std::vector<int32_t>* parts[3] = { &classic, &atlas, &backdrop };
+    for (int k = 0; k < 3; k++) {
+        jintArray a = env->NewIntArray(jsize(parts[k]->size()));
+        if (a == nullptr) return nullptr;
+        if (!parts[k]->empty()) env->SetIntArrayRegion(a, 0, jsize(parts[k]->size()), reinterpret_cast<const jint*>(parts[k]->data()));
+        env->SetObjectArrayElement(result, k, a);
+        env->DeleteLocalRef(a);
+    }
+    env->SetFloatArrayRegion(info, 0, 13, meta);
+    return result;
 }
 #endif
