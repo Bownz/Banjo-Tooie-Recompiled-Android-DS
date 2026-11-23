@@ -2823,30 +2823,45 @@ public final class BottomScreenView extends View {
             }
         } else if (i == 3 && gold != null) {
             made = trimmed(gold);
-        } else if ((i == 0 || i == 1) && kazooie != null && egg != null) {
-            // 150 x 100: Kazooie facing right, the egg in front of her or behind, speed lines
-            // on the side it came from.
+        } else if ((i == 0 || i == 1) && egg != null) {
+            // The blue egg flying, with a trail of the game's sparkle stars (170 x 100):
+            // Fire Egg high on the right, tipped forward, at the end of gold and orange stars
+            // climbing up and forward, a warm glow behind it; Lay Egg low on the left, tipped
+            // back, blue and white stars arcing down to it from behind, a cool glow.
             boolean forward = i == 0;
-            made = android.graphics.Bitmap.createBitmap(150, 100, android.graphics.Bitmap.Config.ARGB_8888);
+            android.graphics.Bitmap goldStar = GameState.sprite(0x09E2), orange = GameState.sprite(0x09E3);
+            android.graphics.Bitmap blue = GameState.sprite(0x09E5), white = GameState.sprite(0x09E0);
+            made = android.graphics.Bitmap.createBitmap(170, 100, android.graphics.Bitmap.Config.ARGB_8888);
             Canvas k = new Canvas(made);
             Paint p = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
-            android.graphics.Bitmap kz = trimmed(kazooie), eg = trimmed(egg);
-            float kw = 70f, kh = kw * kz.getHeight() / kz.getWidth();
-            float kx = forward ? 40f : 70f;
-            k.drawBitmap(kz, null, new RectF(kx, (100 - kh) / 2, kx + kw, (100 + kh) / 2), p);
-            float ex = forward ? 112f : 6f, ey = 40f;
-            p.setColor(Color.argb(200, 255, 244, 214));
-            p.setStrokeWidth(3f);
-            p.setStrokeCap(Paint.Cap.ROUND);
-            for (int j = 0; j < 3; j++) {
-                float y = 48 + 9 * j, len = 18 + (j % 2) * 6;
-                if (forward) k.drawLine(ex - 6 - len, y, ex - 4, y, p);
-                else k.drawLine(ex + 38, y, ex + 40 + len, y, p);
+            float gx = forward ? 131 : 42, gy = forward ? 43 : 58;
+            int glow = forward ? Color.argb(130, 255, 190, 60) : Color.argb(120, 120, 190, 255);
+            p.setShader(new RadialGradient(gx, gy, 46, glow, glow & 0x00FFFFFF, Shader.TileMode.CLAMP));
+            k.drawCircle(gx, gy, 46, p);
+            p.setShader(null);
+            float[][] trail = forward
+                ? new float[][] { { 100, 54, 38, 1f, 0 }, { 72, 66, 30, 0.9f, 1 }, { 48, 76, 24, 0.75f, 0 }, { 28, 84, 18, 0.6f, 1 }, { 12, 90, 13, 0.45f, 0 } }
+                : new float[][] { { 74, 42, 36, 1f, 0 }, { 100, 26, 30, 0.9f, 1 }, { 124, 16, 24, 0.75f, 0 }, { 146, 12, 18, 0.6f, 1 }, { 162, 14, 13, 0.45f, 0 } };
+            for (float[] t : trail) {
+                android.graphics.Bitmap star = forward ? (t[4] == 0 ? goldStar : orange) : (t[4] == 0 ? blue : white);
+                if (star != null) putSprite(k, trimmed(star), t[0], t[1], t[2], 0f, t[3], p);
             }
-            k.drawBitmap(eg, null, new RectF(ex, ey, ex + 34, ey + 34), p);
+            putSprite(k, trimmed(egg), gx, gy - (forward ? 3 : -2), forward ? 52 : 50, forward ? 40f : -40f, 1f, p);
         }
         moveIcons[i] = made;
         return made;
+    }
+
+    /** b drawn centred at (cx, cy), its longer side `size`, turned `degrees` (clockwise). */
+    private static void putSprite(Canvas k, android.graphics.Bitmap b, float cx, float cy, float size, float degrees, float alpha, Paint p) {
+        float s = size / Math.max(b.getWidth(), b.getHeight());
+        float w = b.getWidth() * s, h = b.getHeight() * s;
+        k.save();
+        k.rotate(degrees, cx, cy);
+        p.setAlpha(Math.round(255 * alpha));
+        k.drawBitmap(b, null, new RectF(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), p);
+        p.setAlpha(255);
+        k.restore();
     }
 
     /** The sprite cropped to what's drawn in it. */
