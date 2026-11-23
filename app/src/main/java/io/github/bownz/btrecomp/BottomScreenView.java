@@ -238,6 +238,7 @@ public final class BottomScreenView extends View {
         h = 31 * h + (Float.isNaN(shownDegrees) ? -1 : Math.round(shownDegrees * 4f));
         h = 31 * h + System.identityHashCode(mapImage);
         h = 31 * h + world;
+        h = 31 * h + atlasDone.size();
         h = 31 * h + (areaLabel == null ? 0 : areaLabel.hashCode());
         h = 31 * h + GameState.bottomSettings();
         h = 31 * h + ((paused ? 1 : 0) | (cutscene ? 2 : 0) | (bookOpen ? 4 : 0) | (zHeld ? 8 : 0) | (mapOff ? 16 : 0) | (onMenu ? 32 : 0));
@@ -499,6 +500,7 @@ public final class BottomScreenView extends View {
                 text.setTextAlign(Paint.Align.CENTER);
             }
         }
+        drawAtlasProgress(c, r);
         if (drawBanner(c, frame, now)) animating = true;
         if (animating) {
             postInvalidateOnAnimation();
@@ -1097,7 +1099,7 @@ public final class BottomScreenView extends View {
     });
 
     private void updateDetail(GameState.MapImage m, RectF r, float cx, float cz, float viewScale) {
-        if (m.key < 0 || viewScale < m.scale * 1.25f) {
+        if (m.key < 0 || atlasStyle || viewScale < m.scale * 1.25f) {
             return;   // the area map is detailed enough here
         }
         float halfW = r.width() / 2 / viewScale, halfH = r.height() / 2 / viewScale;
@@ -1575,6 +1577,16 @@ public final class BottomScreenView extends View {
 
     private void refreshMap() {
         onMenu = GameState.onMenu();
+        boolean atlas = (GameState.bottomSettings() & 32) == 0;   // Input > Dual Screen > Map Style
+        if (atlas != atlasStyle || !styleSet) {
+            styleSet = true;
+            atlasStyle = atlas;
+            GameState.setMapStyle(atlas);
+            mapMemory.clear();
+            mapGeometry = 0;   // draw the area again in the new style
+            mapImage = null;
+            detail = null;
+        }
         if (mapOff) {
             // Forget the area, so turning the map back on builds it afresh.
             mapGeometry = 0;
@@ -1585,6 +1597,7 @@ public final class BottomScreenView extends View {
         }
         int id = onMenu ? 0 : GameState.mapGeometryId();   // title screen / file select: no map
         long now = SystemClock.uptimeMillis();
+        stepAtlas(now);
         if (id != mapGeometry) {
             if (mapImage != null) {   // fade the area we're leaving out where it was
                 leavingMap = mapImage;
@@ -1694,20 +1707,28 @@ public final class BottomScreenView extends View {
             return;
         }
         mapBuilding = true;
+        final boolean atlas = atlasStyle;
         mapWorker.execute(() -> {
             int areaBefore = GameState.area();
-            GameState.MapImage built = GameState.buildMap(2048, cap);
+            // Atlas style: the area's map drawn from the ROM, when it's been drawn (found by the
+            // fingerprint of the collision list loaded now). Otherwise a live build (atlas-painted).
+            GameState.MapImage built = atlas ? loadAtlas(GameState.currentFingerprint(), cap) : null;
+            boolean fromAtlas = built != null;
+            if (built == null) {
+                built = GameState.buildMap(2048, cap);
+            }
             int areaAfter = GameState.area();
-            if (built != null && areaBefore >= 0 && areaBefore == areaAfter) {
+            if (built != null && !fromAtlas && areaBefore >= 0 && areaBefore == areaAfter) {
                 saveMap(areaBefore, cap, built);
             }
+            final GameState.MapImage result = built;
             post(() -> {
                 mapBuilding = false;
-                if (id == mapGeometry && built != null) {
-                    mapImage = built;
+                if (id == mapGeometry && result != null) {
+                    mapImage = result;
                     mapCap = cap;
                     if (areaBefore >= 0 && areaBefore == areaAfter) {
-                        mapMemory.put(mapKey(areaBefore, cap), built);
+                        mapMemory.put(mapKey(areaBefore, cap), result);
                     }
                     invalidate();
                 } else if (id == mapGeometry && cap != GameState.WHOLE) {
@@ -1730,8 +1751,8 @@ public final class BottomScreenView extends View {
             }
         };
 
-    private static String mapKey(int area, float cap) {
-        return MAP_CACHE_VERSION + "-" + Integer.toHexString(area) + "-" + (cap >= GameState.WHOLE ? "all" : Integer.toString(Math.round(cap)));
+    private String mapKey(int area, float cap) {
+        return MAP_CACHE_VERSION + (atlasStyle ? "a" : "c") + "-" + Integer.toHexString(area) + "-" + (cap >= GameState.WHOLE ? "all" : Integer.toString(Math.round(cap)));
     }
 
     private java.io.File mapFile(String key, String ext) {
@@ -1766,7 +1787,10 @@ public final class BottomScreenView extends View {
     }
 
     private GameState.MapImage loadMap(String key) {
-        java.io.File png = mapFile(key, ".png"), meta = mapFile(key, ".txt");
+        return loadImage(mapFile(key, ".png"), mapFile(key, ".txt"), mapFile(key, "-bd.png"));
+    }
+
+    private static GameState.MapImage loadImage(java.io.File png, java.io.File meta, java.io.File bdPng) {
         if (!png.isFile() || !meta.isFile()) {
             return null;
         }
@@ -1778,7 +1802,6 @@ public final class BottomScreenView extends View {
             }
             GameState.MapImage m = new GameState.MapImage(b, Float.parseFloat(v[0]), Float.parseFloat(v[1]), Float.parseFloat(v[2]));
             String line = r.readLine();   // the backdrop's place, when saved
-            java.io.File bdPng = mapFile(key, "-bd.png");
             if (line != null && bdPng.isFile()) {
                 String[] bv = line.trim().split(" ");
                 android.graphics.Bitmap bb = android.graphics.BitmapFactory.decodeFile(bdPng.getPath());
@@ -1795,20 +1818,24 @@ public final class BottomScreenView extends View {
     /** Saves a map to the cache (on the map worker thread). */
     private void saveMap(int area, float cap, GameState.MapImage m) {
         String key = mapKey(area, cap);
-        java.io.File png = mapFile(key, ".png"), meta = mapFile(key, ".txt");
-        java.io.File tmp = mapFile(key, ".png.tmp");
+        saveImage(m, mapFile(key, ".png"), mapFile(key, ".txt"), mapFile(key, "-bd.png"), android.graphics.Bitmap.CompressFormat.PNG, 100);
+    }
+
+    private static boolean saveImage(GameState.MapImage m, java.io.File png, java.io.File meta, java.io.File bdPng,
+                                     android.graphics.Bitmap.CompressFormat format, int quality) {
+        java.io.File tmp = new java.io.File(png.getPath() + ".tmp");
         try (java.io.FileOutputStream out = new java.io.FileOutputStream(tmp)) {
-            if (!m.bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)) {
-                return;
+            if (!m.bitmap.compress(format, quality, out)) {
+                return false;
             }
         } catch (java.io.IOException e) {
-            return;
+            return false;
         }
         GameState.MapImage bd = m.backdrop;
         boolean bdSaved = false;
         if (bd != null) {
-            try (java.io.FileOutputStream out = new java.io.FileOutputStream(mapFile(key, "-bd.png"))) {
-                bdSaved = bd.bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out);
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(bdPng)) {
+                bdSaved = bd.bitmap.compress(format, quality, out);
             } catch (java.io.IOException e) {
                 bdSaved = false;
             }
@@ -1819,10 +1846,237 @@ public final class BottomScreenView extends View {
                 w.write(bd.minX + " " + bd.minZ + " " + bd.scale + "\n");
             }
         } catch (java.io.IOException e) {
+            return false;
+        }
+        return tmp.renameTo(png);
+    }
+
+    // ---- The atlas: every level's map drawn from the ROM ---------------------------------
+    // Map Style Atlas: once the ROM is loaded, each level model in it is drawn (map_atlas.cpp)
+    // in the background, one build at a time, with its storeys (heights splitting floors over
+    // floors), and kept in files/atlas-v1. An area is matched to its model by a fingerprint of
+    // the collision list, which is the same in the ROM and in RAM. Areas not in the atlas yet
+    // are built live (also atlas-painted). Bump ATLAS_DIR when the painter changes.
+    private static final String ATLAS_DIR = "atlas-v1";
+    private boolean atlasStyle = true, styleSet;
+
+    private static final class AtlasEntry {
+        final int asset;
+        final float[] storeys;   // ascending
+
+        AtlasEntry(int asset, float[] storeys) {
+            this.asset = asset;
+            this.storeys = storeys;
+        }
+    }
+
+    private static final class AtlasJob {
+        final int asset;
+        int fp;
+        int layer = -1;           // -1: the whole model; then each storey
+        float[] storeys = new float[0];
+        boolean failed;
+
+        AtlasJob(int asset) {
+            this.asset = asset;
+        }
+    }
+
+    private final java.util.concurrent.ConcurrentHashMap<Integer, AtlasEntry> atlasIndex = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.HashSet<Integer> atlasDone = new java.util.HashSet<>();   // UI thread
+    private int[] atlasModels;
+    private boolean atlasLoaded, atlasStepping;
+    private long atlasStepEnd, atlasRetryAt;
+    private AtlasJob atlasJob;
+
+    private java.io.File atlasDir() {
+        java.io.File dir = new java.io.File(getContext().getFilesDir(), ATLAS_DIR);
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        return dir;
+    }
+
+    private java.io.File atlasFile(int fp, String layer, String ext) {
+        return new java.io.File(atlasDir(), Integer.toHexString(fp) + "-" + layer + ext);
+    }
+
+    /** The atlas map for this fingerprint and cap (map worker thread), or null. */
+    private GameState.MapImage loadAtlas(int fp, float cap) {
+        AtlasEntry e = fp == 0 ? null : atlasIndex.get(fp);
+        if (e == null) {
+            return null;
+        }
+        String layer = "all";
+        if (cap < GameState.WHOLE) {
+            // Banjo is somewhere in (cap - 750, cap - 250]: the lowest split above him.
+            layer = null;
+            for (int k = 0; k < e.storeys.length; k++) {
+                if (e.storeys[k] > cap - 600f) {
+                    layer = Integer.toString(k);
+                    break;
+                }
+            }
+            if (layer == null) {
+                return null;   // under something the atlas has no storey for: build it live
+            }
+        }
+        return loadImage(atlasFile(fp, layer, ".img"), atlasFile(fp, layer, ".txt"), atlasFile(fp, layer, "-bd.img"));
+    }
+
+    /** Runs the next atlas build (one per call, between live builds), at most every 8 s in play. */
+    private void stepAtlas(long now) {
+        if (!atlasStyle || atlasStepping || mapBuilding || now < atlasRetryAt) {
             return;
         }
-        //noinspection ResultOfMethodCallIgnored
-        tmp.renameTo(png);
+        if (!atlasLoaded) {
+            atlasStepping = true;
+            mapWorker.execute(() -> {
+                int[] models = GameState.atlasModels();
+                java.util.HashSet<Integer> done = new java.util.HashSet<>();
+                if (models != null) {
+                    readAtlasIndex(done);
+                }
+                post(() -> {
+                    atlasStepping = false;
+                    if (models == null) {
+                        atlasRetryAt = SystemClock.uptimeMillis() + 5000;   // the ROM isn't loaded yet
+                        return;
+                    }
+                    atlasModels = models;
+                    atlasDone.addAll(done);
+                    atlasLoaded = true;
+                    if (!atlasIndex.isEmpty() && mapImage != null && mapImage.key >= 0) {
+                        mapRebuilt = false;   // show the area from the atlas if it's in it
+                        mapGeometryAt = 0;
+                    }
+                });
+            });
+            return;
+        }
+        if (atlasModels == null || atlasDone.size() >= atlasModels.length) {
+            return;
+        }
+        boolean idle = paused || onMenu;
+        if (now - atlasStepEnd < (idle ? 100 : 8000)) {
+            return;
+        }
+        if (atlasJob == null) {
+            for (int a : atlasModels) {
+                if (!atlasDone.contains(a)) {
+                    atlasJob = new AtlasJob(a);
+                    break;
+                }
+            }
+            if (atlasJob == null) {
+                return;
+            }
+        }
+        final AtlasJob job = atlasJob;
+        atlasStepping = true;
+        mapWorker.execute(() -> {
+            boolean finished = runAtlasStep(job);
+            post(() -> {
+                atlasStepping = false;
+                atlasStepEnd = SystemClock.uptimeMillis();
+                if (finished) {
+                    atlasDone.add(job.asset);
+                    atlasJob = null;
+                    if (!job.failed) {
+                        atlasIndex.put(job.fp, new AtlasEntry(job.asset, job.storeys));
+                        if (mapImage != null && mapImage.key >= 0 && job.fp == GameState.currentFingerprint()) {
+                            mapRebuilt = false;   // the area on screen was just drawn: show it
+                            mapGeometryAt = 0;
+                        }
+                    }
+                }
+                invalidate();
+            });
+        });
+    }
+
+    /** One build of the job (map worker thread); true when the model is finished. */
+    private boolean runAtlasStep(AtlasJob job) {
+        if (job.layer < 0) {
+            float[] st = new float[3];
+            GameState.MapImage m = GameState.atlasBuild(job.asset, GameState.WHOLE, st);
+            job.fp = GameState.atlasFingerprint(job.asset);
+            if (m == null || job.fp == 0
+                    || !saveImage(m, atlasFile(job.fp, "all", ".img"), atlasFile(job.fp, "all", ".txt"), atlasFile(job.fp, "all", "-bd.img"), atlasFormat(), 90)) {
+                job.failed = true;
+            } else {
+                int n = 0;
+                for (float s : st) if (!Float.isNaN(s)) n++;
+                job.storeys = new float[n];
+                n = 0;
+                for (float s : st) if (!Float.isNaN(s)) job.storeys[n++] = s;
+                java.util.Arrays.sort(job.storeys);
+            }
+        } else if (job.layer < job.storeys.length) {
+            GameState.MapImage m = GameState.atlasBuild(job.asset, job.storeys[job.layer], null);
+            String layer = Integer.toString(job.layer);
+            if (m == null || !saveImage(m, atlasFile(job.fp, layer, ".img"), atlasFile(job.fp, layer, ".txt"), atlasFile(job.fp, layer, "-bd.img"), atlasFormat(), 90)) {
+                // This storey couldn't be drawn: drop it and the ones above (layer numbers are by order).
+                job.storeys = java.util.Arrays.copyOf(job.storeys, job.layer);
+            }
+        }
+        job.layer++;
+        if (!job.failed && job.layer < job.storeys.length) {
+            return false;
+        }
+        StringBuilder line = new StringBuilder();
+        line.append(job.asset).append(' ').append(job.failed ? "0" : Integer.toHexString(job.fp));
+        if (!job.failed) for (float s : job.storeys) line.append(' ').append(s);
+        try (java.io.FileWriter w = new java.io.FileWriter(new java.io.File(atlasDir(), "index.txt"), true)) {
+            w.write(line.append('\n').toString());
+        } catch (java.io.IOException ignored) {
+            // drawn again next time
+        }
+        return true;
+    }
+
+    private static android.graphics.Bitmap.CompressFormat atlasFormat() {
+        // Lossy WebP: a painted map is a fifth of its PNG (the whole atlas is ~100 files).
+        return android.os.Build.VERSION.SDK_INT >= 30 ? android.graphics.Bitmap.CompressFormat.WEBP_LOSSY
+            : android.graphics.Bitmap.CompressFormat.WEBP;
+    }
+
+    /** Reads index.txt (lines: asset fp storeys...) into atlasIndex; done gets every asset tried. */
+    private void readAtlasIndex(java.util.Set<Integer> done) {
+        java.io.File f = new java.io.File(atlasDir(), "index.txt");
+        if (!f.isFile()) {
+            return;
+        }
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.FileReader(f))) {
+            for (String line; (line = r.readLine()) != null; ) {
+                String[] v = line.trim().split(" ");
+                if (v.length < 2) continue;
+                try {
+                    int asset = Integer.parseInt(v[0]);
+                    int fp = (int) Long.parseLong(v[1], 16);
+                    done.add(asset);
+                    if (fp == 0 || !atlasFile(fp, "all", ".img").isFile()) continue;
+                    float[] st = new float[v.length - 2];
+                    for (int k = 0; k < st.length; k++) st[k] = Float.parseFloat(v[k + 2]);
+                    atlasIndex.put(fp, new AtlasEntry(asset, st));
+                } catch (NumberFormatException ignored) {
+                    // a torn line
+                }
+            }
+        } catch (java.io.IOException ignored) {
+            // start again
+        }
+    }
+
+    /** "Drawing maps n/N" under the map while the atlas is being drawn. */
+    private void drawAtlasProgress(Canvas c, RectF r) {
+        if (!atlasStyle || atlasModels == null || atlasDone.size() >= atlasModels.length) {
+            return;
+        }
+        text.setTextAlign(Paint.Align.RIGHT);
+        text.setTextSize(2.4f * u);
+        text.setColor(Color.argb(200, 255, 236, 170));
+        c.drawText("Drawing maps " + atlasDone.size() + "/" + atlasModels.length, r.right - 3f * u, r.bottom - 3.2f * u, text);
+        text.setTextAlign(Paint.Align.CENTER);
     }
 
     // ---- Area names --------------------------------------------------------------------

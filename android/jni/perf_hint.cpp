@@ -206,8 +206,9 @@ extern "C" bool rt64_android_overlap_frames() {
     return g_overlap.load();
 }
 
-// Video > Draw Batching: RT64 draws runs of similar draws with one call (RasterPS.hlsl,
-// FramebufferRenderer::androidPlanBatches). Read once when RT64 starts.
+// Video > Draw Batching (Off / Same Textures / All): RT64 draws runs of similar draws with one
+// call (RasterPS.hlsl, FramebufferRenderer::androidPlanBatches). Whether it's on is read once
+// when RT64 starts; Same Textures vs All (rt64_android_set_batch_any_texture) changes live.
 static std::atomic<bool> g_batching{true};
 
 extern "C" void bt_android_set_draw_batching(bool on) {

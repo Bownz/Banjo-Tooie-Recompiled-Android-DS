@@ -1632,6 +1632,17 @@ bool bt_map_wants_seed(uint32_t key, float x, float y, float z) {
     return true;
 }
 
+// The last build's per-pixel kinds and ground heights, for the atlas painter (map_atlas.cpp).
+// Only for the thread that builds maps (the pointers stay valid until its next build).
+bool bt_cache_layers(uint32_t key, int& W, int& H, float& minX, float& minZ, float& scale,
+                     const uint8_t*& kind, const int16_t*& groundY) {
+    if (!g_cache.valid || g_cache.key != key || g_cache.kind.empty() || g_cache.groundY.size() != g_cache.kind.size()) return false;
+    W = g_cache.W; H = g_cache.H; minX = g_cache.minX; minZ = g_cache.minZ; scale = g_cache.scale;
+    kind = g_cache.kind.data();
+    groundY = g_cache.groundY.data();
+    return true;
+}
+
 bool bt_build_map(const uint8_t* rdram, int maxSize, float capY, std::vector<int32_t>& out, float meta[5]) {
     return bt_build_map_keyed(rdram, maxSize, capY, 0, out, meta);
 }
@@ -1799,6 +1810,10 @@ bool bt_floor_above(const uint8_t* rdram, float x, float y, float z) {
 #ifndef BT_MAP_TEST
 // GameState.buildMap: runs on a background thread. capY: leave out what's entirely above it
 // (a lower storey's map), or >= 1e8 for the whole area.
+extern int g_btMapStyle;   // map_atlas.cpp
+void bt_atlas_paint(int W, int H, float minX, float minZ, float s, const uint8_t* kind, const int16_t* groundY,
+                    const int32_t* classic, std::vector<int32_t>& out);
+
 extern "C" JNIEXPORT jintArray JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeBuildMap(JNIEnv* env, jclass, jint maxSize, jfloat capY, jint key, jfloatArray info) {
     uint8_t* rdram = bt_android_running_rdram();
@@ -1806,6 +1821,18 @@ Java_io_github_bownz_btrecomp_GameState_nativeBuildMap(JNIEnv* env, jclass, jint
     std::vector<int32_t> out;
     float meta[5];
     if (!bt_build_map_keyed(rdram, maxSize, capY, uint32_t(key), out, meta)) return nullptr;
+    if (g_btMapStyle == 1) {
+        // Map Style: Atlas (map_atlas.cpp), painted from what the build worked out.
+        int W, H;
+        float minX, minZ, scale;
+        const uint8_t* kind;
+        const int16_t* gy;
+        std::vector<int32_t> painted;
+        if (bt_cache_layers(uint32_t(key), W, H, minX, minZ, scale, kind, gy) && size_t(W) * H == out.size()) {
+            bt_atlas_paint(W, H, minX, minZ, scale, kind, gy, out.data(), painted);
+            out.swap(painted);
+        }
+    }
     jintArray pixels = env->NewIntArray(jsize(out.size()));
     if (pixels == nullptr) return nullptr;
     env->SetIntArrayRegion(pixels, 0, jsize(out.size()), reinterpret_cast<const jint*>(out.data()));

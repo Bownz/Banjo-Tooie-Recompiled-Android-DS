@@ -24,6 +24,11 @@ final class GameState {
     private static native void nativeBackgroundThread();
     private static native boolean nativeEntryPoint(float[] out);
     private static native int[] nativeBuildMap(int maxSize, float capY, int key, float[] info);
+    private static native void nativeSetMapStyle(int style);
+    private static native int[] nativeAtlasModels();
+    private static native int nativeAtlasFingerprint(int asset);
+    private static native int nativeCurrentFingerprint();
+    private static native int[] nativeAtlasBuild(int asset, float capY, int key, float[] info);
     private static native int[] nativeBuildDetail(int key, float x0, float z0, float x1, float z1, int maxSize, float[] info);
     private static native byte[] nativeWaterMask(int key);
     private static native int[] nativeBackdrop(int key, float[] info);
@@ -187,6 +192,78 @@ final class GameState {
         MapImage map = new MapImage(bitmap, info[2], info[3], info[4], key, waterMask(waterBytes, w, h));
         float[] bdInfo = new float[5];
         int[] bd = nativeBackdrop(key, bdInfo);
+        int bw = (int) bdInfo[0], bh = (int) bdInfo[1];
+        if (bd != null && bw > 0 && bh > 0 && bd.length == bw * bh) {
+            map.backdrop = new MapImage(android.graphics.Bitmap.createBitmap(bd, bw, bh, android.graphics.Bitmap.Config.ARGB_8888),
+                bdInfo[2], bdInfo[3], bdInfo[4]);
+        }
+        return map;
+    }
+
+    /** Map Style: true = Atlas (map_atlas.cpp), false = Classic. */
+    static void setMapStyle(boolean atlas) {
+        try {
+            nativeSetMapStyle(atlas ? 1 : 0);
+        } catch (UnsatisfiedLinkError e) {
+            // older library
+        }
+    }
+
+    /** The ROM's level map models (asset numbers), or null before the ROM is loaded. */
+    static int[] atlasModels() {
+        try {
+            return nativeAtlasModels();
+        } catch (UnsatisfiedLinkError e) {
+            return null;
+        }
+    }
+
+    static int atlasFingerprint(int asset) {
+        try {
+            return nativeAtlasFingerprint(asset);
+        } catch (UnsatisfiedLinkError e) {
+            return 0;
+        }
+    }
+
+    /** Fingerprint of the area loaded now (its collision list), 0 if none. */
+    static int currentFingerprint() {
+        try {
+            return nativeCurrentFingerprint();
+        } catch (UnsatisfiedLinkError e) {
+            return 0;
+        }
+    }
+
+    /**
+     * One level model's map drawn from the ROM in the atlas style (capY as for buildMap).
+     * storeysOut (3 floats) gets the heights between its storeys (NaN where none).
+     */
+    static MapImage atlasBuild(int asset, float capY, float[] storeysOut) {
+        float[] info = new float[8];
+        int key = buildKeys.getAndIncrement();
+        int[] pixels;
+        try {
+            pixels = nativeAtlasBuild(asset, capY, key, info);
+        } catch (UnsatisfiedLinkError e) {
+            return null;
+        }
+        int w = (int) info[0], h = (int) info[1];
+        if (pixels == null || w <= 0 || h <= 0 || pixels.length != w * h) {
+            return null;
+        }
+        if (storeysOut != null) {
+            System.arraycopy(info, 5, storeysOut, 0, Math.min(3, storeysOut.length));
+        }
+        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(pixels, w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        MapImage map = new MapImage(bitmap, info[2], info[3], info[4]);
+        float[] bdInfo = new float[5];
+        int[] bd;
+        try {
+            bd = nativeBackdrop(key, bdInfo);
+        } catch (UnsatisfiedLinkError e) {
+            bd = null;
+        }
         int bw = (int) bdInfo[0], bh = (int) bdInfo[1];
         if (bd != null && bw > 0 && bh > 0 && bd.length == bw * bh) {
             map.backdrop = new MapImage(android.graphics.Bitmap.createBitmap(bd, bw, bh, android.graphics.Bitmap.Config.ARGB_8888),

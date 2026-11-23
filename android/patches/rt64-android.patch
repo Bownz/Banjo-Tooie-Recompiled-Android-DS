@@ -852,10 +852,10 @@ index 7a8c13b..bd198be 100644
          VI lastScreenVI;
          uint64_t lastScreenHash;
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..d7ba472 100644
+index 5a331aa..678c219 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -4,13 +4,353 @@
+@@ -4,13 +4,358 @@
  
  #include "rt64_workload_queue.h"
  
@@ -1188,6 +1188,11 @@ index 5a331aa..d7ba472 100644
 +    androidAutoRate.enabled.store(enabled != 0, std::memory_order_relaxed);
 +}
 +
++// Video > Draw Batching = All (src/android_config.cpp); Same Textures otherwise.
++extern "C" void rt64_android_set_batch_any_texture(int enabled) {
++    RT64::FramebufferRenderer::androidBatchAnyTexture.store(enabled != 0, std::memory_order_relaxed);
++}
++
 +// Video > Shader Mode (src/android_config.cpp): 1 = Single.
 +extern "C" void rt64_android_set_single_shader(int enabled) {
 +    androidSingleShader.store(enabled != 0, std::memory_order_relaxed);
@@ -1209,7 +1214,7 @@ index 5a331aa..d7ba472 100644
      // WorkloadQueue
  
      WorkloadQueue::WorkloadQueue() {
-@@ -86,8 +426,33 @@ namespace RT64 {
+@@ -86,8 +431,33 @@ namespace RT64 {
  
      void WorkloadQueue::waitForIdle() {
          std::unique_lock<std::mutex> threadLock(threadMutex);
@@ -1243,7 +1248,7 @@ index 5a331aa..d7ba472 100644
      void WorkloadQueue::waitForWorkloadId(uint64_t waitId) {
          std::unique_lock<std::mutex> workloadLock(workloadIdMutex);
          workloadIdCondition.wait(workloadLock, [&]() {
-@@ -102,7 +467,11 @@ namespace RT64 {
+@@ -102,7 +472,11 @@ namespace RT64 {
          vertexProcessor = std::make_unique<VertexProcessor>(ext.device);
          framebufferRenderer = std::make_unique<FramebufferRenderer>(ext.workloadGraphicsWorker, true, ext.createdGraphicsAPI, ext.shaderLibrary);
          renderFramebufferManager = std::make_unique<RenderFramebufferManager>(ext.device);
@@ -1255,7 +1260,7 @@ index 5a331aa..d7ba472 100644
  
          projectionProcessor.setup(ext.workloadGraphicsWorker);
          transformProcessor.setup(ext.workloadGraphicsWorker);
-@@ -188,7 +557,25 @@ namespace RT64 {
+@@ -188,7 +562,25 @@ namespace RT64 {
          switch (resolutionMode) {
          case UserConfiguration::Resolution::WindowIntegerScale:
              if (ext.sharedResources->swapChainHeight > 0) {
@@ -1281,7 +1286,7 @@ index 5a331aa..d7ba472 100644
              }
              else {
                  resolutionMultiplier = 1.0f;
-@@ -226,6 +613,12 @@ namespace RT64 {
+@@ -226,6 +618,12 @@ namespace RT64 {
                  workloadConfig.targetRate = ext.sharedResources->swapChainRate;
              }
  
@@ -1294,7 +1299,7 @@ index 5a331aa..d7ba472 100644
              break;
          case UserConfiguration::RefreshRate::Original:
          default:
-@@ -254,6 +647,9 @@ namespace RT64 {
+@@ -254,6 +652,9 @@ namespace RT64 {
          workloadConfig.postBlendNoiseNegative = ext.sharedResources->emulatorConfig.dither.postBlendNoiseNegative;
          
          if (ext.sharedResources->fbConfigChanged || sizeChanged) {
@@ -1304,7 +1309,7 @@ index 5a331aa..d7ba472 100644
              {
                  // Wait until the other queue has stopped using the interpolated color targets.
                  std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
-@@ -273,12 +669,26 @@ namespace RT64 {
+@@ -273,12 +674,26 @@ namespace RT64 {
              ext.sharedResources->interpolatedColorTargets.clear();
          }
  
@@ -1331,7 +1336,7 @@ index 5a331aa..d7ba472 100644
      }
  
      void WorkloadQueue::threadConfigurationValidate() {
-@@ -300,7 +710,14 @@ namespace RT64 {
+@@ -300,7 +715,14 @@ namespace RT64 {
          RenderTargetManager &targetManager = ext.sharedResources->renderTargetManager;
          const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
  
@@ -1346,7 +1351,7 @@ index 5a331aa..d7ba472 100644
  
          const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
          const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
-@@ -484,6 +901,10 @@ namespace RT64 {
+@@ -484,6 +906,10 @@ namespace RT64 {
  
                      if (colorTarget != nullptr) {
                          rtWidth = std::max(rtWidth, colorTarget->width);
@@ -1357,7 +1362,7 @@ index 5a331aa..d7ba472 100644
                          rtHeight = std::max(rtHeight, colorTarget->height);
                          chosenRt = colorTarget;
                      }
-@@ -635,7 +1056,11 @@ namespace RT64 {
+@@ -635,7 +1061,11 @@ namespace RT64 {
                      drawParams.rtEnabled = workloadConfig.raytracingEnabled;
                      drawParams.submissionFrame = workload.submissionFrame;
                      drawParams.deltaTimeMs = deltaTimeMs;
@@ -1369,7 +1374,20 @@ index 5a331aa..d7ba472 100644
                      drawParams.postBlendNoise = workloadConfig.postBlendNoise;
                      drawParams.postBlendNoiseNegative = workloadConfig.postBlendNoiseNegative;
                      drawParams.maxGameCall = std::min(gameCallCountMax - gameCallCursor, fbPair.gameCallCount);
-@@ -699,7 +1124,12 @@ namespace RT64 {
+@@ -645,6 +1075,12 @@ namespace RT64 {
+                 gameCallCursor += fbPair.gameCallCount;
+             }
+ 
++#       if defined(__ANDROID__)
++            // Draw batching compares the textures each draw samples (FramebufferRenderer).
++            framebufferRenderer->androidGpuTiles = workload.drawData.gpuTiles.empty() ? nullptr : workload.drawData.gpuTiles.data();
++            framebufferRenderer->androidGpuTileCount = workload.drawData.gpuTiles.size();
++#       endif
++
+             // Create all GPU tile mappings and upload them.
+             if (!workload.drawData.gpuTiles.empty()) {
+                 std::pair<size_t, size_t> gpuTileRange;
+@@ -699,7 +1135,12 @@ namespace RT64 {
  
              workerMutex.lock();
              ext.workloadGraphicsWorker->commandList->begin();
@@ -1382,7 +1400,7 @@ index 5a331aa..d7ba472 100644
              ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 0);
              framebufferRenderer->endFramebuffers(ext.workloadGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, workloadConfig.raytracingEnabled);
              framebufferRenderer->recordSetup(ext.workloadGraphicsWorker, bufferUploaders, processRSP ? rspProcessor.get() : nullptr, processWorldVertices ? vertexProcessor.get() : nullptr, &workload.outputBuffers, workloadConfig.raytracingEnabled);
-@@ -708,6 +1138,13 @@ namespace RT64 {
+@@ -708,6 +1149,13 @@ namespace RT64 {
              uint32_t framebufferIndex = 0;
              for (uint32_t f = 0; f < fbPairCount; f++) {
                  const FramebufferPair &fbPair = workload.fbPairs[f];
@@ -1396,7 +1414,7 @@ index 5a331aa..d7ba472 100644
                  bool validTargets = getTargetsFromPair(f);
                  fbManager.recordOperations(ext.workloadGraphicsWorker, &workload.fbChangePool, &workload.fbStorage, ext.shaderLibrary, ext.textureCache,
                      fbPair.startFbOperations, targetManager, fixedResScale, f, workload.submissionFrame);
-@@ -835,22 +1272,62 @@ namespace RT64 {
+@@ -835,22 +1283,62 @@ namespace RT64 {
                  
                  fbManager.recordOperations(ext.workloadGraphicsWorker, &workload.fbChangePool, &workload.fbStorage, ext.shaderLibrary, ext.textureCache,
                      fbPair.endFbOperations, targetManager, fixedResScale, f, workload.submissionFrame);
@@ -1459,7 +1477,7 @@ index 5a331aa..d7ba472 100644
          }
  
          if ((overrideTarget != nullptr) && !usingMSAA) {
-@@ -880,6 +1357,12 @@ namespace RT64 {
+@@ -880,6 +1368,12 @@ namespace RT64 {
  
      void WorkloadQueue::renderThreadLoop() {
          Thread::setCurrentThreadName("RT64 Workload");
@@ -1472,7 +1490,7 @@ index 5a331aa..d7ba472 100644
  
          WorkloadConfiguration workloadConfig;
          int64_t logicalTicks = 0;
-@@ -1070,7 +1553,19 @@ namespace RT64 {
+@@ -1070,7 +1564,19 @@ namespace RT64 {
                          const int64_t currentTimeMicro = workloadTimer.elapsedMicroseconds() - setupTimeMicro;
                          const int64_t expectedTimeMicro = frame * maxTimePerFrameMicro;
                          const int64_t measuredFrameMicro = renderTimeTotalMicro / framesRendered;
@@ -1493,7 +1511,7 @@ index 5a331aa..d7ba472 100644
                              displayTicks += workload.viOriginalRate;
                              skippedFrames = true;
                              continue;
-@@ -1117,11 +1612,22 @@ namespace RT64 {
+@@ -1117,11 +1623,22 @@ namespace RT64 {
                      }
  
                      int64_t renderTimeMicro = workloadTimer.elapsedMicroseconds();
@@ -1516,7 +1534,7 @@ index 5a331aa..d7ba472 100644
  
                      // After one frame is rendered, we indicate the workload has been processed so the present thread can start presenting frames as soon as it can.
                      if (frame == 0) {
-@@ -1162,6 +1668,40 @@ namespace RT64 {
+@@ -1162,6 +1679,40 @@ namespace RT64 {
                      ext.sharedResources->interpolatedCondition.notify_all();
                  }
  
@@ -1557,7 +1575,7 @@ index 5a331aa..d7ba472 100644
                  threadConfigurationValidate();
  
                  if (!workload.paused) {
-@@ -1174,6 +1714,10 @@ namespace RT64 {
+@@ -1174,6 +1725,10 @@ namespace RT64 {
                  workloadProfiler.reset();
              }
          }
@@ -1568,7 +1586,7 @@ index 5a331aa..d7ba472 100644
      }
      
      void WorkloadQueue::idleThreadLoop() {
-@@ -1206,6 +1750,14 @@ namespace RT64 {
+@@ -1206,6 +1761,14 @@ namespace RT64 {
              }
  
              if (threadsRunning) {
@@ -1670,10 +1688,10 @@ index 69a82ac..3f7dd70 100644
              if (device != nullptr) {
                  create(device);
 diff --git a/src/render/rt64_framebuffer_renderer.cpp b/src/render/rt64_framebuffer_renderer.cpp
-index ff85358..2645707 100644
+index ff85358..6a8ec88 100644
 --- a/src/render/rt64_framebuffer_renderer.cpp
 +++ b/src/render/rt64_framebuffer_renderer.cpp
-@@ -53,6 +53,31 @@ namespace interop {
+@@ -53,6 +53,32 @@ namespace interop {
  };
  
  namespace RT64 {
@@ -1686,6 +1704,7 @@ index ff85358..2645707 100644
 +    std::atomic<uint64_t> AndroidRenderStats::ditherDraws{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::pipelineSwitches{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::batchedDraws{ 0 };
++    std::atomic<bool> FramebufferRenderer::androidBatchAnyTexture{ false };
 +    std::atomic<uint64_t> AndroidRenderStats::passPixels{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::readingPasses{ 0 };
 +    std::atomic<uint64_t> AndroidRenderStats::tileCopies{ 0 };
@@ -1705,7 +1724,7 @@ index ff85358..2645707 100644
      // TEMPORARY diagnostic (Banjo-Tooie port). RT64 takes the widescreen decision
      // twice: the projection processor widens the projection's field of view, and
      // this file decides whether the viewport is stretched instead. The two must
-@@ -337,7 +362,14 @@ namespace RT64 {
+@@ -337,7 +363,14 @@ namespace RT64 {
          
          const bool createSet = (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
          if (createSet) {
@@ -1720,7 +1739,7 @@ index ff85358..2645707 100644
          }
  
          if (createSet || (descriptorTextureReplacementMapEnabled != textureCacheReplacementMapEnabled)) {
-@@ -487,6 +519,9 @@ namespace RT64 {
+@@ -487,6 +520,9 @@ namespace RT64 {
          worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(fbStorage->depthTarget->texture.get(), readOnly ? depthReadState : RenderTextureLayout::DEPTH_WRITE));
          worker->commandList->setFramebuffer(renderFramebuffer);
          depthState = readOnly;
@@ -1730,7 +1749,7 @@ index ff85358..2645707 100644
          return true;
      }
      
-@@ -537,8 +572,15 @@ namespace RT64 {
+@@ -537,8 +573,15 @@ namespace RT64 {
              switchToGraphicsPipeline();
          }
          
@@ -1747,7 +1766,7 @@ index ff85358..2645707 100644
              switch (drawCall.type) {
              case InstanceDrawCall::Type::IndexedTriangles: 
              case InstanceDrawCall::Type::RawTriangles:
-@@ -579,7 +621,12 @@ namespace RT64 {
+@@ -579,7 +622,12 @@ namespace RT64 {
                  const interop::OtherMode otherMode = triangles.shaderDesc.otherMode;
                  bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
                  bool depthWrite = otherMode.zUpd();
@@ -1761,14 +1780,14 @@ index ff85358..2645707 100644
                      switchToDepthRead();
                  }
                  else if (!depthDecal && depthWrite) {
-@@ -594,17 +641,53 @@ namespace RT64 {
+@@ -594,17 +642,53 @@ namespace RT64 {
                  if (previousPipeline != triangles.pipeline) {
                      worker->commandList->setPipeline(triangles.pipeline);
                      previousPipeline = triangles.pipeline;
 +#               if defined(__ANDROID__)
 +                    AndroidRenderStats::pipelineSwitches.fetch_add(1, std::memory_order_relaxed);
 +#               endif
-+                }
+                 }
 +
 +#           if defined(__ANDROID__)
 +                if (depthDecal && triangles.hardwareDecal) {
@@ -1779,7 +1798,7 @@ index ff85358..2645707 100644
 +                    // resolution scale, decals a little behind the surface (the ring under a
 +                    // charging Kong, shadows) partly failed at high resolutions.
 +                    worker->commandList->setDepthBias(-8192.0f, 0.0f, -2.0f * std::max(framebuffer.resolutionScaleY, 1.0f));
-                 }
++                }
 +#           endif
                  
 +#           if defined(__ANDROID__)
@@ -1815,7 +1834,7 @@ index ff85358..2645707 100644
                      if (triangles.postBlendDitherNoiseNegative) {
                          worker->commandList->setPipeline(postBlendDitherNoiseSubNegativePipeline);
                      }
-@@ -1254,6 +1337,9 @@ namespace RT64 {
+@@ -1254,6 +1338,9 @@ namespace RT64 {
      }
  
      void FramebufferRenderer::recordFramebuffer(RenderWorker *worker, uint32_t framebufferIndex) {
@@ -1825,7 +1844,7 @@ index ff85358..2645707 100644
          // Submit all transition barriers first.
          thread_local std::vector<RenderTextureBarrier> startBarriers;
          startBarriers.clear();
-@@ -1269,6 +1355,14 @@ namespace RT64 {
+@@ -1269,6 +1356,14 @@ namespace RT64 {
          if (colorTarget != nullptr) {
              startBarriers.emplace_back(RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE));
          }
@@ -1840,7 +1859,7 @@ index ff85358..2645707 100644
  
          startBarriers.emplace_back(RenderTextureBarrier(depthTarget->texture.get(), RenderTextureLayout::DEPTH_WRITE));
          worker->commandList->barriers(RenderBarrierStage::GRAPHICS, startBarriers);
-@@ -1467,6 +1561,7 @@ namespace RT64 {
+@@ -1467,6 +1562,7 @@ namespace RT64 {
          const float originalWidth = p.fbWidth * p.resolutionScale.y;
          const float commonHeight = float(p.targetHeight);
          framebuffer.viewport = RenderViewport(0.0f, 0.0f, wideWidth, commonHeight);
@@ -1848,7 +1867,7 @@ index ff85358..2645707 100644
          
          const interop::float2 halfViewportSize = { framebuffer.viewport.width / 2.0f, framebuffer.viewport.height / 2.0f };
          const interop::float2 halfPixelOffset = { 1.0f / framebuffer.viewport.width, -1.0f / framebuffer.viewport.height };
-@@ -1713,10 +1808,15 @@ namespace RT64 {
+@@ -1713,10 +1809,15 @@ namespace RT64 {
                          triangles.shaderDesc = call.shaderDesc;
  
                          RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
@@ -1864,7 +1883,7 @@ index ff85358..2645707 100644
                              const bool copyMode = (call.shaderDesc.otherMode.cycleType() == G_CYC_COPY);
                              triangles.pipeline = rasterShaderUber->getPipeline(
                                  !copyMode && call.shaderDesc.otherMode.zCmp() && (call.shaderDesc.otherMode.zMode() != ZMODE_DEC),
-@@ -1865,7 +1965,92 @@ namespace RT64 {
+@@ -1865,7 +1966,126 @@ namespace RT64 {
          checkRasterScene(rasterScene);
      }
  
@@ -1899,6 +1918,39 @@ index ff85358..2645707 100644
 +            return (uint32_t(om.zMode() == ZMODE_DEC) << 0) | (uint32_t(call.triangles.hardwareDecal) << 1) | (uint32_t(om.zUpd() != 0) << 2);
 +        };
 +
++        const bool anyTexture = androidBatchAnyTexture.load(std::memory_order_relaxed);
++        auto sameTextures = [&](uint32_t prevIndex, uint32_t nextIndex) {
++            if (anyTexture) {
++                return true;
++            }
++
++            if (androidGpuTiles == nullptr) {
++                return false;
++            }
++
++            const interop::RenderIndices &a = renderIndicesVector[prevIndex];
++            const interop::RenderIndices &b = renderIndicesVector[nextIndex];
++            if (a.rdpTileCount != b.rdpTileCount) {
++                return false;
++            }
++
++            for (uint32_t t = 0; t < a.rdpTileCount; t++) {
++                const size_t ta = size_t(a.rdpTileIndex) + t;
++                const size_t tb = size_t(b.rdpTileIndex) + t;
++                if ((ta >= androidGpuTileCount) || (tb >= androidGpuTileCount)) {
++                    return false;
++                }
++
++                const interop::GPUTile &ga = androidGpuTiles[ta];
++                const interop::GPUTile &gb = androidGpuTiles[tb];
++                if ((ga.textureIndex != gb.textureIndex) || (ga.flags.rawTMEM != gb.flags.rawTMEM)) {
++                    return false;
++                }
++            }
++
++            return true;
++        };
++
 +        auto joins = [&](const InstanceDrawCall &prev, const InstanceDrawCall &next) {
 +            return (next.triangles.pipeline == prev.triangles.pipeline) && (next.triangles.scissor == prev.triangles.scissor) &&
 +                (next.triangles.screenScale.x == prev.triangles.screenScale.x) && (next.triangles.screenScale.y == prev.triangles.screenScale.y) &&
@@ -1920,7 +1972,8 @@ index ff85358..2645707 100644
 +
 +                    size_t end = k + 1;
 +                    while ((end < indices.size()) && (indices[end] < callCount) && batchable(instanceDrawCallVector[indices[end]]) &&
-+                        joins(instanceDrawCallVector[indices[end - 1]], instanceDrawCallVector[indices[end]]))
++                        joins(instanceDrawCallVector[indices[end - 1]], instanceDrawCallVector[indices[end]]) &&
++                        sameTextures(indices[end - 1], indices[end]))
 +                    {
 +                        end++;
 +                    }
@@ -1958,7 +2011,7 @@ index ff85358..2645707 100644
          std::vector<BufferUploader::Upload> shaderUploads = {
              { renderIndicesVector.data(), { 0, renderIndicesVector.size() }, sizeof(interop::RenderIndices), RenderBufferFlag::STORAGE, { }, &renderIndicesBuffer},
 diff --git a/src/render/rt64_framebuffer_renderer.h b/src/render/rt64_framebuffer_renderer.h
-index 3add9c3..dd69a9d 100644
+index 3add9c3..be974a7 100644
 --- a/src/render/rt64_framebuffer_renderer.h
 +++ b/src/render/rt64_framebuffer_renderer.h
 @@ -4,6 +4,8 @@
@@ -2011,7 +2064,7 @@ index 3add9c3..dd69a9d 100644
      struct DynamicTextureView {
          const RenderTexture *texture = nullptr;
          uint32_t dstIndex = 0;
-@@ -69,6 +105,15 @@ namespace RT64 {
+@@ -69,6 +105,27 @@ namespace RT64 {
          std::vector<InstanceDrawCall> instanceDrawCallVector;
          std::vector<RenderPipelineProgram> hitGroupVector;
          std::vector<interop::RenderIndices> renderIndicesVector;
@@ -2023,11 +2076,23 @@ index 3add9c3..dd69a9d 100644
 +        std::vector<uint32_t> androidBatchBase;
 +        std::vector<uint32_t> androidBatchFaces;
 +        void androidPlanBatches();
++
++        // This frame's GPU tiles (the workload's), to tell which textures each draw samples.
++        // Null when unknown (then draws are only batched in the All mode).
++        const interop::GPUTile *androidGpuTiles = nullptr;
++        size_t androidGpuTileCount = 0;
++
++        // Video > Draw Batching = All: also batch draws that sample different textures. A run of
++        // such draws then picks its textures per pixel with a non-uniform index into the texture
++        // array, which Adreno drivers seem to get wrong at times (21 Nov: brief white squares and
++        // wrong textures near Mumbo). Same Textures (the default) only batches draws whose tiles
++        // use the very same textures, so the index stays uniform across the run.
++        static std::atomic<bool> androidBatchAnyTexture;
 +#   endif
          std::vector<DynamicTextureView> dynamicTextureViewVector;
          std::vector<RenderTextureBarrier> dynamicTextureBarrierVector;
          std::unique_ptr<BufferUploader> shaderUploader;
-@@ -118,6 +163,7 @@ namespace RT64 {
+@@ -118,6 +175,7 @@ namespace RT64 {
              std::set<RenderTarget *> transitionRenderTargetSet;
              RenderTargetDrawCall renderTargetDrawCall;
              RenderViewport viewport;

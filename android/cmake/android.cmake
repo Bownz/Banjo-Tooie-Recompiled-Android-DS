@@ -159,6 +159,7 @@ function(bt_configure_android_target target)
         "${CMAKE_SOURCE_DIR}/android/jni/game_state.cpp"
         "${CMAKE_SOURCE_DIR}/android/jni/map_render.cpp"
         "${CMAKE_SOURCE_DIR}/android/jni/sprites.cpp"
+        "${CMAKE_SOURCE_DIR}/android/jni/map_atlas.cpp"
         "${CMAKE_SOURCE_DIR}/android/jni/perf_hint.cpp"
         "${CMAKE_SOURCE_DIR}/android/jni/cpu_layout.cpp"
         "${CMAKE_SOURCE_DIR}/android/jni/slowdown_recorder.cpp"

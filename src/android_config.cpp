@@ -48,6 +48,7 @@ extern "C" void rt64_android_set_auto_framerate(int enabled);  // rt64-android.p
 extern "C" void rt64_android_set_dynamic_resolution(int enabled);   // rt64-android.patch
 extern "C" void rt64_android_set_hardware_depth_clip(int enabled);  // rt64-android.patch
 extern "C" void rt64_android_set_single_shader(int enabled);        // rt64-android.patch
+extern "C" void rt64_android_set_batch_any_texture(int enabled);    // rt64-android.patch
 extern "C" void bt_android_set_live_log(int on);              // android/jni/perf_monitor.cpp
 
 
@@ -82,6 +83,7 @@ namespace {
     }
     std::atomic<bool> cutscene_dim{ true };
     std::atomic<bool> bottom_map{ true };
+    std::atomic<int> map_style{ 0 };   // Bottom Screen Map Style: 0 Atlas, 1 Classic
 
     std::filesystem::path config_file(const char* name) {
         return recomp::get_config_path() / name;
@@ -218,6 +220,24 @@ namespace {
         config.add_option_change_callback("android_bottom_map",
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
                 bottom_map.store(std::get<uint32_t>(cur) == 1u);
+                save_touch_config(context);
+            });
+        static EnumOptionVector map_styles = {
+            {0u, "Atlas", "Atlas"},
+            {1u, "Classic", "Classic"},
+        };
+        config.add_enum_option(
+            "android_map_style",
+            "Map Style",
+            "Atlas: the app's own drawn look (meadows, paths, stone, water), and every level's map is "
+            "drawn from your ROM in the background the first time, storeys included, so maps show up "
+            "straight away. Classic: built from the game's own textures as you go.",
+            map_styles,
+            0u
+        );
+        config.add_option_change_callback("android_map_style",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
+                map_style.store(int(std::get<uint32_t>(cur)));
                 save_touch_config(context);
             });
         config.add_enum_option(
@@ -611,15 +631,26 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
                 rt64_android_set_single_shader(std::get<uint32_t>(cur) == 1u ? 1 : 0);
             });
+        static EnumOptionVector batching_options = {
+            {0u, "Off", "Off"},
+            {1u, "SameTextures", "Same Textures"},
+            {2u, "All", "All"},
+        };
         graphics_config.add_enum_option(
             "android_draw_batching",
             "Draw Batching",
-            "Takes effect the next time the game starts. On: runs of things drawn the same way "
-            "go to the GPU as one draw instead of dozens, which is what the GPU spends most of its "
-            "time on here. Same picture. Off is the old way, for comparison.",
-            onoff_options,
+            "Runs of things drawn the same way go to the GPU as one draw instead of dozens, which "
+            "is what the GPU spends most of its time on here. Same Textures (recommended): only "
+            "things using the same textures. All: also things with different textures; faster, "
+            "but can show brief wrong textures or white squares on some GPUs. Turning it on or "
+            "off takes effect the next time the game starts.",
+            batching_options,
             1u
         );
+        graphics_config.add_option_change_callback("android_draw_batching",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+                rt64_android_set_batch_any_texture(std::get<uint32_t>(cur) == 2u ? 1 : 0);
+            });
         graphics_config.add_enum_option(
             "android_overlap_frames",
             "Overlap Frames",
@@ -721,6 +752,7 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
         option(t, "android_bottom_screen"),
         option(t, "android_bottom_buttons"),
         option(t, "android_bottom_map"),
+        option(t, "android_map_style"),
         option(t, "android_cutscene_dim"),
     }, { g, t });
 
@@ -824,8 +856,9 @@ void bt::android::after_config_loaded() {
         }
         const recomp::config::ConfigValueVariant batching = graphics.get_option_value("android_draw_batching");
         const uint32_t* db = std::get_if<uint32_t>(&batching);
-        bt_android_set_draw_batching(db == nullptr || *db == 1u);
-        std::printf("Draw Batching: %s\n", (db == nullptr || *db == 1u) ? "on" : "off");
+        bt_android_set_draw_batching(db == nullptr || *db != 0u);
+        rt64_android_set_batch_any_texture((db != nullptr && *db == 2u) ? 1 : 0);
+        std::printf("Draw Batching: %s\n", (db == nullptr || *db == 1u) ? "Same Textures" : ((*db == 2u) ? "All" : "Off"));
         const recomp::config::ConfigValueVariant overlap = graphics.get_option_value("android_overlap_frames");
         const uint32_t* ov = std::get_if<uint32_t>(&overlap);
         bt_android_set_overlap_frames(ov == nullptr || *ov == 1u);
@@ -923,9 +956,9 @@ Java_io_github_bownz_btrecomp_TouchInput_nativeTouchFeedback(JNIEnv*, jclass) {
 }
 
 // Bit 1 Bottom Screen Buttons, bit 2 Dim During Cutscenes, bit 4 Video > Show FPS, bit 8 buttons
-// slide in while Z is held, bit 16 Bottom Screen Map off.
+// slide in while Z is held, bit 16 Bottom Screen Map off, bit 32 Map Style Classic.
 extern "C" JNIEXPORT jint JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeBottomSettings(JNIEnv*, jclass) {
     const int buttons = bottom_buttons.load();
-    return (buttons != 0 ? 1 : 0) | (cutscene_dim.load() ? 2 : 0) | (show_fps.load() ? 4 : 0) | (buttons == 2 ? 8 : 0) | (bottom_map.load() ? 0 : 16);
+    return (buttons != 0 ? 1 : 0) | (cutscene_dim.load() ? 2 : 0) | (show_fps.load() ? 4 : 0) | (buttons == 2 ? 8 : 0) | (bottom_map.load() ? 0 : 16) | (map_style.load() == 1 ? 32 : 0);
 }
