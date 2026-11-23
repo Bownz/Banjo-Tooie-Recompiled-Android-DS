@@ -398,13 +398,17 @@ public final class BottomScreenView extends View {
             }
         } else {
             if (m != fadingInFor) {   // a new picture: fade it in (an area's first one from black)
+                // Within an area (another floor, a fresh build) the new picture crossfades over
+                // the one shown before.
+                crossFrom = shownBefore && old == null ? fadingInFor : null;
                 fadingInFor = m;
                 fadeInAt = now;
-                fadeFrom = shownBefore ? 1f : 0f;
+                fadeFrom = shownBefore && crossFrom == null ? 1f : 0f;
                 shownBefore = true;
             }
-            float fadeIn = Math.min(1f, fadeFrom + (now - fadeInAt) / 400f);
+            float fadeIn = Math.min(1f, fadeFrom + (now - fadeInAt) / (crossFrom != null ? 350f : 400f));
             if (fadeIn < 1f) animating = true;
+            else crossFrom = null;
             boolean viewMoving = false;
 
             // The view eases towards what was asked (zoom steps, close-up <-> whole, Recenter).
@@ -448,6 +452,12 @@ public final class BottomScreenView extends View {
             viewCz = cz;
             viewS = viewScale;
 
+            GameState.MapImage from = crossFrom;
+            if (from != null) {
+                mapPaint.setAlpha(255);
+                drawBackdrop(c, r, from, cx, cz, viewScale, mapPaint);
+                drawWorldBitmap(c, r, from.bitmap, from.minX, from.minZ, from.scale, cx, cz, viewScale, mapPaint);
+            }
             mapPaint.setAlpha(Math.round(255 * fadeIn));
             drawBackdrop(c, r, m, cx, cz, viewScale, mapPaint);
             drawWorldBitmap(c, r, m.bitmap, m.minX, m.minZ, m.scale, cx, cz, viewScale, mapPaint);
@@ -512,7 +522,7 @@ public final class BottomScreenView extends View {
     private long lastMapDraw;
     private float shownSpan = Float.NaN, wholeBlend = 0f;   // the view as shown, easing towards followSpan / mapWhole
     private boolean recentering;
-    private GameState.MapImage leavingMap, fadingInFor;
+    private GameState.MapImage leavingMap, fadingInFor, crossFrom;
     private float leavingCx, leavingCz, leavingS;
     private long leavingAt, fadeInAt;
     private float fadeFrom;
@@ -1598,6 +1608,9 @@ public final class BottomScreenView extends View {
         int id = onMenu ? 0 : GameState.mapGeometryId();   // title screen / file select: no map
         long now = SystemClock.uptimeMillis();
         stepAtlas(now);
+        if (mapCap >= GameState.WHOLE && mapImage != null) {
+            wholeImage = mapImage;   // what a lower floor is cut into (composeLayer)
+        }
         if (id != mapGeometry) {
             if (mapImage != null) {   // fade the area we're leaving out where it was
                 leavingMap = mapImage;
@@ -1612,6 +1625,11 @@ public final class BottomScreenView extends View {
             mapGeometryAt = now;
             mapRebuilt = false;
             mapImage = null;
+            wholeImage = null;
+            layerRaw = null;
+            layerMask = null;
+            fadingInFor = null;
+            crossFrom = null;
             detail = null;
             panX = panZ = 0f;
             panned = false;
@@ -1676,24 +1694,29 @@ public final class BottomScreenView extends View {
             }
         }
         if (wantedCap != mapCap) {
-            if (area >= 0) {
-                GameState.MapImage saved = mapMemory.get(mapKey(area, wantedCap));
-                if (saved != null && saved.key >= 0) {
-                    // A storey built earlier in this visit: switch to it and don't build it again
-                    // (0.9.20; walking between storeys rebuilt the map every time, nearly without
-                    // pause, and each build cost the renderer frames).
-                    mapImage = saved;
-                    mapCap = wantedCap;
-                    invalidate();
-                    return;
-                }
-                if (saved != null) {   // saved in an earlier session: show it, refresh behind it
-                    mapImage = saved;
-                    mapCap = wantedCap;
-                    invalidate();
-                }
+            if (layerBusy) {
+                return;
+            }
+            if (wantedCap >= GameState.WHOLE && wholeImage != null) {
+                // Out from under: back to the whole area (crossfades).
+                mapImage = wholeImage;
+                mapCap = GameState.WHOLE;
+                layerMask = null;
+                layerRaw = null;
+                invalidate();
+                return;
+            }
+            if (wantedCap < GameState.WHOLE) {
+                // A storey built earlier in this visit (or an earlier session) is cut in without
+                // building it again (0.9.20: walking between storeys rebuilt the map every time).
+                requestLayer(id, wantedCap, area >= 0 ? mapMemory.get(mapKey(area, wantedCap)) : null);
+                return;
             }
             buildMap(id, wantedCap);
+        } else if (mapCap < GameState.WHOLE && layerMask != null && layerRaw != null && !layerBusy
+                && now - layerCheckedAt < 50 && !layerMask.covers(GameState.position())) {
+            // Under another part of the floor above (not the one cut out): cut that out instead.
+            requestLayer(id, mapCap, layerRaw);
         } else if ((mapImage == null || !mapRebuilt) && now - mapGeometryAt > (mapImage != null ? 8000 : 1500)) {
             // With a saved map on screen the fresh build waits 8 s: entering an area, the game is
             // loading and the renderer has the least time to spare (0.9.20).
@@ -1724,7 +1747,12 @@ public final class BottomScreenView extends View {
             final GameState.MapImage result = built;
             post(() -> {
                 mapBuilding = false;
-                if (id == mapGeometry && result != null) {
+                if (id == mapGeometry && result != null && cap < GameState.WHOLE) {
+                    if (areaBefore >= 0 && areaBefore == areaAfter) {
+                        mapMemory.put(mapKey(areaBefore, cap), result);
+                    }
+                    requestLayer(id, cap, result);
+                } else if (id == mapGeometry && result != null) {
                     mapImage = result;
                     mapCap = cap;
                     if (areaBefore >= 0 && areaBefore == areaAfter) {
@@ -1849,6 +1877,266 @@ public final class BottomScreenView extends View {
             return false;
         }
         return tmp.renameTo(png);
+    }
+
+    // ---- Lower floors, cut in locally ----------------------------------------------------
+    // Under another floor (Gruntilda's hat, a bridge, a roof) the map shows the whole area as
+    // usual, with only the part over Banjo cut away to the floor below: a storey map (everything
+    // above a height left out) is compared with the whole-area map, and the patch where they
+    // differ that Banjo is under is taken from the storey map, with soft edges. The rest of the
+    // area (other high ground) stays as it is. Done on its own thread, so it never waits behind
+    // a map build.
+    private GameState.MapImage wholeImage, layerRaw;
+    private LayerMask layerMask;
+    private boolean layerBusy;
+    private final java.util.concurrent.ExecutorService layerWorker = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "BT map layer");
+        t.setPriority(Thread.MIN_PRIORITY);
+        return t;
+    });
+
+    /** Where a composed lower floor was cut out, in the whole map's pixels. */
+    private static final class LayerMask {
+        final boolean[] cut;
+        final int w, h;
+        final float minX, minZ, scale;
+
+        LayerMask(boolean[] cut, int w, int h, float minX, float minZ, float scale) {
+            this.cut = cut;
+            this.w = w;
+            this.h = h;
+            this.minX = minX;
+            this.minZ = minZ;
+            this.scale = scale;
+        }
+
+        /** Whether Banjo (x, y, z) is within the cut (or a few pixels from it). */
+        boolean covers(float[] p) {
+            if (p == null) return true;
+            int px = (int) ((p[0] - minX) * scale), pz = (int) ((p[2] - minZ) * scale);
+            int rad = Math.max(2, Math.round(60f * scale));
+            for (int z = Math.max(0, pz - rad); z <= Math.min(h - 1, pz + rad); z++)
+                for (int x = Math.max(0, px - rad); x <= Math.min(w - 1, px + rad); x++)
+                    if (cut[z * w + x]) return true;
+            return false;
+        }
+    }
+
+    /**
+     * Shows the floor below at cap: storey is its map (null: from the atlas, else built). Cut into
+     * the whole-area map around Banjo when there is one.
+     */
+    private void requestLayer(int id, float cap, GameState.MapImage storey) {
+        layerBusy = true;
+        final float[] p = GameState.position();
+        final GameState.MapImage whole = wholeImage;
+        final boolean atlas = atlasStyle;
+        final int area = GameState.area();
+        layerWorker.execute(() -> {
+            GameState.MapImage raw = storey;
+            if (raw == null && atlas) {
+                raw = loadAtlas(GameState.currentFingerprint(), cap);
+            }
+            Object[] composed = raw != null && whole != null && p != null ? composeLayer(whole, raw, p) : null;
+            final GameState.MapImage got = raw;
+            post(() -> {
+                layerBusy = false;
+                if (id != mapGeometry) {
+                    return;
+                }
+                if (got == null) {
+                    buildMap(id, cap);   // not drawn yet: build it (comes back here)
+                    return;
+                }
+                if (area >= 0) {
+                    mapMemory.put(mapKey(area, cap), got);
+                }
+                layerRaw = got;
+                mapCap = cap;
+                if (composed != null) {
+                    mapImage = (GameState.MapImage) composed[0];
+                    layerMask = (LayerMask) composed[1];
+                } else if (whole != null && p != null) {
+                    // Nothing over him differs on the map: the whole area already shows his floor.
+                    mapImage = whole;
+                    layerMask = null;
+                } else {
+                    mapImage = got;
+                    layerMask = null;
+                }
+                invalidate();
+            });
+        });
+    }
+
+    /**
+     * The whole map with the patch over p taken from the storey map: {MapImage, LayerMask}, or
+     * null when the two maps are the same around p.
+     */
+    private static Object[] composeLayer(GameState.MapImage whole, GameState.MapImage storey, float[] p) {
+        final int w = whole.bitmap.getWidth(), h = whole.bitmap.getHeight();
+        final int sw = storey.bitmap.getWidth(), sh = storey.bitmap.getHeight();
+        int[] a = new int[w * h];
+        whole.bitmap.getPixels(a, 0, w, 0, 0, w, h);
+        int[] sp = new int[sw * sh];
+        storey.bitmap.getPixels(sp, 0, sw, 0, 0, sw, sh);
+        // (About 60 MB for a 2048² map while it runs; it runs once per floor switch.)
+        // The storey map resampled onto the whole map's pixels (same world place).
+        int[] b = new int[w * h];
+        final float k = storey.scale / whole.scale;
+        final float ox = (whole.minX - storey.minX) * storey.scale, oz = (whole.minZ - storey.minZ) * storey.scale;
+        boolean[] diff = new boolean[w * h];
+        for (int z = 0; z < h; z++) {
+            int sz = (int) (oz + (z + 0.5f) * k);
+            for (int x = 0; x < w; x++) {
+                int sx = (int) (ox + (x + 0.5f) * k);
+                int v = sx >= 0 && sz >= 0 && sx < sw && sz < sh ? sp[sz * sw + sx] : 0;
+                int i = z * w + x;
+                b[i] = v;
+                int u = a[i];
+                int da = Math.abs((u >>> 24) - (v >>> 24));
+                int d = Math.abs(((u >> 16) & 255) - ((v >> 16) & 255)) + Math.abs(((u >> 8) & 255) - ((v >> 8) & 255)) + Math.abs((u & 255) - (v & 255));
+                diff[i] = da > 64 || d > 54;
+            }
+        }
+        // Grown a few pixels, so the pieces of one structure (rings of steps, a bridge's planks)
+        // join up: measured on Spiral Mountain, 1727 pieces become 242 whole structures.
+        diff = growMask(diff, w, h, Math.max(2, Math.round(Math.max(w, h) / 680f)));
+        // The differing patch Banjo is under (or the nearest one, a little way off).
+        int px = (int) ((p[0] - whole.minX) * whole.scale), pz = (int) ((p[2] - whole.minZ) * whole.scale);
+        int seed = -1;
+        int maxR = Math.max(4, Math.round(250f * whole.scale));
+        for (int rr = 0; rr <= maxR && seed < 0; rr++) {
+            for (int dz = -rr; dz <= rr && seed < 0; dz++) {
+                for (int dx = -rr; dx <= rr; dx++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != rr) continue;
+                    int x = px + dx, z = pz + dz;
+                    if (x < 0 || z < 0 || x >= w || z >= h) continue;
+                    if (diff[z * w + x]) {
+                        seed = z * w + x;
+                        break;
+                    }
+                }
+            }
+        }
+        if (seed < 0) {
+            return null;
+        }
+        boolean[] cut = new boolean[w * h];
+        int[] stack = new int[1 << 16];
+        int top = 0, x0 = w, z0 = h, x1 = -1, z1 = -1;
+        stack[top++] = seed;
+        cut[seed] = true;
+        while (top > 0) {
+            int i = stack[--top];
+            int x = i % w, z = i / w;
+            if (x < x0) x0 = x;
+            if (x > x1) x1 = x;
+            if (z < z0) z0 = z;
+            if (z > z1) z1 = z;
+            if (top + 4 > stack.length) stack = java.util.Arrays.copyOf(stack, stack.length * 2);
+            if (x > 0 && diff[i - 1] && !cut[i - 1]) { cut[i - 1] = true; stack[top++] = i - 1; }
+            if (x < w - 1 && diff[i + 1] && !cut[i + 1]) { cut[i + 1] = true; stack[top++] = i + 1; }
+            if (z > 0 && diff[i - w] && !cut[i - w]) { cut[i - w] = true; stack[top++] = i - w; }
+            if (z < h - 1 && diff[i + w] && !cut[i + w]) { cut[i + w] = true; stack[top++] = i + w; }
+        }
+        // Soft edge: the cut grown by r pixels, then blurred over r (box, twice).
+        final int r = Math.max(2, Math.round(Math.min(w, h) / 400f));
+        final int bx0 = Math.max(0, x0 - 3 * r), bz0 = Math.max(0, z0 - 3 * r);
+        final int bx1 = Math.min(w - 1, x1 + 3 * r), bz1 = Math.min(h - 1, z1 + 3 * r);
+        final int bw = bx1 - bx0 + 1, bh = bz1 - bz0 + 1;
+        float[] m = new float[bw * bh];
+        for (int z = 0; z < bh; z++)
+            for (int x = 0; x < bw; x++)
+                if (cut[(z + bz0) * w + x + bx0]) m[z * bw + x] = 1f;
+        m = boxMax(m, bw, bh, r);
+        m = boxBlur(boxBlur(m, bw, bh, r), bw, bh, r);
+        for (int z = 0; z < bh; z++) {
+            for (int x = 0; x < bw; x++) {
+                float t = m[z * bw + x];
+                if (t <= 0.004f) continue;
+                int i = (z + bz0) * w + x + bx0;
+                a[i] = t >= 0.996f ? b[i] : mixArgb(a[i], b[i], t);
+            }
+        }
+        android.graphics.Bitmap out = android.graphics.Bitmap.createBitmap(a, w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        GameState.MapImage img = new GameState.MapImage(out, whole.minX, whole.minZ, whole.scale);
+        img.backdrop = whole.backdrop;
+        return new Object[] { img, new LayerMask(cut, w, h, whole.minX, whole.minZ, whole.scale) };
+    }
+
+    /** The mask grown by r pixels (separable, running counts). */
+    private static boolean[] growMask(boolean[] m, int w, int h, int r) {
+        boolean[] t = new boolean[m.length], o = new boolean[m.length];
+        for (int z = 0; z < h; z++) {
+            int n = 0, row = z * w;
+            for (int x = 0; x <= Math.min(w - 1, r); x++) if (m[row + x]) n++;
+            for (int x = 0; x < w; x++) {
+                t[row + x] = n > 0;
+                if (x + r + 1 < w && m[row + x + r + 1]) n++;
+                if (x - r >= 0 && m[row + x - r]) n--;
+            }
+        }
+        for (int x = 0; x < w; x++) {
+            int n = 0;
+            for (int z = 0; z <= Math.min(h - 1, r); z++) if (t[z * w + x]) n++;
+            for (int z = 0; z < h; z++) {
+                o[z * w + x] = n > 0;
+                if (z + r + 1 < h && t[(z + r + 1) * w + x]) n++;
+                if (z - r >= 0 && t[(z - r) * w + x]) n--;
+            }
+        }
+        return o;
+    }
+
+    private static int mixArgb(int u, int v, float t) {
+        float s = 1f - t;
+        int aa = Math.round((u >>> 24) * s + (v >>> 24) * t);
+        int rr = Math.round(((u >> 16) & 255) * s + ((v >> 16) & 255) * t);
+        int gg = Math.round(((u >> 8) & 255) * s + ((v >> 8) & 255) * t);
+        int bb = Math.round((u & 255) * s + (v & 255) * t);
+        return (aa << 24) | (rr << 16) | (gg << 8) | bb;
+    }
+
+    /** Separable max over (2r+1)² (grows the cut). */
+    private static float[] boxMax(float[] m, int w, int h, int r) {
+        float[] t = new float[m.length], o = new float[m.length];
+        for (int z = 0; z < h; z++)
+            for (int x = 0; x < w; x++) {
+                float v = 0;
+                for (int d = Math.max(0, x - r); d <= Math.min(w - 1, x + r) && v < 1f; d++) v = Math.max(v, m[z * w + d]);
+                t[z * w + x] = v;
+            }
+        for (int z = 0; z < h; z++)
+            for (int x = 0; x < w; x++) {
+                float v = 0;
+                for (int d = Math.max(0, z - r); d <= Math.min(h - 1, z + r) && v < 1f; d++) v = Math.max(v, t[d * w + x]);
+                o[z * w + x] = v;
+            }
+        return o;
+    }
+
+    /** Separable box blur over (2r+1)² (running sums). */
+    private static float[] boxBlur(float[] m, int w, int h, int r) {
+        float[] t = new float[m.length], o = new float[m.length];
+        final float n = 2 * r + 1;
+        for (int z = 0; z < h; z++) {
+            float s = 0;
+            for (int x = -r; x <= r; x++) s += m[z * w + Math.min(w - 1, Math.max(0, x))];
+            for (int x = 0; x < w; x++) {
+                t[z * w + x] = s / n;
+                s += m[z * w + Math.min(w - 1, x + r + 1)] - m[z * w + Math.max(0, x - r)];
+            }
+        }
+        for (int x = 0; x < w; x++) {
+            float s = 0;
+            for (int z = -r; z <= r; z++) s += t[Math.min(h - 1, Math.max(0, z)) * w + x];
+            for (int z = 0; z < h; z++) {
+                o[z * w + x] = s / n;
+                s += t[Math.min(h - 1, z + r + 1) * w + x] - t[Math.max(0, z - r) * w + x];
+            }
+        }
+        return o;
     }
 
     // ---- The atlas: every level's map drawn from the ROM ---------------------------------
