@@ -1388,7 +1388,14 @@ public final class BottomScreenView extends View {
                 float half = 1.75f * s;
                 float k = half / Math.max(b.getWidth(), b.getHeight()) * 2f;
                 spriteRect.set(x - b.getWidth() * k / 2, y - b.getHeight() * k / 2, x + b.getWidth() * k / 2, y + b.getHeight() * k / 2);
-                c.drawBitmap(b, null, spriteRect, spritePaint);
+                if (kind == GameState.OBJ_MUMBO_PAD) {
+                    c.save();
+                    c.rotate(180f, x, y);   // Mumbo's face the right way up
+                    c.drawBitmap(b, null, spriteRect, spritePaint);
+                    c.restore();
+                } else {
+                    c.drawBitmap(b, null, spriteRect, spritePaint);
+                }
                 return;
             }
         }
