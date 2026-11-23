@@ -375,6 +375,9 @@ public final class BottomScreenView extends View {
         int saved = c.save();
         c.clipPath(mapClip);
         c.drawColor(Color.BLACK);
+        if (parchment && (m != null || leavingMap != null)) {
+            drawParchment(c, r);
+        }
 
         // The area we just left, fading out where it was.
         GameState.MapImage old = leavingMap;
@@ -496,6 +499,9 @@ public final class BottomScreenView extends View {
                 drawPlayer(c, px, pz, shownDegrees, 2.6f * iconScale * u, now);   // its pulse updates with the 30 Hz poll
             }
         }
+        if (parchment && m != null) {
+            drawCompass(c, r);
+        }
         // A soft shadow inside the frame's edge.
         drawInnerShadow(c, r, inner);
         c.restoreToCount(saved);
@@ -505,7 +511,7 @@ public final class BottomScreenView extends View {
             if (mapCap < GameState.WHOLE && m != wholeImage) {
                 text.setTextAlign(Paint.Align.LEFT);
                 text.setTextSize(2.6f * u);
-                text.setColor(Color.argb(220, 255, 236, 170));
+                text.setColor(parchment ? Color.argb(230, 78, 50, 28) : Color.argb(220, 255, 236, 170));
                 c.drawText("Lower floor", r.left + 11.5f * u, r.bottom - 3.2f * u, text);
                 text.setTextAlign(Paint.Align.CENTER);
             }
@@ -1081,6 +1087,17 @@ public final class BottomScreenView extends View {
     /** Draws a picture whose top-left is world (minX, minZ) at `scale` pixels per unit. */
     /** The soft glow of the area's surroundings under its map (instead of plain black), if it has one. */
     private void drawBackdrop(Canvas c, RectF r, GameState.MapImage m, float cx, float cz, float viewScale, Paint paint) {
+        if (parchment) {
+            // On parchment the scenery around the level is left out; an ink outline and a shadow
+            // set the level off the paper instead.
+            GameState.MapImage ink = m.ink;
+            if (ink != null) {
+                drawWorldBitmap(c, r, ink.bitmap, ink.minX, ink.minZ, ink.scale, cx, cz, viewScale, paint);
+            } else {
+                requestInk(m);
+            }
+            return;
+        }
         GameState.MapImage bd = m.backdrop;
         if (bd != null) {
             drawWorldBitmap(c, r, bd.bitmap, bd.minX, bd.minZ, bd.scale, cx, cz, viewScale, paint);
@@ -1590,6 +1607,7 @@ public final class BottomScreenView extends View {
     private void refreshMap() {
         onMenu = GameState.onMenu();
         boolean atlas = (GameState.bottomSettings() & 32) == 0;   // Input > Dual Screen > Map Style
+        parchment = (GameState.bottomSettings() & 64) == 0;       // ... > Map Background
         if (atlas != atlasStyle || !styleSet) {
             styleSet = true;
             atlasStyle = atlas;
@@ -1921,6 +1939,145 @@ public final class BottomScreenView extends View {
         return tmp.renameTo(png);
     }
 
+    // ---- Parchment background (Map Background) ---------------------------------------------
+    // The level on an old paper sheet: a grain texture and a faint grid that move with the map,
+    // darker edges, an ink outline and shadow around the level (MapLayers.ink), and a compass.
+    // All drawn here from code (noise and lines), no art.
+    private boolean parchment = true;
+    private android.graphics.Bitmap paperTile;
+    private final Paint paperPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint edgePaint = new Paint();
+    private final android.graphics.Matrix paperMatrix = new android.graphics.Matrix();
+
+    /** A 256 x 256 tile of paper grain that repeats without seams. */
+    private static android.graphics.Bitmap makePaperTile() {
+        final int n = 256;
+        java.util.Random rnd = new java.util.Random(7);
+        float[][] layers = new float[3][];
+        int[] cells = { 8, 32, 128 };
+        for (int l = 0; l < 3; l++) {
+            int g = cells[l];
+            float[] grid = new float[g * g];
+            for (int i = 0; i < grid.length; i++) grid[i] = rnd.nextFloat();
+            float[] v = new float[n * n];
+            for (int y = 0; y < n; y++) {
+                float fy = (float) y * g / n;
+                int y0 = (int) fy;
+                float ty = fy - y0;
+                ty = ty * ty * (3 - 2 * ty);
+                for (int x = 0; x < n; x++) {
+                    float fx = (float) x * g / n;
+                    int x0 = (int) fx;
+                    float tx = fx - x0;
+                    tx = tx * tx * (3 - 2 * tx);
+                    float a = grid[y0 % g * g + x0 % g], b = grid[y0 % g * g + (x0 + 1) % g];
+                    float cc = grid[(y0 + 1) % g * g + x0 % g], d = grid[(y0 + 1) % g * g + (x0 + 1) % g];
+                    v[y * n + x] = (a + (b - a) * tx) * (1 - ty) + (cc + (d - cc) * tx) * ty;
+                }
+            }
+            layers[l] = v;
+        }
+        int[] px = new int[n * n];
+        for (int i = 0; i < px.length; i++) {
+            float t = 0.55f * layers[0][i] + 0.3f * layers[1][i] + 0.15f * layers[2][i];
+            if (rnd.nextFloat() < 0.004f) t -= 0.5f;   // a fleck
+            float k = 0.86f + 0.2f * t;
+            int r = Math.max(0, Math.min(255, Math.round(236 * k)));
+            int g = Math.max(0, Math.min(255, Math.round(214 * k)));
+            int b = Math.max(0, Math.min(255, Math.round(168 * k)));
+            px[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+        }
+        return android.graphics.Bitmap.createBitmap(px, n, n, android.graphics.Bitmap.Config.ARGB_8888);
+    }
+
+    private void drawParchment(Canvas c, RectF r) {
+        if (paperTile == null) {
+            paperTile = makePaperTile();
+            paperPaint.setShader(new android.graphics.BitmapShader(paperTile,
+                android.graphics.Shader.TileMode.REPEAT, android.graphics.Shader.TileMode.REPEAT));
+        }
+        float s = viewS > 0 && !Float.isNaN(viewS) ? viewS : 0.05f;
+        // The paper moves with the map (its grain stays one size on screen).
+        float ox = r.centerX() - viewCx * s, oz = r.centerY() - viewCz * s;
+        float tile = 1.6f * u;   // grain size
+        paperMatrix.setScale(tile / 8f, tile / 8f);
+        paperMatrix.postTranslate(ox, oz);
+        paperPaint.getShader().setLocalMatrix(paperMatrix);
+        c.drawRect(r, paperPaint);
+        // A faint grid on round world distances, about 12 units of screen apart.
+        float step = 250f;
+        while (step * s < 9f * u && step < 1e6f) step *= 2f;
+        gridPaint.setColor(Color.argb(38, 110, 80, 45));
+        gridPaint.setStrokeWidth(Math.max(1f, 0.14f * u));
+        float x0 = viewCx + (r.left - r.centerX()) / s, x1 = viewCx + (r.right - r.centerX()) / s;
+        float z0 = viewCz + (r.top - r.centerY()) / s, z1 = viewCz + (r.bottom - r.centerY()) / s;
+        for (float x = (float) Math.ceil(x0 / step) * step; x <= x1; x += step) {
+            float sx = r.centerX() + (x - viewCx) * s;
+            c.drawLine(sx, r.top, sx, r.bottom, gridPaint);
+        }
+        for (float z = (float) Math.ceil(z0 / step) * step; z <= z1; z += step) {
+            float sz = r.centerY() + (z - viewCz) * s;
+            c.drawLine(r.left, sz, r.right, sz, gridPaint);
+        }
+        // Darker, burnt-looking edges.
+        float e = 7f * u;
+        int dark = Color.argb(120, 105, 66, 28), clear = Color.argb(0, 105, 66, 28);
+        edgePaint.setShader(new android.graphics.LinearGradient(r.left, 0, r.left + e, 0, dark, clear, android.graphics.Shader.TileMode.CLAMP));
+        c.drawRect(r.left, r.top, r.left + e, r.bottom, edgePaint);
+        edgePaint.setShader(new android.graphics.LinearGradient(r.right, 0, r.right - e, 0, dark, clear, android.graphics.Shader.TileMode.CLAMP));
+        c.drawRect(r.right - e, r.top, r.right, r.bottom, edgePaint);
+        edgePaint.setShader(new android.graphics.LinearGradient(0, r.top, 0, r.top + e, dark, clear, android.graphics.Shader.TileMode.CLAMP));
+        c.drawRect(r.left, r.top, r.right, r.top + e, edgePaint);
+        edgePaint.setShader(new android.graphics.LinearGradient(0, r.bottom, 0, r.bottom - e, dark, clear, android.graphics.Shader.TileMode.CLAMP));
+        c.drawRect(r.left, r.bottom - e, r.right, r.bottom, edgePaint);
+        edgePaint.setShader(null);
+    }
+
+    /** A small compass rose in the map's top-right corner. */
+    private void drawCompass(Canvas c, RectF r) {
+        float cx = r.right - 6.5f * u, cy = r.top + 8f * u, l = 3.6f * u, w = 0.9f * u;
+        Path p = new Path();
+        fill.setColor(Color.argb(210, 150, 110, 70));
+        p.moveTo(cx - l, cy); p.lineTo(cx, cy - w); p.lineTo(cx + l, cy); p.lineTo(cx, cy + w); p.close();
+        c.drawPath(p, fill);
+        p.reset();
+        fill.setColor(Color.argb(230, 90, 55, 30));
+        p.moveTo(cx, cy - l); p.lineTo(cx + w, cy); p.lineTo(cx, cy + l); p.lineTo(cx - w, cy); p.close();
+        c.drawPath(p, fill);
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setTextSize(2.2f * u);
+        text.setColor(Color.argb(230, 90, 55, 30));
+        c.drawText("N", cx, cy - l - 0.6f * u, text);
+    }
+
+    /** Works out a picture's ink outline and shadow in the background (MapLayers.ink). */
+    private void requestInk(GameState.MapImage m) {
+        if (m.inkRequested) {
+            return;
+        }
+        m.inkRequested = true;
+        layerWorker.execute(() -> {
+            try {
+                int w = m.bitmap.getWidth(), h = m.bitmap.getHeight();
+                int f = Math.max(1, (Math.max(w, h) + 1023) / 1024);   // at most 1024 across
+                int sw = Math.max(1, w / f), sh = Math.max(1, h / f);
+                android.graphics.Bitmap small = f == 1 ? m.bitmap : android.graphics.Bitmap.createScaledBitmap(m.bitmap, sw, sh, true);
+                int[] px = new int[sw * sh];
+                small.getPixels(px, 0, sw, 0, 0, sw, sh);
+                for (int i = 0; i < px.length; i++) px[i] = px[i] >>> 24;
+                int pad = Math.max(6, Math.round(Math.max(sw, sh) / 90f));
+                int[] ink = MapLayers.ink(px, sw, sh, pad);
+                float scale = m.scale * sw / w;
+                android.graphics.Bitmap b = android.graphics.Bitmap.createBitmap(ink, sw + 2 * pad, sh + 2 * pad, android.graphics.Bitmap.Config.ARGB_8888);
+                m.ink = new GameState.MapImage(b, m.minX - pad / scale, m.minZ - pad / scale, scale);
+                post(this::invalidate);
+            } catch (Throwable t) {
+                android.util.Log.w("BTMap", "ink outline failed", t);
+            }
+        });
+    }
+
     // ---- Lower floors, cut in locally ----------------------------------------------------
     // Under another floor (Gruntilda's hat, a bridge, a roof) the map shows the whole area as
     // usual, with only the part over Banjo cut away to the floor below: a storey map (everything
@@ -2057,7 +2214,7 @@ public final class BottomScreenView extends View {
         }
         text.setTextAlign(Paint.Align.RIGHT);
         text.setTextSize(2.4f * u);
-        text.setColor(Color.argb(200, 255, 236, 170));
+        text.setColor(parchment && mapImage != null ? Color.argb(220, 78, 50, 28) : Color.argb(200, 255, 236, 170));
         c.drawText("Drawing maps " + MapAtlas.done() + "/" + MapAtlas.total(), r.right - 3f * u, r.bottom - 3.2f * u, text);
         text.setTextAlign(Paint.Align.CENTER);
     }

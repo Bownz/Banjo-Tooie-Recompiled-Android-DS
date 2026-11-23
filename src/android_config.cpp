@@ -84,6 +84,7 @@ namespace {
     std::atomic<bool> cutscene_dim{ true };
     std::atomic<bool> bottom_map{ true };
     std::atomic<int> map_style{ 0 };   // Bottom Screen Map Style: 0 Atlas, 1 Classic
+    std::atomic<int> map_background{ 0 };   // Map Background: 0 Parchment, 1 Plain
 
     std::filesystem::path config_file(const char* name) {
         return recomp::get_config_path() / name;
@@ -230,14 +231,31 @@ namespace {
             "android_map_style",
             "Map Style",
             "Atlas: the app's own drawn look (meadows, paths, stone, water), and every level's map is "
-            "drawn from your ROM in the background the first time, storeys included, so maps show up "
-            "straight away. Classic: built from the game's own textures as you go.",
+            "drawn from your ROM when the app starts, storeys included, so maps show up straight away. "
+            "Classic: the game's own textures (also drawn from your ROM at start, then sharpened live).",
             map_styles,
             0u
         );
         config.add_option_change_callback("android_map_style",
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
                 map_style.store(int(std::get<uint32_t>(cur)));
+                save_touch_config(context);
+            });
+        static EnumOptionVector map_backgrounds = {
+            {0u, "Parchment", "Parchment"},
+            {1u, "Plain", "Plain"},
+        };
+        config.add_enum_option(
+            "android_map_background",
+            "Map Background",
+            "Parchment: the level sits on an old paper sheet with an ink outline, a faint grid and a "
+            "compass. Plain: the level on dark, with the scenery around it.",
+            map_backgrounds,
+            0u
+        );
+        config.add_option_change_callback("android_map_background",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
+                map_background.store(int(std::get<uint32_t>(cur)));
                 save_touch_config(context);
             });
         config.add_enum_option(
@@ -753,6 +771,7 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
         option(t, "android_bottom_buttons"),
         option(t, "android_bottom_map"),
         option(t, "android_map_style"),
+        option(t, "android_map_background"),
         option(t, "android_cutscene_dim"),
     }, { g, t });
 
@@ -960,5 +979,5 @@ Java_io_github_bownz_btrecomp_TouchInput_nativeTouchFeedback(JNIEnv*, jclass) {
 extern "C" JNIEXPORT jint JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeBottomSettings(JNIEnv*, jclass) {
     const int buttons = bottom_buttons.load();
-    return (buttons != 0 ? 1 : 0) | (cutscene_dim.load() ? 2 : 0) | (show_fps.load() ? 4 : 0) | (buttons == 2 ? 8 : 0) | (bottom_map.load() ? 0 : 16) | (map_style.load() == 1 ? 32 : 0);
+    return (buttons != 0 ? 1 : 0) | (cutscene_dim.load() ? 2 : 0) | (show_fps.load() ? 4 : 0) | (buttons == 2 ? 8 : 0) | (bottom_map.load() ? 0 : 16) | (map_style.load() == 1 ? 32 : 0) | (map_background.load() == 1 ? 64 : 0);
 }

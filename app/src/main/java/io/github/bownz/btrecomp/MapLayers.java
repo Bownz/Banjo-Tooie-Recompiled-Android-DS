@@ -98,6 +98,39 @@ final class MapLayers {
         return cut;
     }
 
+    /**
+     * Parchment background: an ink outline and a soft shadow around a level picture, from its
+     * alpha (w x h). Returns ARGB of (w + 2 pad) x (h + 2 pad), the picture at (pad, pad).
+     */
+    static int[] ink(int[] alpha, int w, int h, int pad) {
+        final int W = w + 2 * pad, H = h + 2 * pad;
+        boolean[] land = new boolean[W * H];
+        float[] m = new float[W * H];
+        final int off = Math.max(1, pad / 3);   // the shadow falls down and to the right
+        for (int z = 0; z < h; z++) {
+            for (int x = 0; x < w; x++) {
+                if (alpha[z * w + x] > 128) {
+                    land[(z + pad) * W + x + pad] = true;
+                    m[(z + pad + off) * W + x + pad + off] = 1f;
+                }
+            }
+        }
+        int sr = Math.max(1, pad / 4);
+        float[] shadow = boxBlur(boxBlur(m, W, H, sr), W, H, sr);
+        boolean[] ring = growMask(land, W, H, 1);
+        int[] out = new int[W * H];
+        for (int i = 0; i < out.length; i++) {
+            if (land[i]) continue;   // under the picture: nothing shows
+            if (ring[i]) {
+                out[i] = 0xD84E321C;   // ink: dark brown, mostly opaque
+            } else {
+                int a = Math.round(Math.min(1f, shadow[i]) * 95f);
+                if (a > 0) out[i] = (a << 24) | 0x3C2614;
+            }
+        }
+        return out;
+    }
+
     /** The mask grown by r pixels (separable, running counts). */
     private static boolean[] growMask(boolean[] m, int w, int h, int r) {
         boolean[] t = new boolean[m.length], o = new boolean[m.length];

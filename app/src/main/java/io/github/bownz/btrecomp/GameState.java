@@ -148,6 +148,9 @@ final class GameState {
         final android.graphics.Bitmap water;   // where the water is (alpha), or null
         /** The soft glow drawn under the map (the level's surroundings, blurred), or null. */
         volatile MapImage backdrop;
+        /** Parchment background: the ink outline and shadow around the level, once worked out. */
+        volatile MapImage ink;
+        volatile boolean inkRequested;
 
         MapImage(android.graphics.Bitmap bitmap, float minX, float minZ, float scale) {
             this(bitmap, minX, minZ, scale, -1, null);
