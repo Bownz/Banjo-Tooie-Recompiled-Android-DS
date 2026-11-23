@@ -1861,6 +1861,38 @@ bool bt_overhead(const uint8_t* rdram, float x, float y, float z, float* over) {
 }
 
 #ifdef BT_MAP_TEST
+// Test harness: any model (no collision needed) drawn from above, size px across: ARGB.
+bool bt_test_top(const uint8_t* rdram, int size, std::vector<int32_t>& out, int& W, int& H) {
+    const Ram ram{ rdram };
+    std::vector<Tri> tris;
+    std::map<std::tuple<uint32_t, int, int, int, int, uint32_t, bool>, Texture> textures;
+    if (!collect(ram, kModelPtr, kTextureBlockPtr, false, tris, textures) || tris.empty()) return false;
+    if (std::getenv("BT_SIDE") != nullptr) {
+        // Seen from the front, a little from above: image x = x, image down = -y, nearer = -z.
+        const float pitch = 0.35f, cp = std::cos(pitch), sp = std::sin(pitch);
+        for (Tri& t : tris) for (Vertex& v : t.v) {
+            const float y = v.y, z = v.z;
+            const float yy = y * cp - z * sp, zz = y * sp + z * cp;
+            v.y = -zz; v.z = -yy;
+        }
+    }
+    float x0 = 1e9f, z0 = 1e9f, x1 = -1e9f, z1 = -1e9f;
+    for (const Tri& t : tris) for (const Vertex& v : t.v) { x0 = std::min(x0, v.x); x1 = std::max(x1, v.x); z0 = std::min(z0, v.z); z1 = std::max(z1, v.z); }
+    const float scale = float(size) / std::max(1.0f, std::max(x1 - x0, z1 - z0));
+    W = std::max(1, int((x1 - x0) * scale) + 1); H = std::max(1, int((z1 - z0) * scale) + 1);
+    const size_t N = size_t(W) * H;
+    std::vector<float> R(N, 0), G(N, 0), B(N, 0), top(N, -1e9f);
+    std::vector<uint8_t> drawn(N, 0), water(N, 0);
+    rasterTop(tris, x0, z0, scale, W, H, R, G, B, top, drawn, water);
+    out.assign(N, 0);
+    for (size_t i = 0; i < N; i++) {
+        if (!drawn[i]) continue;
+        auto cl = [](float v) { return int(std::clamp(v, 0.0f, 255.0f)); };
+        out[i] = int32_t(0xFF000000u | (uint32_t(cl(R[i])) << 16) | (uint32_t(cl(G[i])) << 8) | uint32_t(cl(B[i])));
+    }
+    return true;
+}
+
 // Test harness: walkable floor triangles (9 floats each) of the area in rdram.
 void bt_test_floors(const uint8_t* rdram, std::vector<float>& out) {
     const Ram ram{ rdram };

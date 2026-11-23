@@ -429,13 +429,17 @@ struct Scratch {
 bool layOut(std::span<const uint8_t> rom, int asset, Scratch& s, std::vector<uint8_t>& model, bool withSecond = true) {
     if (!loadAnyAsset(rom, asset, model)) return false;
     ModelInfo m;
+#ifdef BT_MAP_TEST
+    if (!modelInfo(model, m) || (m.coll == 0 && std::getenv("BT_ALLOW_NOCOLL") == nullptr)) return false;
+#else
     if (!modelInfo(model, m) || m.coll == 0) return false;
+#endif
     s.ram.assign(8 * 1024 * 1024, 0);
     constexpr uint32_t kModelAt = 0x80300000u, kBlockAt = 0x80400000u, kSecondAt = 0x80580000u, kSecondBlockAt = 0x80680000u;
     if (model.size() > kBlockAt - kModelAt) return false;
     s.put(kModelAt, model);
     s.put32(0x801285BCu, kModelAt);
-    s.put32(0x801285B0u, kModelAt + m.coll);
+    s.put32(0x801285B0u, m.coll ? kModelAt + m.coll : 0u);
     s.put32(0x801285C0u, kModelAt + m.vtx);
     std::vector<uint8_t> block = assembleTextures(rom, model);
     if (!block.empty() && block.size() <= kSecondAt - kBlockAt) {

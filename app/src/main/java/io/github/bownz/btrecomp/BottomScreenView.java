@@ -1374,7 +1374,8 @@ public final class BottomScreenView extends View {
             case GameState.OBJ_FLIGHT_PAD: return 1590;
             case GameState.OBJ_MUMBO_PAD: return 2009;
             case GameState.OBJ_JUMP_PAD: return 1589;
-            case GameState.OBJ_WARP_PAD: case GameState.OBJ_SILO: return 1601;   // silo: the warp dome
+            case GameState.OBJ_WARP_PAD: return 1601;
+            case GameState.OBJ_SILO: return 2327;   // Isle o' Hags' silver warp dome (found 23 Nov)
             default: return -1;
         }
     }
@@ -1421,7 +1422,7 @@ public final class BottomScreenView extends View {
         if (pad >= 0) {
             android.graphics.Bitmap b = GameState.modelIcon(pad, redraw);
             if (b != null) {
-                float half = 1.75f * s;
+                float half = (kind == GameState.OBJ_SILO ? 2.2f : 1.75f) * s;   // the dome is twice a pad's size
                 float k = half / Math.max(b.getWidth(), b.getHeight()) * 2f;
                 spriteRect.set(x - b.getWidth() * k / 2, y - b.getHeight() * k / 2, x + b.getWidth() * k / 2, y + b.getHeight() * k / 2);
                 if (kind == GameState.OBJ_MUMBO_PAD) {
@@ -1431,7 +1432,7 @@ public final class BottomScreenView extends View {
                     c.restore();
                 } else {
                     c.drawBitmap(b, null, spriteRect, spritePaint);
-                    if (kind == GameState.OBJ_WARP_PAD || kind == GameState.OBJ_SILO) {
+                    if (kind == GameState.OBJ_WARP_PAD) {
                         drawWarpSwirl(c, x, y, Math.min(spriteRect.width(), spriteRect.height()) * 0.30f);
                     }
                 }
