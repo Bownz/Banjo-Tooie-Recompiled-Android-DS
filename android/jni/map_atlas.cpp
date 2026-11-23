@@ -25,11 +25,11 @@
 #include <zlib.h>
 
 #ifndef BT_MAP_TEST
-#include <filesystem>
+#include <cstdlib>
 #include <mutex>
+#include <string>
 #include <jni.h>
 namespace recomp { std::span<const uint8_t> get_rom(); }
-namespace recompui::file { std::filesystem::path get_app_folder_path(); }
 extern "C" uint8_t* bt_android_running_rdram();
 #endif
 
@@ -645,9 +645,15 @@ std::span<const uint8_t> atlasRom() {
     if (!live.empty()) return live;
     std::lock_guard lock{ g_romMutex };
     if (!g_storedRomTried || g_storedRom.empty()) {
+        // The app's data folder, once the game's main thread has set it (android_main.cpp).
+        // Not recompui's get_app_folder_path(): called before that, it checks for
+        // "portable.txt" in the working directory, which is still / then, where Android
+        // denies access, and std::filesystem throws (0.9.32 closed at launch).
+        const char* folder = std::getenv("APP_FOLDER_PATH");
+        if (folder == nullptr || folder[0] == '\0') return {};
         g_storedRomTried = true;
-        const std::filesystem::path file = recompui::file::get_app_folder_path() / "bt.n64.us.1.0.z64";
-        std::FILE* f = std::fopen(file.string().c_str(), "rb");
+        const std::string file = std::string{ folder } + "/bt.n64.us.1.0.z64";
+        std::FILE* f = std::fopen(file.c_str(), "rb");
         if (f != nullptr) {
             std::vector<uint8_t> d;
             uint8_t buf[1 << 16];
@@ -672,31 +678,37 @@ Java_io_github_bownz_btrecomp_GameState_nativeSetMapStyle(JNIEnv*, jclass, jint 
 // The ROM's level models (asset numbers), or null when there's no ROM yet. Call from one
 // thread first (the scan isn't guarded).
 extern "C" JNIEXPORT jintArray JNICALL
-Java_io_github_bownz_btrecomp_GameState_nativeAtlasModels(JNIEnv* env, jclass) {
+Java_io_github_bownz_btrecomp_GameState_nativeAtlasModels(JNIEnv* env, jclass) try {
     const std::span<const uint8_t> rom = atlasRom();
     if (rom.empty()) return nullptr;
     const std::vector<int>& models = bt_atlas_level_models(rom);
     jintArray a = env->NewIntArray(jsize(models.size()));
     if (a != nullptr) env->SetIntArrayRegion(a, 0, jsize(models.size()), reinterpret_cast<const jint*>(models.data()));
     return a;
+} catch (...) {
+    return nullptr;   // never let an exception reach Java (it aborts the app)
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_io_github_bownz_btrecomp_GameState_nativeAtlasFingerprint(JNIEnv*, jclass, jint asset) {
+Java_io_github_bownz_btrecomp_GameState_nativeAtlasFingerprint(JNIEnv*, jclass, jint asset) try {
     const std::span<const uint8_t> rom = atlasRom();
     return rom.empty() ? 0 : jint(bt_atlas_fingerprint(rom, asset));
+} catch (...) {
+    return 0;
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_io_github_bownz_btrecomp_GameState_nativeCurrentFingerprint(JNIEnv*, jclass) {
+Java_io_github_bownz_btrecomp_GameState_nativeCurrentFingerprint(JNIEnv*, jclass) try {
     return jint(bt_atlas_current_fingerprint(bt_android_running_rdram()));
+} catch (...) {
+    return 0;
 }
 
 // Both styles of one model's map: {classic ARGB, atlas ARGB, backdrop ARGB (may be empty)}.
 // info (13): W, H, minX, minZ, scale, 3 storey heights (NaN where none), then the backdrop's
 // W, H, minX, minZ, scale.
 extern "C" JNIEXPORT jobjectArray JNICALL
-Java_io_github_bownz_btrecomp_GameState_nativeAtlasBuildBoth(JNIEnv* env, jclass, jint asset, jfloat capY, jfloatArray info) {
+Java_io_github_bownz_btrecomp_GameState_nativeAtlasBuildBoth(JNIEnv* env, jclass, jint asset, jfloat capY, jfloatArray info) try {
     const std::span<const uint8_t> rom = atlasRom();
     if (rom.empty() || info == nullptr || env->GetArrayLength(info) < 13) return nullptr;
     std::vector<int32_t> classic, atlas, backdrop;
@@ -718,5 +730,7 @@ Java_io_github_bownz_btrecomp_GameState_nativeAtlasBuildBoth(JNIEnv* env, jclass
     }
     env->SetFloatArrayRegion(info, 0, 13, meta);
     return result;
+} catch (...) {
+    return nullptr;   // out of memory or a bad model: skip it
 }
 #endif

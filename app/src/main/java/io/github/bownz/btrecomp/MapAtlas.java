@@ -145,9 +145,63 @@ final class MapAtlas {
     // ---- Drawing -----------------------------------------------------------------------
 
     private static void run() {
+        // Crash guard: work in progress leaves busy-<name>.txt (the model, or "scan") until it
+        // ends. Found at start, the app closed during it (a crash, or just swiped away): it's
+        // counted in suspects.txt, and anything caught twice is skipped from now on (a model is
+        // then built live in play; a scan stops drawing altogether).
+        java.util.Map<String, Integer> suspects = new java.util.HashMap<>();
+        File suspectFile = new File(dir, "suspects.txt");
+        try (BufferedReader r = new BufferedReader(new FileReader(suspectFile))) {
+            for (String line; (line = r.readLine()) != null; ) {
+                String[] v = line.trim().split(" ");
+                if (v.length == 2) suspects.put(v[0], Integer.parseInt(v[1]));
+            }
+        } catch (Exception ignored) {
+            // none yet
+        }
+        File[] busy = dir.listFiles((d, name) -> name.startsWith("busy-") && name.endsWith(".txt"));
+        if (busy != null && busy.length > 0) {
+            for (File f : busy) {
+                try (BufferedReader r = new BufferedReader(new FileReader(f))) {
+                    String what = r.readLine();
+                    if (what != null && !what.trim().isEmpty()) {
+                        what = what.trim();
+                        int n = suspects.getOrDefault(what, 0) + 1;
+                        suspects.put(what, n);
+                        Log.w(TAG, what + " was in progress when the app closed (" + n + ")");
+                        if (n >= 2 && !what.equals("scan")) appendIndex(what + " 0");
+                    }
+                } catch (IOException | RuntimeException ignored) {
+                    // unreadable: just remove it
+                }
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+            }
+            try (FileWriter w = new FileWriter(suspectFile)) {
+                for (java.util.Map.Entry<String, Integer> en : suspects.entrySet()) w.write(en.getKey() + " " + en.getValue() + "\n");
+            } catch (IOException ignored) {
+                // best effort
+            }
+        }
+        if (suspects.getOrDefault("scan", 0) >= 2) {
+            Log.w(TAG, "the ROM scan closed the app twice: not drawing");
+            readIndex();
+            return;
+        }
+        SystemClock.sleep(2000);   // let the game's own start-up go first
         int[] models;
-        while ((models = GameState.atlasModels()) == null) {   // no ROM imported yet
-            SystemClock.sleep(3000);
+        File scanBusy = new File(dir, "busy-scan.txt");
+        while (true) {
+            try (FileWriter w = new FileWriter(scanBusy)) {
+                w.write("scan");
+            } catch (IOException ignored) {
+                // best effort
+            }
+            models = GameState.atlasModels();
+            //noinspection ResultOfMethodCallIgnored
+            scanBusy.delete();
+            if (models != null) break;
+            SystemClock.sleep(3000);   // no ROM imported yet
         }
         Set<Integer> tried = readIndex();
         ConcurrentLinkedQueue<Integer> queue = new ConcurrentLinkedQueue<>();
@@ -193,12 +247,20 @@ final class MapAtlas {
             if (asset == null) {
                 return;
             }
+            File busy = new File(dir, "busy-" + id + ".txt");
+            try (FileWriter w = new FileWriter(busy)) {
+                w.write(Integer.toString(asset));
+            } catch (IOException ignored) {
+                // the guard is best effort
+            }
             try {
                 drawModel(asset);
             } catch (Throwable t) {
                 Log.w(TAG, "map " + asset + " failed", t);
                 appendIndex(asset + " 0");
             }
+            //noinspection ResultOfMethodCallIgnored
+            busy.delete();
             done.incrementAndGet();
             lastEnd = SystemClock.uptimeMillis();
         }

@@ -2039,10 +2039,12 @@ Java_io_github_bownz_btrecomp_GameState_nativeBackdrop(JNIEnv* env, jclass, jint
 
 // Height of the lowest solid thing right over Banjo (see bt_overhead), or NaN if none.
 extern "C" JNIEXPORT jfloat JNICALL
-Java_io_github_bownz_btrecomp_GameState_nativeOverhead(JNIEnv*, jclass, jfloat x, jfloat y, jfloat z) {
+Java_io_github_bownz_btrecomp_GameState_nativeOverhead(JNIEnv*, jclass, jfloat x, jfloat y, jfloat z) try {
     uint8_t* rdram = bt_android_running_rdram();
     float over = 0;
     return rdram != nullptr && bt_overhead(rdram, x, y, z, &over) ? over : NAN;
+} catch (...) {
+    return NAN;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
