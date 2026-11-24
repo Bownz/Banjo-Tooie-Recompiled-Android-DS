@@ -560,6 +560,8 @@ namespace {
     // the steep jungle walls as more canopy (they vanish into it).
     struct CanopyMap { const void* tex = nullptr; float dsx = 0, dsz = 0, dtx = 0, dtz = 0, sr = 1, sg = 1, sb = 1; Tile tile; };
     thread_local CanopyMap t_canopy;
+    thread_local bool t_onlyTexFrame = false;
+    thread_local float t_frame[4] = { 1e9f, -1e9f, 1e9f, -1e9f };
     void rasterTop(const std::vector<Tri>& tris, float minX, float minZ, float scale, int W, int H,
                    std::vector<float>& R, std::vector<float>& G, std::vector<float>& B, std::vector<float>& top,
                    std::vector<uint8_t>& drawn, std::vector<uint8_t>& water, const std::vector<float>* limit = nullptr) {
@@ -1896,6 +1898,21 @@ bool bt_test_top(const uint8_t* rdram, int size, std::vector<int32_t>& out, int&
     std::vector<Tri> tris;
     std::map<std::tuple<uint32_t, int, int, int, int, uint32_t, bool>, Texture> textures;
     if (!collect(ram, kModelPtr, kTextureBlockPtr, false, tris, textures) || tris.empty()) return false;
+    if (const char* only = std::getenv("BT_ONLY_TEX")) {
+        // Test: only these textures (ids numbered as bt_test_tris does), to trace exactly what
+        // they draw: e.g. the path overlays with their own see-through edges.
+        std::set<int> want; for (const char* q = only; *q;) { char* e; long v = std::strtol(q, &e, 10); if (e == q) break; want.insert(int(v)); q = *e ? e + 1 : e; }
+        std::map<const Texture*, int> ids; std::vector<Tri> keep;
+        for (const Tri& t : tris) {
+            int id = -1;
+            if (t.tex) { auto it = ids.find(t.tex); if (it == ids.end()) it = ids.emplace(t.tex, int(ids.size())).first; id = it->second; }
+            if (want.count(id)) keep.push_back(t);
+        }
+        for (const Tri& t : tris) for (const Vertex& v : t.v) { t_frame[0] = std::min(t_frame[0], v.x); t_frame[1] = std::max(t_frame[1], v.x); t_frame[2] = std::min(t_frame[2], v.z); t_frame[3] = std::max(t_frame[3], v.z); }
+        tris.swap(keep);
+        if (tris.empty()) return false;
+        t_onlyTexFrame = true;
+    }
     if (std::getenv("BT_CANOPY") != nullptr) {
         // The texture covering the most ground seen from above, and its median mapping.
         std::map<const Texture*, double> area;
@@ -1936,6 +1953,7 @@ bool bt_test_top(const uint8_t* rdram, int size, std::vector<int32_t>& out, int&
     }
     float x0 = 1e9f, z0 = 1e9f, x1 = -1e9f, z1 = -1e9f;
     for (const Tri& t : tris) for (const Vertex& v : t.v) { x0 = std::min(x0, v.x); x1 = std::max(x1, v.x); z0 = std::min(z0, v.z); z1 = std::max(z1, v.z); }
+    if (t_onlyTexFrame) { x0 = t_frame[0]; x1 = t_frame[1]; z0 = t_frame[2]; z1 = t_frame[3]; }   // the whole model's frame
     const float scale = float(size) / std::max(1.0f, std::max(x1 - x0, z1 - z0));
     W = std::max(1, int((x1 - x0) * scale) + 1); H = std::max(1, int((z1 - z0) * scale) + 1);
     const size_t N = size_t(W) * H;
