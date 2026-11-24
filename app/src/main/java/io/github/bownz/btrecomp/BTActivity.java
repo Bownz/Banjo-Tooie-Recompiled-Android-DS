@@ -124,6 +124,7 @@ public class BTActivity extends SDLActivity
             addMapsProgress();
             // Every level's map, drawn from the imported ROM while the launcher is up.
             MapAtlas.start(this);
+            MapDoors.start(this);
         }
     }
 

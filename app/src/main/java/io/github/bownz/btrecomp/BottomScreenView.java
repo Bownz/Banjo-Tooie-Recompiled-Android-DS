@@ -480,14 +480,14 @@ public final class BottomScreenView extends View {
             float iconScale = 0.75f + 0.25f * (1 - bl);
             // Collectibles and landmarks placed in the area (the game's own list).
             drawObjects(c, r, cx, cz, viewScale, iconScale, bl);
-            java.util.List<float[]> entries = entrances.get(GameState.area());
-            if (entries != null) {
-                for (int i = 0; i < entries.size(); i++) {
-                    float[] e = entries.get(i);
-                    drawEntrance(c, r.centerX() + (e[0] - cx) * viewScale, r.centerY() + (e[2] - cz) * viewScale,
-                        2.2f * iconScale * u, i == entries.size() - 1);
-                }
+            // Doors used (learned as you play, kept between sessions); the latest brighter.
+            int doorsHere = GameState.area();
+            MapDoors.Door latestDoor = MapDoors.latest(doorsHere);
+            for (MapDoors.Door d : MapDoors.doors(doorsHere)) {
+                drawEntrance(c, r.centerX() + (d.x - cx) * viewScale, r.centerY() + (d.z - cz) * viewScale,
+                    2.2f * iconScale * u, d == latestDoor);
             }
+            drawDoorTag(c, r, cx, cz, viewScale, now);
             // Your own markers.
             for (float[] pin : userMarks(GameState.area())) {
                 drawPin(c, r.centerX() + (pin[0] - cx) * viewScale, r.centerY() + (pin[1] - cz) * viewScale);
@@ -860,44 +860,63 @@ public final class BottomScreenView extends View {
         c.drawRect(door.left, door.centerY(), door.right, door.bottom, fill);
     }
 
-    // Entrances used this session, per area (where Banjo appeared on entering it).
-    private final java.util.HashMap<Integer, java.util.ArrayList<float[]>> entrances = new java.util.HashMap<>();
-    private int entryArea = GameState.UNKNOWN;
-    private long entryAreaSince;
+    // Doors learned by playing (MapDoors): where Banjo left each area, and where he came in.
+    private int doorArea = GameState.UNKNOWN, arrivedFrom = GameState.UNKNOWN;
+    private long doorAreaSince;
+    private float[] doorLastPos, exitPos;
+    private String doorLastName;
+    private boolean arrivalNoted = true;
 
-    /** Once an area has been current for a second (so the entry point is the new area's), notes it. */
+    private static boolean realArea(int area) {
+        return area >= 0 && area != 0x18B && area != 0x158;   // not the title screen or file select
+    }
+
+    /** Follows area changes: the exit in the old area, then (a second later) the way into the new one. */
     private void recordEntry() {
         int area = GameState.area();
         long now = SystemClock.uptimeMillis();
-        if (area != entryArea) {
-            entryArea = area;
-            entryAreaSince = now;
+        if (area < 0) {
+            return;   // loading: wait for the next area
+        }
+        float[] p = GameState.position();
+        if (area != doorArea) {
+            if (realArea(doorArea) && realArea(area) && doorLastPos != null) {
+                exitPos = doorLastPos;
+                MapDoors.note(doorArea, exitPos, area, true, null);
+                arrivedFrom = doorArea;
+            } else {
+                arrivedFrom = GameState.UNKNOWN;
+                exitPos = null;
+            }
+            doorArea = area;
+            doorAreaSince = now;
+            arrivalNoted = false;
+            doorLastPos = null;
             return;
         }
-        if (area < 0 || now - entryAreaSince < 1000) {
+        if (p != null && (p[0] != 0f || p[1] != 0f || p[2] != 0f)) {
+            doorLastPos = p;
+        }
+        if (arrivalNoted || now - doorAreaSince < 1000) {
+            if (!arrivalNoted || now - doorAreaSince > 2500) {
+                String n = GameState.areaName();
+                if (n != null && !n.isEmpty()) doorLastName = n;
+            }
             return;
+        }
+        arrivalNoted = true;
+        if (!realArea(arrivedFrom)) {
+            return;   // loaded a save or came from the title: no doorway
         }
         float[] e = GameState.entryPoint();
-        if (e == null) {
-            return;
+        String here = GameState.areaName();
+        if (e != null) {
+            MapDoors.note(area, e, arrivedFrom, false, doorLastName);
         }
-        java.util.ArrayList<float[]> list = entrances.get(area);
-        if (list == null) {
-            list = new java.util.ArrayList<>();
-            entrances.put(area, list);
+        if (exitPos != null && here != null && !here.isEmpty()) {
+            MapDoors.note(arrivedFrom, exitPos, area, true, here);   // the old area's door: where it leads
         }
-        for (int i = 0; i < list.size(); i++) {
-            float[] o = list.get(i);
-            float dx = o[0] - e[0], dz = o[2] - e[2];
-            if (dx * dx + dz * dz < 300f * 300f) {
-                if (i != list.size() - 1) {   // used again: make it the latest
-                    list.remove(i);
-                    list.add(o);
-                }
-                return;
-            }
-        }
-        list.add(e);
+        if (here != null && !here.isEmpty()) doorLastName = here;
     }
 
     /** Banjo: a red arrow pointing the way he faces (0 degrees = +z = down the map), or a dot. */
@@ -1397,7 +1416,7 @@ public final class BottomScreenView extends View {
         float[] o = currentObjects();
         RectF r = mapRect;
         float s = viewS, cx = viewCx, cz = viewCz;
-        if (o.length == 0 || !(s > 0)) return false;
+        if (!(s > 0)) return false;
         int best = -1;
         float bestD = Float.MAX_VALUE;
         for (int i = 0; i + 3 < o.length; i += 4) {
@@ -1410,12 +1429,63 @@ public final class BottomScreenView extends View {
             float d = (float) Math.hypot(ix - x, iy - y);
             if (d < reach && d < bestD) { bestD = d; best = i; }
         }
+        // Doors: "To <where it leads>"
+        for (MapDoors.Door d : MapDoors.doors(GameState.area())) {
+            float ix = r.centerX() + (d.x - cx) * s, iy = r.centerY() + (d.z - cz) * s;
+            float dd = (float) Math.hypot(ix - x, iy - y);
+            if (dd < 4f * u && dd < bestD) {
+                bestD = dd; best = -2; doorTagX = d.x; doorTagZ = d.z;
+                doorTagName = d.name != null ? "To " + titleCase(d.name) : "Door";
+            }
+        }
+        if (best == -2) {
+            tagIndex = -1;
+            doorTagAt = SystemClock.uptimeMillis();
+            Haptics.tap(this);
+            invalidate();
+            return true;
+        }
         if (best < 0) return false;
         tagIndex = best;
         tagAt = SystemClock.uptimeMillis();
         Haptics.tap(this);
         invalidate();
         return true;
+    }
+
+    private float doorTagX, doorTagZ;
+    private String doorTagName;
+    private long doorTagAt = -100000;
+
+    /** "ISLE O' HAGS ( JINJO VILLAGE )" -> "Isle O' Hags (Jinjo Village)". */
+    private static String titleCase(String n) {
+        StringBuilder b = new StringBuilder();
+        boolean start = true;
+        for (char ch : n.replace("( ", "(").replace(" )", ")").toCharArray()) {
+            b.append(start ? Character.toUpperCase(ch) : Character.toLowerCase(ch));
+            start = ch == ' ' || ch == '(' || ch == '-';
+        }
+        return b.toString();
+    }
+
+    private void drawDoorTag(Canvas c, RectF r, float cx, float cz, float viewScale, long now) {
+        if (doorTagName == null || now - doorTagAt >= TAG_MS) return;
+        drawTagAt(c, r, r.centerX() + (doorTagX - cx) * viewScale, r.centerY() + (doorTagZ - cz) * viewScale, doorTagName, now - doorTagAt);
+    }
+
+    private void drawTagAt(Canvas c, RectF r, float x, float y, String name, long age) {
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setTextSize(2.4f * u);
+        float w = text.measureText(name) + 2.4f * u, h = 3.6f * u;
+        float ty = y - 4.6f * u;
+        float left = Math.max(r.left + 0.5f * u, Math.min(r.right - 0.5f * u - w, x - w / 2));
+        RectF box = new RectF(left, ty - h / 2, left + w, ty + h / 2);
+        int a = Math.min(255, (int) ((TAG_MS - age) / 2));
+        fill.setColor(Color.argb(Math.min(230, a), 52, 30, 12));
+        c.drawRoundRect(box, h / 2, h / 2, fill);
+        text.setColor(Color.argb(a, 255, 240, 205));
+        c.drawText(name, box.centerX(), box.centerY() - (text.descent() + text.ascent()) / 2, text);
+        postInvalidateDelayed(50);
     }
 
     private void drawTag(Canvas c, RectF r, float[] o, float cx, float cz, float viewScale, long now) {
