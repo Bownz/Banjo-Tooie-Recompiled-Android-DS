@@ -483,9 +483,9 @@ public final class BottomScreenView extends View {
             // Doors used (learned as you play, kept between sessions); the latest brighter.
             int doorsHere = GameState.area();
             MapDoors.Door latestDoor = MapDoors.latest(doorsHere);
-            for (MapDoors.Door d : MapDoors.doors(doorsHere)) {
-                drawEntrance(c, r.centerX() + (d.x - cx) * viewScale, r.centerY() + (d.z - cz) * viewScale,
-                    2.2f * iconScale * u, d == latestDoor);
+            for (MapDoors.Door door : MapDoors.doors(doorsHere)) {
+                drawEntrance(c, r.centerX() + (door.x - cx) * viewScale, r.centerY() + (door.z - cz) * viewScale,
+                    2.2f * iconScale * u, door == latestDoor);
             }
             drawDoorTag(c, r, cx, cz, viewScale, now);
             // Your own markers.
@@ -1435,7 +1435,7 @@ public final class BottomScreenView extends View {
             float dd = (float) Math.hypot(ix - x, iy - y);
             if (dd < 4f * u && dd < bestD) {
                 bestD = dd; best = -2; doorTagX = d.x; doorTagZ = d.z;
-                doorTagName = d.name != null ? "To " + titleCase(d.name) : "Door";
+                doorTagName = d.name != null ? "To " + titleCase(d.name.replace("( ", "(").replace(" )", ")")) : "Door";
             }
         }
         if (best == -2) {
@@ -1456,17 +1456,6 @@ public final class BottomScreenView extends View {
     private float doorTagX, doorTagZ;
     private String doorTagName;
     private long doorTagAt = -100000;
-
-    /** "ISLE O' HAGS ( JINJO VILLAGE )" -> "Isle O' Hags (Jinjo Village)". */
-    private static String titleCase(String n) {
-        StringBuilder b = new StringBuilder();
-        boolean start = true;
-        for (char ch : n.replace("( ", "(").replace(" )", ")").toCharArray()) {
-            b.append(start ? Character.toUpperCase(ch) : Character.toLowerCase(ch));
-            start = ch == ' ' || ch == '(' || ch == '-';
-        }
-        return b.toString();
-    }
 
     private void drawDoorTag(Canvas c, RectF r, float cx, float cz, float viewScale, long now) {
         if (doorTagName == null || now - doorTagAt >= TAG_MS) return;
