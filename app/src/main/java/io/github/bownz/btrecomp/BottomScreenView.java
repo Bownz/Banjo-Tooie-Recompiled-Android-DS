@@ -1427,7 +1427,7 @@ public final class BottomScreenView extends View {
             boolean refill = kind == GameState.OBJ_EGGS || kind == GameState.OBJ_FEATHERS || kind == GameState.OBJ_GOLD_FEATHERS;
             float reach = (refill ? 6f : 4f) * u;
             float d = (float) Math.hypot(ix - x, iy - y);
-            if (d < reach && d < bestD) { bestD = d; best = i; }
+            if (d < reach && (d < bestD || (d <= bestD && kind == GameState.OBJ_JAMJARS))) { bestD = d; best = i; }   // Jamjars over his silo
         }
         // Doors: "To <where it leads>"
         for (MapDoors.Door d : MapDoors.doors(GameState.area())) {

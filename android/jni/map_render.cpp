@@ -2107,6 +2107,19 @@ int bt_area_objects(const uint8_t* rdram, float* out, int max) {
         out[4 * n] = float(x); out[4 * n + 1] = float(y); out[4 * n + 2] = float(z); out[4 * n + 3] = float(kind);
         n++;
     }
+    // Jamjars on his silo: his entry is where he pops out, about 130 units beside the silo's
+    // stump, so his icon sat off to one side of it (Mayahem Temple, user 24 Nov).
+    for (int i = 0; i < n; i++) {
+        if (out[4 * i + 3] != 10.0f) continue;
+        for (int j = 0; j < n; j++) {
+            if (out[4 * j + 3] != 16.0f) continue;
+            const float dx = out[4 * j] - out[4 * i], dz = out[4 * j + 2] - out[4 * i + 2];
+            if (dx * dx + dz * dz < 400.0f * 400.0f) {
+                out[4 * i] = out[4 * j]; out[4 * i + 1] = out[4 * j + 1]; out[4 * i + 2] = out[4 * j + 2];
+                break;
+            }
+        }
+    }
     return n;
 }
 
