@@ -2036,9 +2036,11 @@ public final class BottomScreenView extends View {
         final boolean atlas = atlasStyle;
         mapWorker.execute(() -> {
             int areaBefore = GameState.area();
-            // Atlas style: the area's map drawn from the ROM, when it's been drawn (found by the
-            // fingerprint of the collision list loaded now). Otherwise a live build (atlas-painted).
-            GameState.MapImage built = atlas && cap >= GameState.WHOLE ? MapAtlas.load(GameState.currentFingerprint(), "all", true) : null;
+            // The area's map drawn from the ROM (either style), when it's been drawn (found by the
+            // fingerprint of the collision list loaded now). Otherwise a live build. Before 0.9.40
+            // Classic was always built live, from the game's memory, where Mayahem Temple's
+            // see-through model isn't its water: most of the moat was missing (24 Nov).
+            GameState.MapImage built = cap >= GameState.WHOLE ? MapAtlas.load(GameState.currentFingerprint(), "all", atlas) : null;
             boolean fromAtlas = built != null;
             if (built == null) {
                 built = GameState.buildMap(2048, cap);
@@ -2392,6 +2394,9 @@ public final class BottomScreenView extends View {
                     MapAtlas.Entry e = MapAtlas.lookup(fp);
                     String layer = e != null ? MapAtlas.storeyFor(e, y, over) : null;
                     raw = layer != null ? MapAtlas.load(fp, layer, atlas) : null;
+                    if (raw == null && e != null) {
+                        raw = MapAtlas.storeyAt(fp, cap, atlas);
+                    }
                 }
                 composed = raw != null && whole != null && p != null ? composeLayer(whole, raw, p) : null;
             } catch (Throwable t) {

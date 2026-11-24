@@ -1893,6 +1893,27 @@ bool bt_test_top(const uint8_t* rdram, int size, std::vector<int32_t>& out, int&
     return true;
 }
 
+// Test harness: every triangle of the map model (model 0) and its second model (model 1):
+// 9 position floats, texture average r g b, vertex shade r g b, model, bluish, texture index.
+void bt_test_tris(const uint8_t* rdram, std::vector<float>& out) {
+    const Ram ram{ rdram };
+    std::map<std::tuple<uint32_t, int, int, int, int, uint32_t, bool>, Texture> textures;
+    std::map<const Texture*, int> ids;
+    for (int m = 0; m < 2; m++) {
+        std::vector<Tri> tris;
+        if (!collect(ram, m ? kSecondModelPtr : kModelPtr, m ? kSecondTextureBlockPtr : kTextureBlockPtr, m == 1, tris, textures)) continue;
+        for (const Tri& t : tris) {
+            for (const Vertex& v : t.v) { out.push_back(v.x); out.push_back(v.y); out.push_back(v.z); }
+            const Texture* x = t.tex;
+            out.push_back(x ? x->avgR : 200); out.push_back(x ? x->avgG : 200); out.push_back(x ? x->avgB : 200);
+            out.push_back((t.v[0].r + t.v[1].r + t.v[2].r) / 3); out.push_back((t.v[0].g + t.v[1].g + t.v[2].g) / 3); out.push_back((t.v[0].b + t.v[1].b + t.v[2].b) / 3);
+            out.push_back(float(m)); out.push_back(x && x->bluish ? 1.0f : 0.0f);
+            int id = -1; if (x) { auto it = ids.find(x); if (it == ids.end()) it = ids.emplace(x, int(ids.size())).first; id = it->second; }
+            out.push_back(float(id));
+        }
+    }
+}
+
 // Test harness: walkable floor triangles (9 floats each) of the area in rdram.
 void bt_test_floors(const uint8_t* rdram, std::vector<float>& out) {
     const Ram ram{ rdram };

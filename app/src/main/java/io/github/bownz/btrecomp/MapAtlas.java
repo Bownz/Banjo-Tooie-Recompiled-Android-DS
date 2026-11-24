@@ -131,6 +131,31 @@ final class MapAtlas {
         return null;
     }
 
+    /**
+     * The floor below cap drawn from the ROM when no storey drawn at launch fits (saved as layer
+     * "cap<n>", so it's drawn once). Null if this area isn't in the atlas. Before 0.9.40 such a
+     * cut was built from the game's memory, whose see-through model isn't always the area's water:
+     * under Mayahem Temple's cliffs the moat around Banjo disappeared from the map (24 Nov).
+     */
+    static GameState.MapImage storeyAt(int fp, float cap, boolean atlas) {
+        Entry e = lookup(fp);
+        if (e == null || dir == null) {
+            return null;
+        }
+        String layer = "cap" + Math.round(cap);
+        GameState.MapImage saved = load(fp, layer, atlas);
+        if (saved != null) {
+            return saved;
+        }
+        GameState.MapImage[] both = GameState.atlasBuildBoth(e.asset, cap, null);
+        if (both == null) {
+            return null;
+        }
+        save(fp, layer, both);
+        both[atlas ? 0 : 1].bitmap.recycle();   // the backdrop is shared: kept
+        return both[atlas ? 1 : 0];
+    }
+
     /** A saved map: layer "all" or a storey; atlas style or classic. Null if not drawn. */
     static GameState.MapImage load(int fp, String layer, boolean atlas) {
         File d = dir;
