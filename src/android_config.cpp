@@ -83,7 +83,7 @@ namespace {
     }
     std::atomic<bool> cutscene_dim{ true };
     std::atomic<bool> bottom_map{ true };
-    std::atomic<int> map_style{ 0 };   // Bottom Screen Map Style: 0 Atlas, 1 Classic
+    std::atomic<int> map_style{ 2 };   // Bottom Screen Map Style: 0 Atlas, 1 Classic, 2 Illustrated
     std::atomic<int> map_background{ 0 };   // Map Background: 0 Parchment, 1 Plain
 
     std::filesystem::path config_file(const char* name) {
@@ -224,17 +224,20 @@ namespace {
                 save_touch_config(context);
             });
         static EnumOptionVector map_styles = {
+            {2u, "Illustrated", "Illustrated"},
             {0u, "Atlas", "Atlas"},
             {1u, "Classic", "Classic"},
         };
         config.add_enum_option(
             "android_map_style",
             "Map Style",
-            "Atlas: the app's own drawn look (meadows, paths, stone, water), and every level's map is "
-            "drawn from your ROM when the app starts, storeys included, so maps show up straight away. "
-            "Classic: the game's own textures (also drawn from your ROM at start, then sharpened live).",
+            "Illustrated: a clean drawing of each level: smooth edges, the level's trees around it, "
+            "paths, steps, water and buildings as the game has them. "
+            "Atlas: the app's own painted look (meadows, paths, stone, water). "
+            "Classic: the game's own textures. "
+            "Every level's map is drawn from your ROM when the app starts, storeys included.",
             map_styles,
-            0u
+            2u
         );
         config.add_option_change_callback("android_map_style",
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
@@ -979,5 +982,5 @@ Java_io_github_bownz_btrecomp_TouchInput_nativeTouchFeedback(JNIEnv*, jclass) {
 extern "C" JNIEXPORT jint JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeBottomSettings(JNIEnv*, jclass) {
     const int buttons = bottom_buttons.load();
-    return (buttons != 0 ? 1 : 0) | (cutscene_dim.load() ? 2 : 0) | (show_fps.load() ? 4 : 0) | (buttons == 2 ? 8 : 0) | (bottom_map.load() ? 0 : 16) | (map_style.load() == 1 ? 32 : 0) | (map_background.load() == 1 ? 64 : 0);
+    return (buttons != 0 ? 1 : 0) | (cutscene_dim.load() ? 2 : 0) | (show_fps.load() ? 4 : 0) | (buttons == 2 ? 8 : 0) | (bottom_map.load() ? 0 : 16) | (map_style.load() == 1 ? 32 : 0) | (map_background.load() == 1 ? 64 : 0) | (map_style.load() == 2 ? 128 : 0);
 }

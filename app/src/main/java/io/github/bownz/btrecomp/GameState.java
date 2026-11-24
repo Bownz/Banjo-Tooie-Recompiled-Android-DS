@@ -207,6 +207,7 @@ final class GameState {
     }
 
     /** Map Style: true = Atlas (map_atlas.cpp), false = Classic. */
+    /** Live builds' look: 1 = atlas painting (also for Illustrated, which only the ROM draws), 0 = classic. */
     static void setMapStyle(boolean atlas) {
         try {
             nativeSetMapStyle(atlas ? 1 : 0);
@@ -263,8 +264,9 @@ final class GameState {
      * One level model's map drawn from the ROM, in both styles: {classic, atlas} (sharing one
      * backdrop), or null. storeysOut (3 floats) gets the heights between its storeys (NaN where none).
      */
+    /** {classic, atlas, illustrated (or null)}; the illustrated one has its own placement. */
     static MapImage[] atlasBuildBoth(int asset, float capY, float[] storeysOut) {
-        float[] info = new float[13];
+        float[] info = new float[18];
         Object[] parts;
         try {
             parts = nativeAtlasBuildBoth(asset, capY, info);
@@ -288,11 +290,17 @@ final class GameState {
             backdrop = new MapImage(android.graphics.Bitmap.createBitmap(bd, bw, bh, android.graphics.Bitmap.Config.ARGB_8888),
                 info[10], info[11], info[12]);
         }
-        MapImage[] out = new MapImage[2];
+        MapImage[] out = new MapImage[3];
         out[0] = new MapImage(android.graphics.Bitmap.createBitmap(classic, w, h, android.graphics.Bitmap.Config.ARGB_8888), info[2], info[3], info[4]);
         out[1] = new MapImage(android.graphics.Bitmap.createBitmap(atlas, w, h, android.graphics.Bitmap.Config.ARGB_8888), info[2], info[3], info[4]);
         out[0].backdrop = backdrop;
         out[1].backdrop = backdrop;
+        int iw = (int) info[13], ih = (int) info[14];
+        int[] il = parts.length > 3 ? (int[]) parts[3] : null;
+        if (il != null && iw > 0 && ih > 0 && il.length == iw * ih) {
+            // Its own canopy is its background: no backdrop.
+            out[2] = new MapImage(android.graphics.Bitmap.createBitmap(il, iw, ih, android.graphics.Bitmap.Config.ARGB_8888), info[15], info[16], info[17]);
+        }
         return out;
     }
 

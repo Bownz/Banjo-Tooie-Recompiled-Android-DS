@@ -808,6 +808,7 @@ namespace {
     // level: the top tier of Mayahem Temple). Per map id, for this run of the app; each map
     // built adds the ground around them back (see bt_map_wants_seed).
     std::map<uint16_t, std::vector<std::array<float, 3>>> g_seeds;
+#include "map_illustrated.inc"
 }
 
 bool bt_build_map_keyed(const uint8_t* rdram, int maxSize, float capY, uint32_t key, std::vector<int32_t>& out, float meta[5]) {
@@ -1686,12 +1687,14 @@ bool bt_cache_layers(uint32_t key, int& W, int& H, float& minX, float& minZ, flo
 // and the per-pixel kinds, ground heights and backdrop the atlas painter and the saved files use.
 bool bt_build_map_private(const uint8_t* rdram, int maxSize, float capY, std::vector<int32_t>& out, float meta[5],
                           std::vector<uint8_t>& kind, std::vector<int16_t>& groundY,
-                          std::vector<int32_t>& backdrop, float bdMeta[5]) {
+                          std::vector<int32_t>& backdrop, float bdMeta[5],
+                          std::vector<int32_t>* illustrated, float* illusMeta) {
     MapCache local;
     t_buildInto = &local;
     const bool ok = bt_build_map_keyed(rdram, maxSize, capY, 1, out, meta);
     t_buildInto = nullptr;
     if (!ok || local.kind.size() != out.size() || local.groundY.size() != out.size()) return false;
+    if (illustrated != nullptr && illusMeta != nullptr && !illustrate(local, out.data(), capY, *illustrated, illusMeta)) illustrated->clear();
     kind = std::move(local.kind);
     groundY = std::move(local.groundY);
     backdrop = std::move(local.backdrop);

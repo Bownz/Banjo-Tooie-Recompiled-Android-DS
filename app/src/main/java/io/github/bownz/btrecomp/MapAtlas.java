@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 final class MapAtlas {
     private static final String TAG = "BTMapAtlas";
-    private static final String DIR = "atlas-v2";
+    private static final String DIR = "atlas-v3";   // v3 (0.9.42): adds the illustrated style
 
     static final class Entry {
         final int asset;
@@ -137,13 +137,13 @@ final class MapAtlas {
      * cut was built from the game's memory, whose see-through model isn't always the area's water:
      * under Mayahem Temple's cliffs the moat around Banjo disappeared from the map (24 Nov).
      */
-    static GameState.MapImage storeyAt(int fp, float cap, boolean atlas) {
+    static GameState.MapImage storeyAt(int fp, float cap, int style) {
         Entry e = lookup(fp);
         if (e == null || dir == null) {
             return null;
         }
         String layer = "cap" + Math.round(cap);
-        GameState.MapImage saved = load(fp, layer, atlas);
+        GameState.MapImage saved = load(fp, layer, style);
         if (saved != null) {
             return saved;
         }
@@ -152,17 +152,38 @@ final class MapAtlas {
             return null;
         }
         save(fp, layer, both);
-        both[atlas ? 0 : 1].bitmap.recycle();   // the backdrop is shared: kept
-        return both[atlas ? 1 : 0];
+        GameState.MapImage keep = both[Math.min(style, 2)];
+        if (keep == null) keep = both[1];   // no illustrated picture: the atlas one
+        for (GameState.MapImage m : both) if (m != null && m != keep) m.bitmap.recycle();   // the backdrop is shared: kept
+        return keep;
     }
 
-    /** A saved map: layer "all" or a storey; atlas style or classic. Null if not drawn. */
-    static GameState.MapImage load(int fp, String layer, boolean atlas) {
+    /** Map styles: as Input > Dual Screen > Map Style. */
+    static final int STYLE_ATLAS = 1, STYLE_CLASSIC = 0, STYLE_ILLUSTRATED = 2;
+
+    /** A saved map: layer "all" or a storey, in a style. Null if not drawn. */
+    static GameState.MapImage load(int fp, String layer, int style) {
         File d = dir;
         if (d == null || lookup(fp) == null) {
             return null;
         }
         String base = Integer.toHexString(fp) + "-" + layer;
+        if (style == STYLE_ILLUSTRATED) {
+            File img = new File(d, base + "-i.img"), meta = new File(d, base + "-i.txt");
+            if (img.isFile() && meta.isFile()) {
+                try (BufferedReader r = new BufferedReader(new FileReader(meta))) {
+                    String[] v = r.readLine().trim().split(" ");
+                    Bitmap b = BitmapFactory.decodeFile(img.getPath());
+                    if (b != null && v.length >= 3) {
+                        return new GameState.MapImage(b, Float.parseFloat(v[0]), Float.parseFloat(v[1]), Float.parseFloat(v[2]));
+                    }
+                } catch (Exception e) {
+                    // fall back to the atlas picture
+                }
+            }
+            style = STYLE_ATLAS;
+        }
+        boolean atlas = style == STYLE_ATLAS;
         File img = new File(d, base + (atlas ? "-a.img" : "-c.img")), meta = new File(d, base + ".txt");
         if (!img.isFile() || !meta.isFile()) {
             return null;
@@ -350,7 +371,7 @@ final class MapAtlas {
     }
 
     private static void recycle(GameState.MapImage[] m) {
-        for (GameState.MapImage i : m) i.bitmap.recycle();
+        for (GameState.MapImage i : m) if (i != null) i.bitmap.recycle();
         if (m[0].backdrop != null) m[0].backdrop.bitmap.recycle();
     }
 
@@ -364,6 +385,13 @@ final class MapAtlas {
         String base = Integer.toHexString(fp) + "-" + layer;
         if (!write(both[0].bitmap, new File(dir, base + "-c.img")) || !write(both[1].bitmap, new File(dir, base + "-a.img"))) {
             return false;
+        }
+        if (both.length > 2 && both[2] != null && write(both[2].bitmap, new File(dir, base + "-i.img"))) {
+            try (FileWriter w = new FileWriter(new File(dir, base + "-i.txt"))) {
+                w.write(both[2].minX + " " + both[2].minZ + " " + both[2].scale + "\n");
+            } catch (IOException e) {
+                // the illustrated picture is then missing: the atlas one is shown
+            }
         }
         GameState.MapImage bd = both[0].backdrop;
         boolean bdSaved = bd != null && write(bd.bitmap, new File(dir, base + "-bd.img"));

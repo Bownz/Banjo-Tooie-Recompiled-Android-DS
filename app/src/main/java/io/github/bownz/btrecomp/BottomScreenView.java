@@ -1916,11 +1916,14 @@ public final class BottomScreenView extends View {
             }
         }
         onMenu = GameState.onMenu();
-        boolean atlas = (GameState.bottomSettings() & 32) == 0;   // Input > Dual Screen > Map Style
-        parchment = (GameState.bottomSettings() & 64) == 0;       // ... > Map Background
-        if (atlas != atlasStyle || !styleSet) {
+        int bs = GameState.bottomSettings();                       // Input > Dual Screen > Map Style
+        int style = (bs & 128) != 0 ? MapAtlas.STYLE_ILLUSTRATED : (bs & 32) != 0 ? MapAtlas.STYLE_CLASSIC : MapAtlas.STYLE_ATLAS;
+        boolean atlas = style != MapAtlas.STYLE_CLASSIC;
+        parchment = (bs & 64) == 0;                                // ... > Map Background
+        if (style != mapStyle || !styleSet) {
             styleSet = true;
             atlasStyle = atlas;
+            mapStyle = style;
             GameState.setMapStyle(atlas);
             mapMemory.clear();
             mapGeometry = 0;   // draw the area again in the new style
@@ -2093,20 +2096,21 @@ public final class BottomScreenView extends View {
             return;
         }
         mapBuilding = true;
-        final boolean atlas = atlasStyle;
+        final int style = mapStyle;
         mapWorker.execute(() -> {
             int areaBefore = GameState.area();
             // The area's map drawn from the ROM (either style), when it's been drawn (found by the
             // fingerprint of the collision list loaded now). Otherwise a live build. Before 0.9.40
             // Classic was always built live, from the game's memory, where Mayahem Temple's
             // see-through model isn't its water: most of the moat was missing (24 Nov).
-            GameState.MapImage built = cap >= GameState.WHOLE ? MapAtlas.load(GameState.currentFingerprint(), "all", atlas) : null;
+            GameState.MapImage built = cap >= GameState.WHOLE ? MapAtlas.load(GameState.currentFingerprint(), "all", style) : null;
             boolean fromAtlas = built != null;
             if (built == null) {
                 built = GameState.buildMap(2048, cap);
             }
             int areaAfter = GameState.area();
-            if (built != null && !fromAtlas && areaBefore >= 0 && areaBefore == areaAfter) {
+            // (Illustrated only comes from the ROM: a live stand-in isn't kept as its map.)
+            if (built != null && !fromAtlas && style != MapAtlas.STYLE_ILLUSTRATED && areaBefore >= 0 && areaBefore == areaAfter) {
                 saveMap(areaBefore, cap, built);
             }
             final GameState.MapImage result = built;
@@ -2145,7 +2149,7 @@ public final class BottomScreenView extends View {
         };
 
     private String mapKey(int area, float cap) {
-        return MAP_CACHE_VERSION + (atlasStyle ? "a" : "c") + "-" + Integer.toHexString(area) + "-" + (cap >= GameState.WHOLE ? "all" : Integer.toString(Math.round(cap)));
+        return MAP_CACHE_VERSION + (mapStyle == MapAtlas.STYLE_ILLUSTRATED ? "i" : atlasStyle ? "a" : "c") + "-" + Integer.toHexString(area) + "-" + (cap >= GameState.WHOLE ? "all" : Integer.toString(Math.round(cap)));
     }
 
     private java.io.File mapFile(String key, String ext) {
@@ -2164,13 +2168,13 @@ public final class BottomScreenView extends View {
             invalidate();
             return;
         }
-        final boolean atlas = atlasStyle;
+        final int style = mapStyle;
         layerWorker.execute(() -> {
             GameState.MapImage loaded = loadMap(key);
             if (loaded == null && cap >= GameState.WHOLE) {
                 // Not seen before: the map drawn from the ROM, if it's done (Classic refines it
                 // with a live build a few seconds later; Atlas keeps it).
-                loaded = MapAtlas.load(GameState.currentFingerprint(), "all", atlas);
+                loaded = MapAtlas.load(GameState.currentFingerprint(), "all", style);
             }
             if (loaded == null) {
                 return;
@@ -2441,7 +2445,7 @@ public final class BottomScreenView extends View {
         layerBusy = true;
         final float[] p = GameState.position();
         final GameState.MapImage whole = wholeImage;
-        final boolean atlas = atlasStyle;
+        final int style = mapStyle;
         final int area = GameState.area();
         final float y = layerY, over = layerOver;
         layerWorker.execute(() -> {
@@ -2453,9 +2457,9 @@ public final class BottomScreenView extends View {
                     int fp = GameState.currentFingerprint();
                     MapAtlas.Entry e = MapAtlas.lookup(fp);
                     String layer = e != null ? MapAtlas.storeyFor(e, y, over) : null;
-                    raw = layer != null ? MapAtlas.load(fp, layer, atlas) : null;
+                    raw = layer != null ? MapAtlas.load(fp, layer, style) : null;
                     if (raw == null && e != null) {
-                        raw = MapAtlas.storeyAt(fp, cap, atlas);
+                        raw = MapAtlas.storeyAt(fp, cap, style);
                     }
                 }
                 composed = raw != null && whole != null && p != null ? composeLayer(whole, raw, p) : null;
@@ -2520,6 +2524,7 @@ public final class BottomScreenView extends View {
 
     // ---- Maps drawn from the ROM (MapAtlas) ----------------------------------------------
     private boolean atlasStyle = true, styleSet;
+    private int mapStyle = MapAtlas.STYLE_ATLAS;
     private int atlasSeen = -1;
 
     /** "Drawing maps n/N" under the map while the atlas is being drawn. */

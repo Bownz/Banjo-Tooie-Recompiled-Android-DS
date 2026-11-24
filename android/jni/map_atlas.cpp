@@ -36,7 +36,8 @@ extern "C" uint8_t* bt_android_running_rdram();
 // map_render.cpp: a build that keeps nothing shared (safe on several threads at once).
 bool bt_build_map_private(const uint8_t* rdram, int maxSize, float capY, std::vector<int32_t>& out, float meta[5],
                           std::vector<uint8_t>& kind, std::vector<int16_t>& groundY,
-                          std::vector<int32_t>& backdrop, float bdMeta[5]);
+                          std::vector<int32_t>& backdrop, float bdMeta[5],
+                          std::vector<int32_t>* illustrated = nullptr, float* illusMeta = nullptr);
 
 namespace {
 
@@ -623,19 +624,26 @@ uint32_t bt_atlas_current_fingerprint(const uint8_t* rdram) {
 // Builds one level model's map from the ROM (capY as for live maps), in both styles: the
 // classic picture (the game's textures) and the atlas painting, plus the backdrop. Safe on
 // several threads at once (each has its own scratch RAM; the build keeps nothing shared).
-bool bt_atlas_build_both(std::span<const uint8_t> rom, int asset, float capY, std::vector<int32_t>& classic,
-                         std::vector<int32_t>& atlas, float meta[5], std::vector<float>* storeyOut,
-                         std::vector<int32_t>& backdrop, float bdMeta[5]) {
+bool bt_atlas_build_all(std::span<const uint8_t> rom, int asset, float capY, std::vector<int32_t>& classic,
+                        std::vector<int32_t>& atlas, float meta[5], std::vector<float>* storeyOut,
+                        std::vector<int32_t>& backdrop, float bdMeta[5],
+                        std::vector<int32_t>* illustrated, float* illusMeta) {
     thread_local Scratch scratch;
     std::vector<uint8_t> model;
     if (!layOut(rom, asset, scratch, model)) return false;
     if (storeyOut != nullptr) *storeyOut = storeys(model);
     std::vector<uint8_t> kind;
     std::vector<int16_t> gy;
-    const bool ok = bt_build_map_private(scratch.ram.data(), 2048, capY, classic, meta, kind, gy, backdrop, bdMeta);
+    const bool ok = bt_build_map_private(scratch.ram.data(), 2048, capY, classic, meta, kind, gy, backdrop, bdMeta, illustrated, illusMeta);
     if (!ok) return false;
     bt_atlas_paint(int(meta[0]), int(meta[1]), meta[2], meta[3], meta[4], kind.data(), gy.data(), classic.data(), atlas);
     return true;
+}
+
+bool bt_atlas_build_both(std::span<const uint8_t> rom, int asset, float capY, std::vector<int32_t>& classic,
+                         std::vector<int32_t>& atlas, float meta[5], std::vector<float>* storeyOut,
+                         std::vector<int32_t>& backdrop, float bdMeta[5]) {
+    return bt_atlas_build_all(rom, asset, capY, classic, atlas, meta, storeyOut, backdrop, bdMeta, nullptr, nullptr);
 }
 
 // The atlas style only (the PC test harness).
@@ -758,24 +766,29 @@ extern "C" JNIEXPORT jobjectArray JNICALL
 Java_io_github_bownz_btrecomp_GameState_nativeAtlasBuildBoth(JNIEnv* env, jclass, jint asset, jfloat capY, jfloatArray info) try {
     const std::span<const uint8_t> rom = atlasRom();
     if (rom.empty() || info == nullptr || env->GetArrayLength(info) < 13) return nullptr;
-    std::vector<int32_t> classic, atlas, backdrop;
+    // info: 13 floats (map, storeys, backdrop), or 18 with the illustrated style's own placement
+    // (13..17); then a fourth picture comes back, the illustrated one (0.9.42).
+    const bool withIllus = env->GetArrayLength(info) >= 18;
+    std::vector<int32_t> classic, atlas, backdrop, illus;
     std::vector<float> st;
-    float meta[13];
-    if (!bt_atlas_build_both(rom, asset, capY, classic, atlas, meta, &st, backdrop, meta + 8)) return nullptr;
+    float meta[18] = {};
+    if (!bt_atlas_build_all(rom, asset, capY, classic, atlas, meta, &st, backdrop, meta + 8,
+                            withIllus ? &illus : nullptr, withIllus ? meta + 13 : nullptr)) return nullptr;
     for (int k = 0; k < 3; k++) meta[5 + k] = k < int(st.size()) ? st[size_t(k)] : NAN;
     jclass intArray = env->FindClass("[I");
     if (intArray == nullptr) return nullptr;
-    jobjectArray result = env->NewObjectArray(3, intArray, nullptr);
+    const int count = withIllus ? 4 : 3;
+    jobjectArray result = env->NewObjectArray(count, intArray, nullptr);
     if (result == nullptr) return nullptr;
-    const std::vector<int32_t>* parts[3] = { &classic, &atlas, &backdrop };
-    for (int k = 0; k < 3; k++) {
+    const std::vector<int32_t>* parts[4] = { &classic, &atlas, &backdrop, &illus };
+    for (int k = 0; k < count; k++) {
         jintArray a = env->NewIntArray(jsize(parts[k]->size()));
         if (a == nullptr) return nullptr;
         if (!parts[k]->empty()) env->SetIntArrayRegion(a, 0, jsize(parts[k]->size()), reinterpret_cast<const jint*>(parts[k]->data()));
         env->SetObjectArrayElement(result, k, a);
         env->DeleteLocalRef(a);
     }
-    env->SetFloatArrayRegion(info, 0, 13, meta);
+    env->SetFloatArrayRegion(info, 0, withIllus ? 18 : 13, meta);
     return result;
 } catch (...) {
     return nullptr;   // out of memory or a bad model: skip it
