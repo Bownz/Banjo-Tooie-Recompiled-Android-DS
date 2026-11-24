@@ -209,7 +209,7 @@ final class MapLayers {
     }
 
     /** The mask grown by r pixels (separable, running counts). */
-    private static boolean[] growMask(boolean[] m, int w, int h, int r) {
+    static boolean[] growMask(boolean[] m, int w, int h, int r) {
         boolean[] t = new boolean[m.length], o = new boolean[m.length];
         for (int z = 0; z < h; z++) {
             int n = 0, row = z * w;

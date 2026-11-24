@@ -498,9 +498,6 @@ public final class BottomScreenView extends View {
                 drawPlayer(c, px, pz, shownDegrees, 2.6f * iconScale * u, now);   // its pulse updates with the 30 Hz poll
             }
         }
-        if (parchment && m != null) {
-            drawCompass(c, r);
-        }
         // A soft shadow inside the frame's edge.
         drawInnerShadow(c, r, inner);
         c.restoreToCount(saved);
@@ -997,6 +994,23 @@ public final class BottomScreenView extends View {
         zoomOutRect.set(bx - hr, y2 - hr, bx + hr, y2 + hr);
         hexButton(c, bx, y1, hr, true);
         hexButton(c, bx, y2, hr, false);
+        // The Notes layer: on or off (hide the notes when hunting for something else).
+        float y3 = y2 + 2 * hr + 0.6f * u;
+        notesRect.set(bx - hr, y3 - hr, bx + hr, y3 + hr);
+        hexButton(c, bx, y3, hr, null);
+        android.graphics.Bitmap note = GameState.sprite(0x0BE9);
+        if (note != null) {
+            float h = hr * 0.62f;
+            spriteRect.set(bx - h, y3 - h, bx + h, y3 + h);
+            spritePaint.setAlpha(notesShown ? 255 : 90);
+            c.drawBitmap(note, null, spriteRect, spritePaint);
+            spritePaint.setAlpha(255);
+        }
+        if (!notesShown) {
+            stroke.setStrokeWidth(0.6f * u);
+            stroke.setColor(INK);
+            c.drawLine(bx - hr * 0.45f, y3 + hr * 0.45f, bx + hr * 0.45f, y3 - hr * 0.45f, stroke);
+        }
 
         // Compass (north is up on this map).
         float cr = 3.6f * u, ccx = r.left + 1.8f * u + cr, ccy = r.bottom - 1.8f * u - cr;
@@ -1061,7 +1075,7 @@ public final class BottomScreenView extends View {
     }
 
     /** A honeycomb button with + or -. */
-    private void hexButton(Canvas c, float x, float y, float r, boolean plus) {
+    private void hexButton(Canvas c, float x, float y, float r, Boolean plus) {
         fill.setColor(Color.argb(120, 0, 0, 0));
         c.drawPath(hexagon(x + 0.3f * u, y + 0.5f * u, r, 0), fill);
         fill.setColor(Color.rgb(92, 54, 22));
@@ -1074,6 +1088,7 @@ public final class BottomScreenView extends View {
         stroke.setStrokeWidth(0.2f * u);
         stroke.setColor(HONEY_LIGHT);
         c.drawPath(hexagon(x, y, r * 0.82f, 0), stroke);
+        if (plus == null) return;   // a plain plate (the Notes button draws its own picture)
         stroke.setStrokeWidth(0.6f * u);
         stroke.setColor(INK);
         float arm = r * 0.34f;
@@ -1308,6 +1323,12 @@ public final class BottomScreenView extends View {
         float[] o = currentObjects();
         if (o.length == 0) return;
         float s = (1.0f + 0.35f * (1 - whole)) * u;
+        // Pads grow with the zoom at half its rate (size ~ zoom^0.5), within limits: bigger and
+        // easier to see close up, never huge. Zoom 1 = about 6000 units across the map.
+        float zoomRel = viewScale * 6000f / Math.max(1f, r.width());
+        padGrow = Math.max(0.8f, Math.min(1.8f, (float) Math.sqrt(zoomRel)));
+        float[] banjo = GameState.position();
+        long now = SystemClock.uptimeMillis();
         for (int pass = 0; pass < 2; pass++) {   // small things first, collectibles on top
             for (int i = 0; i + 3 < o.length; i += 4) {
                 int kind = (int) o[i + 3];
@@ -1315,14 +1336,152 @@ public final class BottomScreenView extends View {
                         || kind == GameState.OBJ_HONEYCOMB;
                 if ((pass == 0) != minor) continue;
                 if (minor && whole > 0.5f) continue;
+                boolean note = kind == GameState.OBJ_NOTES || kind == GameState.OBJ_CLEF;
+                if (note && !notesShown) continue;   // the Notes layer is off
                 // A lower floor's map still shows the rest of the area (0.9.15), so things up
                 // there stay; only those right over Banjo's floor are left out.
                 if (mapCap < GameState.WHOLE && o[i + 1] > mapCap && nearBanjo(o[i], o[i + 2])) continue;
                 float x = r.centerX() + (o[i] - cx) * viewScale, y = r.centerY() + (o[i + 2] - cz) * viewScale;
                 if (x < r.left - 4 * u || x > r.right + 4 * u || y < r.top - 4 * u || y > r.bottom + 4 * u) continue;
-                drawObject(c, kind, x, y, s);
+                if (note) {
+                    // Notes are the most numerous, so the quietest: 70% unless Banjo is near
+                    // or the note was just tapped.
+                    boolean near = banjo != null && Math.hypot(o[i] - banjo[0], o[i + 2] - banjo[2]) < 900;
+                    boolean tapped = now - tagAt < TAG_MS && tagIndex == i;
+                    spritePaint.setAlpha(near || tapped ? 255 : 178);
+                    drawObject(c, kind, x, y, s);
+                    spritePaint.setAlpha(255);
+                } else {
+                    drawObject(c, kind, x, y, s);
+                }
             }
         }
+        drawTag(c, r, o, cx, cz, viewScale, now);
+    }
+
+    // ---- Tapping an icon: its name for a moment --------------------------------------------
+    private static final long TAG_MS = 2500;
+    private int tagIndex = -1;
+    private long tagAt;
+    private float padGrow = 1f;
+    private boolean notesShown = true;
+    private final RectF notesRect = new RectF();
+
+    private static String objectName(int kind) {
+        switch (kind) {
+            case GameState.OBJ_JIGGY: return "Jiggy";
+            case GameState.OBJ_NOTES: return "Note nest";
+            case GameState.OBJ_CLEF: return "Treble clef";
+            case GameState.OBJ_JINJO: return "Jinjo";
+            case GameState.OBJ_GLOWBO: return "Glowbo";
+            case GameState.OBJ_HONEYCOMB: return "Honeycomb";
+            case GameState.OBJ_EMPTY_HONEYCOMB: return "Empty honeycomb";
+            case GameState.OBJ_EGGS: return "Blue eggs";
+            case GameState.OBJ_FEATHERS: return "Red feathers";
+            case GameState.OBJ_GOLD_FEATHERS: return "Gold feathers";
+            case GameState.OBJ_MUMBO_PAD: return "Mumbo pad";
+            case GameState.OBJ_FLIGHT_PAD: return "Flight pad";
+            case GameState.OBJ_JUMP_PAD: return "Shock jump pad";
+            case GameState.OBJ_WARP_PAD: return "Warp pad";
+            case GameState.OBJ_SILO: return "Warp silo";
+            default: return null;
+        }
+    }
+
+    /**
+     * A tap on the map at (x, y): the icon under it, if any, shows its name. Eggs and feathers
+     * answer from further away than their picture (they're small and often on busy ground).
+     */
+    private boolean tapIcon(float x, float y) {
+        float[] o = currentObjects();
+        RectF r = mapRect;
+        float s = viewS, cx = viewCx, cz = viewCz;
+        if (o.length == 0 || !(s > 0)) return false;
+        int best = -1;
+        float bestD = Float.MAX_VALUE;
+        for (int i = 0; i + 3 < o.length; i += 4) {
+            int kind = (int) o[i + 3];
+            if ((kind == GameState.OBJ_NOTES || kind == GameState.OBJ_CLEF) && !notesShown) continue;
+            if (objectName(kind) == null) continue;
+            float ix = r.centerX() + (o[i] - cx) * s, iy = r.centerY() + (o[i + 2] - cz) * s;
+            boolean refill = kind == GameState.OBJ_EGGS || kind == GameState.OBJ_FEATHERS || kind == GameState.OBJ_GOLD_FEATHERS;
+            float reach = (refill ? 6f : 4f) * u;
+            float d = (float) Math.hypot(ix - x, iy - y);
+            if (d < reach && d < bestD) { bestD = d; best = i; }
+        }
+        if (best < 0) return false;
+        tagIndex = best;
+        tagAt = SystemClock.uptimeMillis();
+        Haptics.tap(this);
+        invalidate();
+        return true;
+    }
+
+    private void drawTag(Canvas c, RectF r, float[] o, float cx, float cz, float viewScale, long now) {
+        if (tagIndex < 0 || now - tagAt >= TAG_MS || tagIndex + 3 >= o.length) return;
+        String name = objectName((int) o[tagIndex + 3]);
+        if (name == null) return;
+        float x = r.centerX() + (o[tagIndex] - cx) * viewScale, y = r.centerY() + (o[tagIndex + 2] - cz) * viewScale;
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setTextSize(2.4f * u);
+        float w = text.measureText(name) + 2.4f * u, h = 3.6f * u;
+        float ty = y - 4.6f * u;
+        float left = Math.max(r.left + 0.5f * u, Math.min(r.right - 0.5f * u - w, x - w / 2));
+        RectF box = new RectF(left, ty - h / 2, left + w, ty + h / 2);
+        int a = Math.min(255, (int) ((TAG_MS - (now - tagAt)) / 2));   // fades out at the end
+        fill.setColor(Color.argb(Math.min(230, a), 52, 30, 12));
+        c.drawRoundRect(box, h / 2, h / 2, fill);
+        text.setColor(Color.argb(a, 255, 240, 205));
+        c.drawText(name, box.centerX(), box.centerY() - (text.descent() + text.ascent()) / 2, text);
+        postInvalidateDelayed(50);
+    }
+
+    /**
+     * Eggs and feathers: a soft white glow and a thin dark edge round the picture, so they stand
+     * out on busy ground (contrast more than size). Each kind keeps one look everywhere.
+     */
+    private final java.util.HashMap<Integer, android.graphics.Bitmap> outlined = new java.util.HashMap<>();
+
+    private android.graphics.Bitmap outlinedSprite(int index) {
+        android.graphics.Bitmap o = outlined.get(index);
+        if (o != null) return o;
+        android.graphics.Bitmap b = GameState.sprite(index);
+        if (b == null) return null;
+        b = trimmed(b);
+        int pad = 3, w = b.getWidth() + 2 * pad, h = b.getHeight() + 2 * pad;
+        int[] src = new int[b.getWidth() * b.getHeight()];
+        b.getPixels(src, 0, b.getWidth(), 0, 0, b.getWidth(), b.getHeight());
+        boolean[] in = new boolean[w * h];
+        for (int y = 0; y < b.getHeight(); y++)
+            for (int x = 0; x < b.getWidth(); x++)
+                in[(y + pad) * w + x + pad] = (src[y * b.getWidth() + x] >>> 24) > 100;
+        boolean[] edge = MapLayers.growMask(in, w, h, 1);
+        int[] out = new int[w * h];
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int i = y * w + x;
+                int sx = x - pad, sy = y - pad;
+                int s = sx >= 0 && sy >= 0 && sx < b.getWidth() && sy < b.getHeight() ? src[sy * b.getWidth() + sx] : 0;
+                if ((s >>> 24) > 100) out[i] = s;
+                else if (edge[i]) out[i] = 0xE6281A0C;   // dark edge
+            }
+        }
+        o = android.graphics.Bitmap.createBitmap(out, w, h, android.graphics.Bitmap.Config.ARGB_8888);
+        outlined.put(index, o);
+        return o;
+    }
+
+    private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+    private void drawRefill(Canvas c, int index, float x, float y, float size) {
+        glowPaint.setShader(new RadialGradient(x, y, size * 0.75f, Color.argb(170, 255, 255, 255), Color.argb(0, 255, 255, 255), Shader.TileMode.CLAMP));
+        c.drawCircle(x, y, size * 0.75f, glowPaint);
+        glowPaint.setShader(null);
+        android.graphics.Bitmap b = outlinedSprite(index);
+        if (b == null) return;
+        float k = size / Math.max(b.getWidth(), b.getHeight());
+        spriteRect.set(x - b.getWidth() * k / 2, y - b.getHeight() * k / 2, x + b.getWidth() * k / 2, y + b.getHeight() * k / 2);
+        c.drawBitmap(b, null, spriteRect, spritePaint);
     }
 
     private static final int OUTLINE = Color.rgb(40, 26, 12);
@@ -1422,7 +1581,7 @@ public final class BottomScreenView extends View {
         if (pad >= 0) {
             android.graphics.Bitmap b = GameState.modelIcon(pad, redraw);
             if (b != null) {
-                float half = (kind == GameState.OBJ_SILO ? 2.2f : 1.75f) * s;   // the dome is twice a pad's size
+                float half = (kind == GameState.OBJ_SILO ? 2.2f : 1.75f) * s * padGrow;   // the dome is twice a pad's size
                 float k = half / Math.max(b.getWidth(), b.getHeight()) * 2f;
                 spriteRect.set(x - b.getWidth() * k / 2, y - b.getHeight() * k / 2, x + b.getWidth() * k / 2, y + b.getHeight() * k / 2);
                 if (kind == GameState.OBJ_MUMBO_PAD) {
@@ -1450,9 +1609,16 @@ public final class BottomScreenView extends View {
             c.drawCircle(x, y, 1.4f * s, stroke);
             if (drawSprite(c, kind, x, y, 2.6f * s)) return;
         } else {
-            boolean minor = kind == GameState.OBJ_EGGS || kind == GameState.OBJ_FEATHERS
-                    || kind == GameState.OBJ_GOLD_FEATHERS || kind == GameState.OBJ_HONEYCOMB;
-            float size = kind == GameState.OBJ_CLEF ? 4.0f * s : minor ? 2.4f * s : 3.0f * s;
+            boolean refill = kind == GameState.OBJ_EGGS || kind == GameState.OBJ_FEATHERS || kind == GameState.OBJ_GOLD_FEATHERS;
+            if (refill) {
+                int index = spriteFor(kind);
+                if (index >= 0 && GameState.sprite(index) != null) {
+                    drawRefill(c, index, x, y, 3.0f * s);   // a bit bigger than before (2.4)
+                    return;
+                }
+            }
+            boolean minor = refill || kind == GameState.OBJ_HONEYCOMB;
+            float size = kind == GameState.OBJ_CLEF ? 3.4f * s : kind == GameState.OBJ_NOTES ? 2.3f * s : minor ? 2.4f * s : 3.0f * s;
             if (drawSprite(c, kind, x, y, size)) return;
         }
         if (kind == GameState.OBJ_GOLD_FEATHERS) kind = GameState.OBJ_FEATHERS;
@@ -1678,7 +1844,17 @@ public final class BottomScreenView extends View {
 
     private boolean onMenu;
 
+    private boolean layersLoaded;
+
     private void refreshMap() {
+        if (!layersLoaded) {
+            layersLoaded = true;
+            try {
+                notesShown = getContext().getSharedPreferences("map_layers", android.content.Context.MODE_PRIVATE).getBoolean("notes", true);
+            } catch (RuntimeException ignored) {
+                // default
+            }
+        }
         onMenu = GameState.onMenu();
         boolean atlas = (GameState.bottomSettings() & 32) == 0;   // Input > Dual Screen > Map Style
         parchment = (GameState.bottomSettings() & 64) == 0;       // ... > Map Background
@@ -3032,6 +3208,17 @@ public final class BottomScreenView extends View {
         if (!bookOpen && !buttonsOut && mapImage != null && action == MotionEvent.ACTION_DOWN) {
             if (zoomInRect.contains(x, y)) { zoom(1); return true; }
             if (zoomOutRect.contains(x, y)) { zoom(-1); return true; }
+            if (notesRect.contains(x, y)) {
+                notesShown = !notesShown;
+                try {
+                    getContext().getSharedPreferences("map_layers", android.content.Context.MODE_PRIVATE).edit().putBoolean("notes", notesShown).apply();
+                } catch (RuntimeException ignored) {
+                    // not kept
+                }
+                Haptics.tap(this);
+                invalidate();
+                return true;
+            }
             if (!recenterRect.isEmpty() && recenterRect.contains(x, y)) { recenter(); return true; }
         }
         // The map: pinch zooms; two fingers drag the view (then one finger does, until Recenter);
@@ -3095,6 +3282,10 @@ public final class BottomScreenView extends View {
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
                     handler.removeCallbacks(longPress);
+                    if (action == MotionEvent.ACTION_UP && !downMoved && !mapPinched
+                            && SystemClock.uptimeMillis() - mapTouchAt < 400) {
+                        tapIcon(x, y);   // a short tap on an icon: its name
+                    }
                     mapTouching = false;
                     dragX = dragY = Float.NaN;
                     break;
