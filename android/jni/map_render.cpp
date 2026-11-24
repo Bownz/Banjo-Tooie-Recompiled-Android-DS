@@ -554,6 +554,12 @@ namespace {
     // The model's up-facing triangles from above (step 1 of the map), into a W x H raster
     // whose pixel (0, 0) is world (minX, minZ): textures x vertex colour x a little slope
     // light; the highest surface wins; see-through texels over the same surface blend in.
+    // Test harness only: texels per world unit for drawing steep faces textured from above (0: off).
+    thread_local float t_planarSteep = 0;
+    // Test harness only: the canopy texture and its mapping (texels per world x/z), for drawing
+    // the steep jungle walls as more canopy (they vanish into it).
+    struct CanopyMap { const void* tex = nullptr; float dsx = 0, dsz = 0, dtx = 0, dtz = 0, sr = 1, sg = 1, sb = 1; Tile tile; };
+    thread_local CanopyMap t_canopy;
     void rasterTop(const std::vector<Tri>& tris, float minX, float minZ, float scale, int W, int H,
                    std::vector<float>& R, std::vector<float>& G, std::vector<float>& B, std::vector<float>& top,
                    std::vector<uint8_t>& drawn, std::vector<uint8_t>& water, const std::vector<float>* limit = nullptr) {
@@ -602,7 +608,30 @@ namespace {
                     const float w00 = (1 - ws) * (1 - wt), w10 = ws * (1 - wt), w01 = (1 - ws) * wt, w11 = ws * wt;
                     const float ca = c00.a * w00 + c10.a * w10 + c01.a * w01 + c11.a * w11;
                     if (ca <= 8) return;
-                    if (steep) {
+                    if (steep && t_planarSteep < 0) return;   // test: steep faces left out
+                    if (steep && t_canopy.tex != nullptr && t.tex->avgG > 1.5f * t.tex->avgR && t.tex->avgG > 1.5f * t.tex->avgB) {
+                        // Test: a leafy steep wall drawn as the canopy itself, shaded like it.
+                        const Texture* ct = static_cast<const Texture*>(t_canopy.tex);
+                        const float wx = minX + (float(i % W) + 0.5f) / scale, wz = minZ + (float(i / W) + 0.5f) / scale;
+                        const float cs = wx * t_canopy.dsx + wz * t_canopy.dsz, ctt = wx * t_canopy.dtx + wz * t_canopy.dtz;
+                        const int tws2 = std::min(t_canopy.tile.w, ct->w), twt2 = std::min(t_canopy.tile.h, ct->h);
+                        const int ps = wrapCoord(cs, ct->w, t_canopy.tile.cms & 1, t_canopy.tile.ms, tws2);
+                        const int pt = wrapCoord(ctt, ct->h, t_canopy.tile.cmt & 1, t_canopy.tile.mt, twt2);
+                        const Rgba& c = ct->px[size_t(pt) * ct->w + ps];
+                        const float cl = 0.86f + 0.18f * 0.71f;
+                        top[i] = std::max(top[i], y);
+                        R[i] = c.r * t_canopy.sr * cl; G[i] = c.g * t_canopy.sg * cl; B[i] = c.b * t_canopy.sb * cl;
+                        drawn[i] = 1; water[i] = 0;
+                        return;
+                    }
+                    if (steep && t_planarSteep > 0) {
+                        // Test: the texture laid flat from above (world x/z) at the area's texel density.
+                        const float wx = minX + (float(i % W) + 0.5f) / scale, wz = minZ + (float(i / W) + 0.5f) / scale;
+                        const int ps = ((int(std::floor(wx * t_planarSteep)) % t.tex->w) + t.tex->w) % t.tex->w;
+                        const int pt = ((int(std::floor(wz * t_planarSteep)) % t.tex->h) + t.tex->h) % t.tex->h;
+                        const Rgba& c = t.tex->px[size_t(pt) * t.tex->w + ps];
+                        r = c.r * 0.9f; g = c.g * 0.9f; b = c.b * 0.9f;
+                    } else if (steep) {
                         r = t.tex->avgR * steepShade; g = t.tex->avgG * steepShade; b = t.tex->avgB * steepShade;
                     } else {
                         r = c00.r * w00 + c10.r * w10 + c01.r * w01 + c11.r * w11;
@@ -1867,6 +1896,35 @@ bool bt_test_top(const uint8_t* rdram, int size, std::vector<int32_t>& out, int&
     std::vector<Tri> tris;
     std::map<std::tuple<uint32_t, int, int, int, int, uint32_t, bool>, Texture> textures;
     if (!collect(ram, kModelPtr, kTextureBlockPtr, false, tris, textures) || tris.empty()) return false;
+    if (std::getenv("BT_CANOPY") != nullptr) {
+        // The texture covering the most ground seen from above, and its median mapping.
+        std::map<const Texture*, double> area;
+        for (const Tri& t : tris) {
+            if (!t.tex) continue;
+            const float ax = t.v[1].x - t.v[0].x, az = t.v[1].z - t.v[0].z, bx = t.v[2].x - t.v[0].x, bz = t.v[2].z - t.v[0].z;
+            area[t.tex] += std::fabs(ax * bz - az * bx) / 2;
+        }
+        const Texture* best = nullptr; double ba = 0;
+        for (auto& [k, v] : area) if (v > ba) { ba = v; best = k; }
+        std::vector<float> a, b, c, d, r, g, bl; Tile tile;
+        for (const Tri& t : tris) {
+            if (t.tex != best) continue;
+            const float ax = t.v[1].x - t.v[0].x, az = t.v[1].z - t.v[0].z, bx = t.v[2].x - t.v[0].x, bz = t.v[2].z - t.v[0].z;
+            const float det = ax * bz - az * bx;
+            if (std::fabs(det) < 1.0f) continue;
+            const float as = t.v[1].s - t.v[0].s, bs = t.v[2].s - t.v[0].s, at = t.v[1].t - t.v[0].t, bt = t.v[2].t - t.v[0].t;
+            a.push_back((as * bz - bs * az) / det); b.push_back((bs * ax - as * bx) / det);
+            c.push_back((at * bz - bt * az) / det); d.push_back((bt * ax - at * bx) / det);
+            for (const Vertex& v : t.v) { r.push_back(0.4f + 0.6f * v.r); g.push_back(0.4f + 0.6f * v.g); bl.push_back(0.4f + 0.6f * v.b); }
+            tile = t.tile;
+        }
+        auto med = [](std::vector<float>& v) { if (v.empty()) return 0.0f; std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); return v[v.size() / 2]; };
+        if (best && !a.empty()) {
+            t_canopy.tex = best; t_canopy.dsx = med(a); t_canopy.dsz = med(b); t_canopy.dtx = med(c); t_canopy.dtz = med(d);
+            t_canopy.sr = med(r); t_canopy.sg = med(g); t_canopy.sb = med(bl); t_canopy.tile = tile;
+            std::fprintf(stderr, "canopy %dx%d ds %.3f %.3f dt %.3f %.3f shade %.2f\n", best->w, best->h, t_canopy.dsx, t_canopy.dsz, t_canopy.dtx, t_canopy.dtz, t_canopy.sr);
+        }
+    }
     if (std::getenv("BT_SIDE") != nullptr) {
         // Seen from the front, a little from above: image x = x, image down = -y, nearer = -z.
         const float pitch = 0.35f, cp = std::cos(pitch), sp = std::sin(pitch);
@@ -1913,6 +1971,8 @@ void bt_test_tris(const uint8_t* rdram, std::vector<float>& out) {
         }
     }
 }
+
+void bt_test_planar_steep(float k) { t_planarSteep = k; }
 
 // Test harness: walkable floor triangles (9 floats each) of the area in rdram.
 void bt_test_floors(const uint8_t* rdram, std::vector<float>& out) {
@@ -1993,8 +2053,10 @@ int bt_area_objects(const uint8_t* rdram, float* out, int max) {
             case 0x04A6: kind = 8; break;   // feather nest switching between red and gold
             case 0x01CF: kind = 13; break;   // gold feather refill (Spiral Mountain, 13 Nov)
             case 0x02B0: kind = 9; break;
-            // Jamjars (0x0309/0x030B): only where he pops out beside his silo, not where he
-            // stands; the silo itself is drawn instead (23 Nov).
+            // Jamjars, where he teaches moves: 0x0309/0x030B beside his silos, 0x0311 in Isle o'
+            // Hags' area 0x152 (marks 24 Nov: Banjo walked up to it and learned a move). Shown
+            // again from 0.9.40 (the user wants move spots on the map).
+            case 0x0309: case 0x030B: case 0x0311: kind = 10; break;
             case 0x019D: kind = 16; break;   // silo: Isle o' Hags' warp domes (marks 23 Nov: Banjo
                                              // inside it stood exactly on its entry; 0x0004 beside it
                                              // is probably where it leads)

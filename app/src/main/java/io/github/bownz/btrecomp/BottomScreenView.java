@@ -1384,6 +1384,7 @@ public final class BottomScreenView extends View {
             case GameState.OBJ_JUMP_PAD: return "Shock jump pad";
             case GameState.OBJ_WARP_PAD: return "Warp pad";
             case GameState.OBJ_SILO: return "Warp silo";
+            case GameState.OBJ_JAMJARS: return "Jamjars (moves)";
             default: return null;
         }
     }
