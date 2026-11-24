@@ -24,6 +24,7 @@ import java.util.List;
 final class MapDoors {
     private static final String TAG = "BTDoor";
     private static final float MERGE = 400f;   // world units: the two ends of a doorway
+    private static final float PAIR = 2500f;   // ... or further apart when they lead to the same area
 
     static final class Door {
         final int area;
@@ -64,6 +65,25 @@ final class MapDoors {
         } catch (IOException ignored) {
             // none yet
         }
+        // Doors saved before 0.9.41 kept the two ends apart when far apart: join them.
+        boolean joined = false;
+        for (ArrayList<Door> l : byArea.values()) {
+            for (int i = l.size() - 1; i >= 0; i--) {
+                Door in = l.get(i);
+                if (in.flags != 2 || in.to < 0) continue;   // way in only
+                for (Door ex : l) {
+                    float dx = ex.x - in.x, dz = ex.z - in.z;
+                    if (ex != in && (ex.flags & 1) != 0 && ex.to == in.to && dx * dx + dz * dz < PAIR * PAIR) {
+                        ex.flags |= 2;
+                        if (ex.name == null) ex.name = in.name;
+                        l.remove(i);
+                        joined = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (joined) save();
     }
 
     private static ArrayList<Door> list(int area) {
@@ -100,6 +120,18 @@ final class MapDoors {
             if (dx * dx + dz * dz < MERGE * MERGE && Math.abs(d.y - p[1]) < 600f && (d.to == to || d.to < 0 || to < 0)) {
                 hit = d;
                 break;
+            }
+        }
+        if (hit == null && to >= 0) {
+            // The other end of a doorway already known by where it leads: the game can put Banjo
+            // well away from the doorway coming back (Mayahem Temple from Prison Compound: 1100
+            // units, 24 Nov).
+            for (Door d : list(area)) {
+                float dx = d.x - p[0], dz = d.z - p[2];
+                if (d.to == to && (d.flags & (exit ? 1 : 2)) == 0 && dx * dx + dz * dz < PAIR * PAIR) {
+                    hit = d;
+                    break;
+                }
             }
         }
         if (hit == null) {
