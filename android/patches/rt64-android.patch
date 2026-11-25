@@ -469,10 +469,19 @@ index d7caa12..bc247dc 100644
                  break;
              }
 diff --git a/src/hle/rt64_game_frame.cpp b/src/hle/rt64_game_frame.cpp
-index 80703c0..451ec50 100644
+index 80703c0..3462b84 100644
 --- a/src/hle/rt64_game_frame.cpp
 +++ b/src/hle/rt64_game_frame.cpp
-@@ -23,6 +23,9 @@ std::atomic<uint32_t> g_bt_rt64_matched_transforms{0};
+@@ -10,6 +10,8 @@
+ #include "xxHash/xxh3.h"
+ 
+ #include <atomic>
++#include <chrono>
++#include <cstdio>
+ 
+ // TEMPORARY diagnostic (Banjo-Tooie port). Counts the transforms matched by
+ // explicit id in the player's id range, which is what tells "the game emitted
+@@ -23,6 +25,9 @@ std::atomic<uint32_t> g_bt_rt64_matched_transforms{0};
  // is a wrong blend that no longer happens -- and a zero count with the ids
  // implemented would mean the ids are not reaching RT64.
  std::atomic<uint32_t> g_bt_rt64_projection_mismatches{0};
@@ -482,7 +491,91 @@ index 80703c0..451ec50 100644
  // Counts the projection ids RT64 actually saw, bucketed by kind. The point is
  // to distinguish "the game emitted the tags" from "RT64 received them": an
  // append into a display list can return success and still be overwritten by the
-@@ -845,7 +848,11 @@ namespace RT64 {
+@@ -412,6 +417,83 @@ namespace RT64 {
+         matchScenes(perspectiveScenes, prevFrame.perspectiveScenes);
+         matchScenes(orthographicScenes, prevFrame.orthographicScenes);
+ 
++        // Banjo-Tooie port (0.9.51): how many untagged (AUTO) objects found their match in the
++        // previous game frame. An object that existed in both frames but wasn't paired is drawn
++        // where it is now in every in-between frame, then snaps: a small hop. Every 5 s a summary;
++        // for the first 120 frames with a miss, the misses themselves (position, vertex count),
++        // beside the previous frame's leftovers, so a pair that should have matched shows.
++        {
++            static std::chrono::steady_clock::time_point btWindow = std::chrono::steady_clock::now();
++            static uint64_t btFrames = 0, btAuto = 0, btMissed = 0, btLeft = 0, btBothFrames = 0;
++            static uint32_t btDetailLines = 0;
++            uint32_t frameAuto = 0, frameMissed = 0, frameLeft = 0;
++            char missed[384] = {0}, left[384] = {0};
++            size_t missedLen = 0, leftLen = 0;
++            for (uint32_t w = 0; w < workloads.size(); w++) {
++                if (w >= prevFrame.workloads.size()) {
++                    continue;
++                }
++
++                const Workload &cw = workloadQueue.workloads[workloads[w]];
++                const Workload &pw = workloadQueue.workloads[prevFrame.workloads[w]];
++                const GameFrameMap::WorkloadMap &cm = frameMap.workloads[workloads[w]];
++                for (uint32_t t = 0; t < cm.transforms.size() && t < cw.drawData.worldTransformGroups.size(); t++) {
++                    const TransformGroup &g = cw.drawData.transformGroups[cw.drawData.worldTransformGroups[t]];
++                    const uint32_t verts = cw.drawData.worldTransformVertexCount(t);
++                    if ((g.matrixId != G_EX_ID_AUTO) || (verts == 0)) {
++                        continue;
++                    }
++
++                    frameAuto++;
++                    if (!cm.transforms[t].mapped) {
++                        frameMissed++;
++                        if (missedLen + 48 < sizeof(missed)) {
++                            const hlslpp::float3 pos = cw.drawData.worldTransforms[t][3].xyz;
++                            missedLen += snprintf(missed + missedLen, sizeof(missed) - missedLen, " (%.0f %.0f %.0f v%u)", float(pos.x), float(pos.y), float(pos.z), verts);
++                        }
++                    }
++                }
++
++                for (uint32_t t = 0; t < cm.prevTransformsMapped.size() && t < pw.drawData.worldTransformGroups.size(); t++) {
++                    const TransformGroup &g = pw.drawData.transformGroups[pw.drawData.worldTransformGroups[t]];
++                    const uint32_t verts = pw.drawData.worldTransformVertexCount(t);
++                    if ((g.matrixId != G_EX_ID_AUTO) || (verts == 0) || cm.prevTransformsMapped[t]) {
++                        continue;
++                    }
++
++                    frameLeft++;
++                    if (leftLen + 48 < sizeof(left)) {
++                        const hlslpp::float3 pos = pw.drawData.worldTransforms[t][3].xyz;
++                        leftLen += snprintf(left + leftLen, sizeof(left) - leftLen, " (%.0f %.0f %.0f v%u)", float(pos.x), float(pos.y), float(pos.z), verts);
++                    }
++                }
++            }
++
++            btFrames++;
++            btAuto += frameAuto;
++            btMissed += frameMissed;
++            btLeft += frameLeft;
++            if ((frameMissed > 0) && (frameLeft > 0)) {
++                btBothFrames++;
++            }
++
++            if ((frameMissed > 0) && (btDetailLines < 120)) {
++                btDetailLines++;
++                fprintf(stdout, "Match miss: %u of %u objects new, %u of last frame's left over | new:%s | left:%s | scenes %zu+%zu\n",
++                    frameMissed, frameAuto, frameLeft, missed, left, perspectiveScenes.size(), orthographicScenes.size());
++            }
++
++            const auto btNow = std::chrono::steady_clock::now();
++            if (btNow - btWindow >= std::chrono::seconds(5)) {
++                btWindow = btNow;
++                fprintf(stdout, "Perf matching: %llu game frames, %.1f untagged objects per frame, %.2f not paired per frame, %.2f left over per frame, frames with both %llu\n",
++                    (unsigned long long)btFrames, btFrames ? double(btAuto) / double(btFrames) : 0.0, btFrames ? double(btMissed) / double(btFrames) : 0.0,
++                    btFrames ? double(btLeft) / double(btFrames) : 0.0, (unsigned long long)btBothFrames);
++                fflush(stdout);
++                btFrames = btAuto = btMissed = btLeft = btBothFrames = 0;
++            }
++        }
++
+         if (!workloadsModified.empty()) {
+             thread_local std::vector<BufferUploader::Upload> uploads;
+             uploads.clear();
+@@ -845,7 +927,11 @@ namespace RT64 {
                  matrixIdHash = matrixIdHash * 33 ^ group.matrixId;
  
                  const bool usesIdWithAutoOrdering = (group.matrixId != G_EX_ID_AUTO) && (group.matrixId != G_EX_ID_IGNORE) && (group.ordering == G_EX_ORDER_AUTO);
