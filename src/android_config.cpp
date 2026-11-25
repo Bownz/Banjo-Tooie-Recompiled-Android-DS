@@ -39,6 +39,7 @@ extern "C" void bt_android_set_bottom_screen(int enabled);        // android/jni
 extern "C" void bt_android_set_gpu_keep_awake(bool on);           // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_perf_hints(bool on);               // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_frame_pacing(bool on);             // android/jni/perf_hint.cpp
+extern "C" void bt_rt64_set_blend_untagged(bool on);              // lib/rt64 (android patch), 0.9.47
 extern "C" void bt_android_set_shared_gpu_queue(bool on);         // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_fast_clears(bool on);              // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_overlap_frames(bool on);           // android/jni/perf_hint.cpp
@@ -715,6 +716,20 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
                 bt_android_set_frame_pacing(std::get<uint32_t>(cur) == 1u);
             });
+        graphics_config.add_enum_option(
+            "android_blend_untagged",
+            "Blend Untagged Objects",
+            "At 60 FPS, the in-between frames blend Banjo, the camera and the sky. Off: everything "
+            "else is drawn where the game put it (moves at the game's own rate, no flicker). On: the "
+            "renderer guesses which piece is which between frames and blends those too, which made "
+            "the Rare logo flick up and down. Off by default from 0.9.47.",
+            onoff_options,
+            0u
+        );
+        graphics_config.add_option_change_callback("android_blend_untagged",
+            [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
+                bt_rt64_set_blend_untagged(std::get<uint32_t>(cur) == 1u);
+            });
         static EnumOptionVector live_options = {
             {0u, "Off", "Off"},
             {1u, "On", "On"},
@@ -902,6 +917,11 @@ void bt::android::after_config_loaded() {
         std::printf("Fast Clears: %s\n", (fc == nullptr || *fc == 1u) ? "on" : "off");
         bt_android_set_perf_hints(h != nullptr && *h == 1u);
         bt_android_set_frame_pacing(p != nullptr && *p == 1u);
+        {
+            const recomp::config::ConfigValueVariant blend = graphics.get_option_value("android_blend_untagged");
+            const uint32_t* b = std::get_if<uint32_t>(&blend);
+            bt_rt64_set_blend_untagged(b != nullptr && *b == 1u);
+        }
         std::printf("Performance Hints: %s, Frame Pacing: %s\n", (h != nullptr && *h == 1u) ? "on" : "off", (p != nullptr && *p == 1u) ? "on" : "off");
         std::fflush(stdout);
     }

@@ -468,6 +468,33 @@ index d7caa12..bc247dc 100644
                  reinterpretTileRecord(renderWorker, op, *textureCache, resolutionScale, submissionFrame, shaderLibrary->usesHDR, cmdListReinterpretations, cmdListDiscards);
                  break;
              }
+diff --git a/src/hle/rt64_game_frame.cpp b/src/hle/rt64_game_frame.cpp
+index 80703c0..90c6f86 100644
+--- a/src/hle/rt64_game_frame.cpp
++++ b/src/hle/rt64_game_frame.cpp
+@@ -23,6 +23,9 @@ std::atomic<uint32_t> g_bt_rt64_matched_transforms{0};
+ // is a wrong blend that no longer happens -- and a zero count with the ids
+ // implemented would mean the ids are not reaching RT64.
+ std::atomic<uint32_t> g_bt_rt64_projection_mismatches{0};
++// Video > Blend Untagged Objects (0.9.47): off by default.
++std::atomic<bool> g_bt_rt64_blend_untagged{false};
++void bt_rt64_set_blend_untagged(bool on) { g_bt_rt64_blend_untagged.store(on); }
+ // Counts the projection ids RT64 actually saw, bucketed by kind. The point is
+ // to distinguish "the game emitted the tags" from "RT64 received them": an
+ // append into a display list can return success and still be overwritten by the
+@@ -845,7 +848,11 @@ namespace RT64 {
+                 matrixIdHash = matrixIdHash * 33 ^ group.matrixId;
+ 
+                 const bool usesIdWithAutoOrdering = (group.matrixId != G_EX_ID_AUTO) && (group.matrixId != G_EX_ID_IGNORE) && (group.ordering == G_EX_ORDER_AUTO);
+-                doTransformMatching = doTransformMatching || (group.matrixId == G_EX_ID_AUTO) || usesIdWithAutoOrdering;
++                // Banjo-Tooie port (0.9.47): untagged transforms are only blended when asked. RT64's
++                // guess of which untagged piece is which between frames goes wrong in Tooie (the Rare
++                // logo flicked up and down, gameplay looked smoother at 30), so by default they're
++                // drawn where the game put them; tagged ones (Banjo, camera, sky) still blend.
++                doTransformMatching = doTransformMatching || ((group.matrixId == G_EX_ID_AUTO) && g_bt_rt64_blend_untagged.load(std::memory_order_relaxed)) || usesIdWithAutoOrdering;
+                 doTileInterpolation = doTileInterpolation || (group.tileInterpolation != G_EX_COMPONENT_SKIP);
+                 doTileMatching = doTileMatching || (group.tileInterpolation == G_EX_COMPONENT_AUTO);
+             }
 diff --git a/src/hle/rt64_interpreter.cpp b/src/hle/rt64_interpreter.cpp
 index dccaa87..5a0cbe9 100644
 --- a/src/hle/rt64_interpreter.cpp
