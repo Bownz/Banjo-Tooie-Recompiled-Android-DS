@@ -161,7 +161,7 @@ extern "C" void bt_android_perf_hint_add_thread() {
 // 0.9.23: with them (0.9.21-0.9.22) the GPU ran at 401-475 MHz in Jinjo Village at Standard
 // performance and dropped frames; on 13 Nov, without them, it ran at 550-680 MHz.
 static std::atomic<bool> g_hints_on{false};
-static std::atomic<bool> g_pacing_on{false};
+static std::atomic<bool> g_pacing_on{true};   // on by default from 0.9.45
 
 extern "C" void bt_android_set_perf_hints(bool on) {
     g_hints_on.store(on);

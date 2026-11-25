@@ -704,14 +704,14 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
                 bt_android_set_fast_clears(std::get<uint32_t>(cur) == 1u);
             });
         graphics_config.add_enum_option(
-            "android_frame_pacing",
-            "Frame Pacing (test)",
-            "Asks the screen to show each frame a whole number of refreshes after the last one. "
-            "Off by default; for testing whether it helps or hurts.",
+            "android_frame_pacing_v2",
+            "Frame Pacing",
+            "Asks the screen to show each frame a whole number of refreshes after the last one, so "
+            "motion is evenly spaced (as in the DK64 port). On by default from 0.9.45.",
             onoff_options,
-            0u
+            1u
         );
-        graphics_config.add_option_change_callback("android_frame_pacing",
+        graphics_config.add_option_change_callback("android_frame_pacing_v2",
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
                 bt_android_set_frame_pacing(std::get<uint32_t>(cur) == 1u);
             });
@@ -859,7 +859,7 @@ void bt::android::after_config_loaded() {
     {
         recomp::config::Config& graphics = recompui::config::get_graphics_config();
         const recomp::config::ConfigValueVariant hints = graphics.get_option_value("android_perf_hints");
-        const recomp::config::ConfigValueVariant pacing = graphics.get_option_value("android_frame_pacing");
+        const recomp::config::ConfigValueVariant pacing = graphics.get_option_value("android_frame_pacing_v2");
         const uint32_t* h = std::get_if<uint32_t>(&hints);
         const uint32_t* p = std::get_if<uint32_t>(&pacing);
         const recomp::config::ConfigValueVariant queues = graphics.get_option_value("android_gpu_queues");

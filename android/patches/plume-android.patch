@@ -1,16 +1,17 @@
 diff --git a/plume_vulkan.cpp b/plume_vulkan.cpp
-index f1dd503..d9f052a 100644
+index f1dd503..5b096b3 100644
 --- a/plume_vulkan.cpp
 +++ b/plume_vulkan.cpp
-@@ -13,6 +13,7 @@
+@@ -13,6 +13,8 @@
  #include <algorithm>
  #include <cmath>
  #include <climits>
 +#include <ctime>
++#include <vector>
  #include <unordered_map>
  
  #if DLSS_ENABLED
-@@ -27,7 +28,159 @@
+@@ -27,7 +29,159 @@
  // TODO:
  // - Fix resource pools.
  
@@ -170,7 +171,7 @@ index f1dd503..d9f052a 100644
      // Backend constants.
  
      // Required buffer alignment for acceleration structures.
-@@ -1390,7 +1543,12 @@ namespace plume {
+@@ -1390,7 +1544,12 @@ namespace plume {
          pipelineInfo.layout = pipelineLayout->vk;
          pipelineInfo.stage = stageInfo;
  
@@ -183,7 +184,7 @@ index f1dd503..d9f052a 100644
          if (res != VK_SUCCESS) {
              fprintf(stderr, "vkCreateComputePipelines failed with error code 0x%X.\n", res);
              return;
-@@ -1649,7 +1807,12 @@ namespace plume {
+@@ -1649,7 +1808,12 @@ namespace plume {
          pipelineInfo.layout = pipelineLayout->vk;
          pipelineInfo.renderPass = renderPass;
  
@@ -196,7 +197,7 @@ index f1dd503..d9f052a 100644
          if (res != VK_SUCCESS) {
              fprintf(stderr, "vkCreateGraphicsPipelines failed with error code 0x%X.\n", res);
              return;
-@@ -1880,6 +2043,10 @@ namespace plume {
+@@ -1880,6 +2044,10 @@ namespace plume {
          return it->second;
      }
  
@@ -207,7 +208,7 @@ index f1dd503..d9f052a 100644
      // VulkanDescriptorSet
  
      VulkanDescriptorSet::VulkanDescriptorSet(VulkanDevice *device, const RenderDescriptorSetDesc &desc) {
-@@ -1899,7 +2066,14 @@ namespace plume {
+@@ -1899,7 +2067,14 @@ namespace plume {
              boundlessRangeSize = std::max(desc.boundlessRangeSize, 1U);
  
              const RenderDescriptorRange &lastDescriptorRange = desc.descriptorRanges[desc.descriptorRangesCount - 1];
@@ -222,7 +223,7 @@ index f1dd503..d9f052a 100644
              rangeCount--;
          }
  
-@@ -1991,6 +2165,13 @@ namespace plume {
+@@ -1991,6 +2166,13 @@ namespace plume {
              imageInfo.imageView = (interfaceTexture != nullptr) ? interfaceTexture->imageView : VK_NULL_HANDLE;
          }
  
@@ -236,12 +237,45 @@ index f1dd503..d9f052a 100644
          setDescriptor(descriptorIndex, nullptr, &imageInfo, nullptr, nullptr);
      }
  
-@@ -2279,6 +2460,59 @@ namespace plume {
+@@ -2279,6 +2461,92 @@ namespace plume {
              presentId.swapchainCount = 1;
              presentInfo.pNext = &presentId;
          }
 +
 +#   if defined(__ANDROID__)
++        // Smoothness (Banjo-Tooie port, 0.9.45): how evenly frames are handed to the screen. Every
++        // 5 s: the gaps between presents, against the display's refresh period. Even 60 on a
++        // 60 Hz screen is all gaps at ~16.7 ms; a judder shows as gaps of 0/33 ms.
++        {
++            static uint64_t lastNs = 0, windowStartNs = 0;
++            static std::vector<float> gaps;
++            timespec sts = {};
++            clock_gettime(CLOCK_MONOTONIC, &sts);
++            const uint64_t tNs = uint64_t(sts.tv_sec) * 1000000000ULL + uint64_t(sts.tv_nsec);
++            if (lastNs != 0) gaps.push_back(float(double(tNs - lastNs) / 1e6));
++            lastNs = tNs;
++            if (windowStartNs == 0) windowStartNs = tNs;
++            if (tNs - windowStartNs >= 5000000000ULL && gaps.size() > 10) {
++                std::vector<float> g = gaps;
++                std::sort(g.begin(), g.end());
++                const float med = g[g.size() / 2];
++                int even = 0, quick = 0, slow = 0, verySlow = 0;
++                for (float v : gaps) {
++                    if (v < med * 0.6f) quick++;
++                    else if (v > med * 2.5f) verySlow++;
++                    else if (v > med * 1.5f) slow++;
++                    else even++;
++                }
++                // runs: how often a gap differs from the one before by more than 40%
++                int jumps = 0;
++                for (size_t i = 1; i < gaps.size(); i++) if (std::fabs(gaps[i] - gaps[i - 1]) > 0.4f * med) jumps++;
++                fprintf(stderr, "Perf smoothness: %zu presents, gap median %.1f ms, p90 %.1f, max %.1f | even %d, short %d, long %d, very long %d, jumps %d | refresh %.2f ms\n",
++                        gaps.size(), med, g[g.size() * 9 / 10], g.back(), even, quick, slow, verySlow, jumps, double(pacingRefreshNs) / 1e6);
++                fflush(stderr);
++                gaps.clear();
++                windowStartNs = tNs;
++            }
++        }
 +        VkPresentTimeGOOGLE presentTime = {};
 +        VkPresentTimesInfoGOOGLE presentTimesInfo = {};
 +        // Video > Frame Pacing (the game, android/jni/perf_hint.cpp); off unless switched on (0.9.23).
@@ -296,7 +330,7 @@ index f1dd503..d9f052a 100644
          
          VkResult res;
          {
-@@ -2310,6 +2544,20 @@ namespace plume {
+@@ -2310,6 +2578,20 @@ namespace plume {
      }
  
      bool VulkanSwapChain::resize() {
@@ -317,7 +351,7 @@ index f1dd503..d9f052a 100644
          getWindowSize(width, height);
  
          // Don't recreate the swap chain at all if the window doesn't have a valid size.
-@@ -2349,6 +2597,12 @@ namespace plume {
+@@ -2349,6 +2631,12 @@ namespace plume {
          VkResult res = vkCreateSwapchainKHR(commandQueue->device->vk, &createInfo, nullptr, &vk);
          if (res != VK_SUCCESS) {
              fprintf(stderr, "vkCreateSwapchainKHR failed with error code 0x%X.\n", res);
@@ -330,7 +364,7 @@ index f1dd503..d9f052a 100644
              return false;
          }
  
-@@ -2401,6 +2655,12 @@ namespace plume {
+@@ -2401,6 +2689,12 @@ namespace plume {
      }
  
      bool VulkanSwapChain::needsResize() const {
@@ -343,7 +377,7 @@ index f1dd503..d9f052a 100644
          uint32_t windowWidth, windowHeight;
          getWindowSize(windowWidth, windowHeight);
          return (vk == VK_NULL_HANDLE) || (windowWidth != width) || (windowHeight != height) || (requiredPresentMode != createdPresentMode);
-@@ -2494,6 +2754,42 @@ namespace plume {
+@@ -2494,6 +2788,42 @@ namespace plume {
          return true;
      }
  
@@ -386,7 +420,7 @@ index f1dd503..d9f052a 100644
      void VulkanSwapChain::releaseSwapChain() {
          if (vk != VK_NULL_HANDLE) {
              vkDestroySwapchainKHR(commandQueue->device->vk, vk, nullptr);
-@@ -2631,6 +2927,46 @@ namespace plume {
+@@ -2631,6 +2961,46 @@ namespace plume {
              return;
          }
          
@@ -433,7 +467,7 @@ index f1dd503..d9f052a 100644
          VkFramebufferCreateInfo fbInfo = {};
          fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
          fbInfo.renderPass = renderPass;
-@@ -2655,8 +2991,63 @@ namespace plume {
+@@ -2655,7 +3025,62 @@ namespace plume {
          if (renderPass != VK_NULL_HANDLE) {
              vkDestroyRenderPass(device->vk, renderPass, nullptr);
          }
@@ -442,8 +476,8 @@ index f1dd503..d9f052a 100644
 +            vkDestroyRenderPass(device->vk, variant.second, nullptr);
 +        }
 +#endif
-     }
- 
++    }
++
 +#if defined(__ANDROID__)
 +    VkRenderPass VulkanFramebuffer::androidClearVariant(uint32_t clearMask) const {
 +        std::lock_guard<std::mutex> lock(androidVariantMutex);
@@ -491,13 +525,12 @@ index f1dd503..d9f052a 100644
 +
 +        androidVariants.emplace_back(clearMask, variant);
 +        return variant;
-+    }
+     }
 +#endif
-+
+ 
      uint32_t VulkanFramebuffer::getWidth() const {
          return width;
-     }
-@@ -2794,6 +3185,9 @@ namespace plume {
+@@ -2794,6 +3219,9 @@ namespace plume {
  
      void VulkanCommandList::begin() {
          vkResetCommandBuffer(vk, 0);
@@ -507,7 +540,7 @@ index f1dd503..d9f052a 100644
  
          VkCommandBufferBeginInfo beginInfo = {};
          beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-@@ -2887,6 +3281,11 @@ namespace plume {
+@@ -2887,6 +3315,11 @@ namespace plume {
  
      void VulkanCommandList::dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) {
          assert(activeComputePipelineLayout != nullptr);
@@ -519,7 +552,7 @@ index f1dd503..d9f052a 100644
  
          vkCmdDispatch(vk, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
      }
-@@ -3077,12 +3476,36 @@ namespace plume {
+@@ -3077,12 +3510,36 @@ namespace plume {
      }
  
      void VulkanCommandList::setScissors(const RenderRect *scissorRects, uint32_t count) {
@@ -557,7 +590,7 @@ index f1dd503..d9f052a 100644
              }
  
              if (!scissorVector.empty()) {
-@@ -3091,7 +3514,7 @@ namespace plume {
+@@ -3091,7 +3548,7 @@ namespace plume {
          }
          else {
              // Single element fast path.
@@ -566,7 +599,7 @@ index f1dd503..d9f052a 100644
              vkCmdSetScissor(vk, 0, 1, &scissor);
          }
      }
-@@ -3102,6 +3525,12 @@ namespace plume {
+@@ -3102,6 +3559,12 @@ namespace plume {
          if (framebuffer != nullptr) {
              const VulkanFramebuffer *interfaceFramebuffer = static_cast<const VulkanFramebuffer *>(framebuffer);
              targetFramebuffer = interfaceFramebuffer;
@@ -579,7 +612,7 @@ index f1dd503..d9f052a 100644
          }
          else {
              targetFramebuffer = nullptr;
-@@ -3112,16 +3541,37 @@ namespace plume {
+@@ -3112,16 +3575,37 @@ namespace plume {
          vkCmdSetDepthBias(vk, depthBias, depthBiasClamp, slopeScaledDepthBias);
      }
  
@@ -617,7 +650,7 @@ index f1dd503..d9f052a 100644
                  clearRect.baseArrayLayer = 0;
                  clearRect.layerCount = 1;
                  rectVector.emplace_back(clearRect);
-@@ -3144,8 +3594,6 @@ namespace plume {
+@@ -3144,8 +3628,6 @@ namespace plume {
          assert(attachmentIndex < targetFramebuffer->colorAttachments.size());
          assert((clearRectsCount == 0) || (clearRects != nullptr));
  
@@ -626,7 +659,7 @@ index f1dd503..d9f052a 100644
          thread_local std::vector<VkClearRect> rectVector;
          clearCommonRectVector(targetFramebuffer->getWidth(), targetFramebuffer->getHeight(), clearRects, clearRectsCount, rectVector);
  
-@@ -3157,6 +3605,18 @@ namespace plume {
+@@ -3157,6 +3639,18 @@ namespace plume {
          rgba[3] = colorValue.a;
          attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
          attachment.colorAttachment = attachmentIndex;
@@ -645,7 +678,7 @@ index f1dd503..d9f052a 100644
          vkCmdClearAttachments(vk, 1, &attachment, uint32_t(rectVector.size()), rectVector.data());
      }
  
-@@ -3164,8 +3624,6 @@ namespace plume {
+@@ -3164,8 +3658,6 @@ namespace plume {
          assert(targetFramebuffer != nullptr);
          assert((clearRectsCount == 0) || (clearRects != nullptr));
  
@@ -654,7 +687,7 @@ index f1dd503..d9f052a 100644
          thread_local std::vector<VkClearRect> rectVector;
          clearCommonRectVector(targetFramebuffer->getWidth(), targetFramebuffer->getHeight(), clearRects, clearRectsCount, rectVector);
  
-@@ -3180,6 +3638,27 @@ namespace plume {
+@@ -3180,6 +3672,27 @@ namespace plume {
              attachment.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
          }
  
@@ -682,7 +715,7 @@ index f1dd503..d9f052a 100644
          vkCmdClearAttachments(vk, 1, &attachment, uint32_t(rectVector.size()), rectVector.data());
      }
  
-@@ -3469,6 +3948,12 @@ namespace plume {
+@@ -3469,6 +3982,12 @@ namespace plume {
      void VulkanCommandList::checkActiveRenderPass() {
          assert(targetFramebuffer != nullptr);
          
@@ -695,7 +728,7 @@ index f1dd503..d9f052a 100644
          if (activeRenderPass == VK_NULL_HANDLE) {
              VkRenderPassBeginInfo beginInfo = {};
              beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-@@ -3481,7 +3966,85 @@ namespace plume {
+@@ -3481,7 +4000,85 @@ namespace plume {
          }
      }
  
@@ -781,7 +814,7 @@ index f1dd503..d9f052a 100644
          if (activeRenderPass != VK_NULL_HANDLE) {
              vkCmdEndRenderPass(vk);
              activeRenderPass = VK_NULL_HANDLE;
-@@ -3703,19 +4266,41 @@ namespace plume {
+@@ -3703,19 +4300,41 @@ namespace plume {
      
      // VulkanQueueFamily
  
@@ -824,7 +857,7 @@ index f1dd503..d9f052a 100644
  
          if (queues[queueIndex].mutex == nullptr) {
              queues[queueIndex].mutex = std::make_unique<std::mutex>();
-@@ -3828,6 +4413,12 @@ namespace plume {
+@@ -3828,6 +4447,12 @@ namespace plume {
  
          // Store properties.
          vkGetPhysicalDeviceProperties(physicalDevice, &physicalDeviceProperties);
@@ -837,7 +870,7 @@ index f1dd503..d9f052a 100644
  
          // Check for supported features.
          void *featuresChain = nullptr;
-@@ -4018,12 +4609,22 @@ namespace plume {
+@@ -4018,12 +4643,22 @@ namespace plume {
          // Create the logical device with the desired family queues.
          std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
          std::vector<float> queuePriorities(MaxQueuesPerFamilyCount, 1.0f);
@@ -860,7 +893,7 @@ index f1dd503..d9f052a 100644
                  queueCreateInfo.queueFamilyIndex = i;
                  queueCreateInfo.pQueuePriorities = queuePriorities.data();
                  queueCreateInfos.emplace_back(queueCreateInfo);
-@@ -4149,7 +4750,15 @@ namespace plume {
+@@ -4149,7 +4784,15 @@ namespace plume {
  #   endif
  
          // Fill Vulkan-only capabilities.
@@ -876,7 +909,7 @@ index f1dd503..d9f052a 100644
  
          if (!nullDescriptorSupported) {
              nullBuffer = createBuffer(RenderBufferDesc::DefaultBuffer(16, RenderBufferFlag::VERTEX));
-@@ -4438,6 +5047,9 @@ namespace plume {
+@@ -4438,6 +5081,9 @@ namespace plume {
          }
  
          if (vk != VK_NULL_HANDLE) {
@@ -886,7 +919,7 @@ index f1dd503..d9f052a 100644
              vkDestroyDevice(vk, nullptr);
              vk = VK_NULL_HANDLE;
          }
-@@ -4464,7 +5076,19 @@ namespace plume {
+@@ -4464,7 +5110,19 @@ namespace plume {
  #else
      VulkanInterface::VulkanInterface() {
  #endif

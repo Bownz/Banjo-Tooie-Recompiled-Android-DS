@@ -2452,7 +2452,9 @@ public final class BottomScreenView extends View {
     private LayerMask layerMask;
     private boolean layerBusy;
     private final java.util.concurrent.ExecutorService layerWorker = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "BT map layer");
+        // On the slowest cores at low priority, like the map builder (0.9.45): it can draw a
+        // whole storey from the ROM, and on the big cores that cost frames after area changes.
+        Thread t = new Thread(() -> { GameState.backgroundThread(); r.run(); }, "BT map layer");
         t.setPriority(Thread.MIN_PRIORITY);
         return t;
     });

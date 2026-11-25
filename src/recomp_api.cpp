@@ -24,7 +24,10 @@
 // 0x80081F5C replaces that tail with a call back into this function.
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <vector>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -1422,6 +1425,35 @@ extern "C" void tooie_rt64_begin_frame(uint8_t* rdram, recomp_context* ctx) {
         android_thread_set = true;
         bt_android_perf_hint_add_thread();
         bt_android_set_thread_role(0);
+    }
+    // Smoothness (0.9.45): how evenly the game's own frames come. RT64 blends between the last
+    // two game frames by time, so uneven game frames show as uneven motion (camera judder) even
+    // when the screen holds 60. Every 5 s: the gaps between game frames.
+    {
+        static std::vector<float> gaps;
+        static auto last = std::chrono::steady_clock::time_point{};
+        static auto windowStart = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+        if (last.time_since_epoch().count() != 0) {
+            gaps.push_back(std::chrono::duration<float, std::milli>(now - last).count());
+        }
+        last = now;
+        if (windowStart.time_since_epoch().count() == 0) windowStart = now;
+        if (now - windowStart >= std::chrono::seconds(5) && gaps.size() > 10) {
+            std::vector<float> g = gaps;
+            std::sort(g.begin(), g.end());
+            const float med = g[g.size() / 2];
+            int off = 0, jumps = 0;
+            for (size_t i = 0; i < gaps.size(); i++) {
+                if (std::fabs(gaps[i] - med) > 5.0f) off++;
+                if (i > 0 && std::fabs(gaps[i] - gaps[i - 1]) > 8.0f) jumps++;
+            }
+            std::fprintf(stderr, "Perf game frames: %zu, gap median %.1f ms, p10 %.1f, p90 %.1f, max %.1f | off by > 5 ms %d, jumps > 8 ms %d\n",
+                         gaps.size(), med, g[g.size() / 10], g[g.size() * 9 / 10], g.back(), off, jumps);
+            std::fflush(stderr);
+            gaps.clear();
+            windowStart = now;
+        }
     }
 #endif
     if (rt64_disabled()) {
