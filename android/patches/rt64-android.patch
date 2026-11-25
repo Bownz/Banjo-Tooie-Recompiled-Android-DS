@@ -469,7 +469,7 @@ index d7caa12..bc247dc 100644
                  break;
              }
 diff --git a/src/hle/rt64_game_frame.cpp b/src/hle/rt64_game_frame.cpp
-index 80703c0..aef8075 100644
+index 80703c0..fbc096b 100644
 --- a/src/hle/rt64_game_frame.cpp
 +++ b/src/hle/rt64_game_frame.cpp
 @@ -10,6 +10,8 @@
@@ -497,10 +497,75 @@ index 80703c0..aef8075 100644
  // Counts the projection ids RT64 actually saw, bucketed by kind. The point is
  // to distinguish "the game emitted the tags" from "RT64 received them": an
  // append into a display list can return success and still be overwritten by the
-@@ -412,6 +423,85 @@ namespace RT64 {
+@@ -412,6 +423,150 @@ namespace RT64 {
          matchScenes(perspectiveScenes, prevFrame.perspectiveScenes);
          matchScenes(orthographicScenes, prevFrame.orthographicScenes);
  
++        // Banjo-Tooie port (0.9.54): a second chance for untagged objects left unpaired. The
++        // pairing above needs the draw to be set up exactly the same in both frames; the falling
++        // Nintendo logo sometimes isn't (the 14:29 log: the same 232-vertex logo 5-12 units from
++        // where it was, as "new" beside last frame's "left over", about once a second). Unpaired,
++        // it's drawn unblended against the blended camera: a flick. Pair what's left by the same
++        // vertex count and the nearest position, within 300 units.
++        static std::atomic<uint32_t> btSecondChance{0};
++        for (uint32_t w = 0; (w < workloads.size()) && (w < prevFrame.workloads.size()); w++) {
++            Workload &cw = workloadQueue.workloads[workloads[w]];
++            const Workload &pw = workloadQueue.workloads[prevFrame.workloads[w]];
++            GameFrameMap::WorkloadMap &cm = frameMap.workloads[workloads[w]];
++            if (!cm.mapped || (cm.prevWorkloadIndex != prevFrame.workloads[w])) {
++                continue;
++            }
++
++            const GameFrameMap::WorkloadMap *pm = nullptr;
++            if (prevFrame.matched && prevFrame.frameMap.workloads[cm.prevWorkloadIndex].mapped) {
++                pm = &prevFrame.frameMap.workloads[cm.prevWorkloadIndex];
++            }
++
++            ModifiedBuffers modifiedBuffers;
++            for (uint32_t t = 0; (t < cm.transforms.size()) && (t < cw.drawData.worldTransformGroups.size()); t++) {
++                if (cm.transforms[t].mapped) {
++                    continue;
++                }
++
++                const TransformGroup &g = cw.drawData.transformGroups[cw.drawData.worldTransformGroups[t]];
++                const uint32_t verts = cw.drawData.worldTransformVertexCount(t);
++                if ((g.matrixId != G_EX_ID_AUTO) || (verts == 0)) {
++                    continue;
++                }
++
++                const float *cpos = cw.drawData.worldTransforms[t][3];
++                uint32_t best = UINT32_MAX;
++                float bestDist = 300.0f * 300.0f;
++                for (uint32_t q = 0; (q < cm.prevTransformsMapped.size()) && (q < pw.drawData.worldTransformGroups.size()); q++) {
++                    if (cm.prevTransformsMapped[q]) {
++                        continue;
++                    }
++
++                    const TransformGroup &pg = pw.drawData.transformGroups[pw.drawData.worldTransformGroups[q]];
++                    if ((pg.matrixId != G_EX_ID_AUTO) || (pw.drawData.worldTransformVertexCount(q) != verts)) {
++                        continue;
++                    }
++
++                    const float *ppos = pw.drawData.worldTransforms[q][3];
++                    const float dx = cpos[0] - ppos[0], dy = cpos[1] - ppos[1], dz = cpos[2] - ppos[2];
++                    const float d = dx * dx + dy * dy + dz * dz;
++                    if (d < bestDist) {
++                        bestDist = d;
++                        best = q;
++                    }
++                }
++
++                if (best != UINT32_MAX) {
++                    matchTransform(cw, pw, cm, pm, t, best, modifiedBuffers);
++                    btSecondChance.fetch_add(1, std::memory_order_relaxed);
++                }
++            }
++
++            if (!modifiedBuffers.empty()) {
++                workloadsModified[workloads[w]].merge(modifiedBuffers);
++            }
++        }
++
 +        // Banjo-Tooie port (0.9.51): how many untagged (AUTO) objects found their match in the
 +        // previous game frame. An object that existed in both frames but wasn't paired is drawn
 +        // where it is now in every in-between frame, then snaps: a small hop. Every 5 s a summary;
@@ -571,10 +636,10 @@ index 80703c0..aef8075 100644
 +            if (btNow - btWindow >= std::chrono::seconds(5)) {
 +                btWindow = btNow;
 +                const uint32_t btChanged = g_bt_rt64_vertex_changed.exchange(0, std::memory_order_relaxed);
-+                fprintf(stdout, "Perf matching: %llu game frames, %.1f untagged objects per frame, %.2f not paired per frame, %.2f left over per frame, frames with both %llu | paired with changed vertices %.2f per frame, blended %s\n",
++                fprintf(stdout, "Perf matching: %llu game frames, %.1f untagged objects per frame, %.2f not paired per frame, %.2f left over per frame, frames with both %llu | paired with changed vertices %.2f per frame, blended %s | second-chance pairs %u\n",
 +                    (unsigned long long)btFrames, btFrames ? double(btAuto) / double(btFrames) : 0.0, btFrames ? double(btMissed) / double(btFrames) : 0.0,
 +                    btFrames ? double(btLeft) / double(btFrames) : 0.0, (unsigned long long)btBothFrames,
-+                    btFrames ? double(btChanged) / double(btFrames) : 0.0, g_bt_rt64_blend_vertices.load(std::memory_order_relaxed) ? "yes" : "no");
++                    btFrames ? double(btChanged) / double(btFrames) : 0.0, g_bt_rt64_blend_vertices.load(std::memory_order_relaxed) ? "yes" : "no", btSecondChance.exchange(0));
 +                fflush(stdout);
 +                btFrames = btAuto = btMissed = btLeft = btBothFrames = 0;
 +            }
@@ -583,7 +648,7 @@ index 80703c0..aef8075 100644
          if (!workloadsModified.empty()) {
              thread_local std::vector<BufferUploader::Upload> uploads;
              uploads.clear();
-@@ -781,14 +871,22 @@ namespace RT64 {
+@@ -781,14 +936,22 @@ namespace RT64 {
          uint32_t curVertexCount = curWorkload.drawData.worldTransformVertexCount(curTransformIndex);
          uint32_t prevVertexIndex = prevWorkload.drawData.worldTransformVertexIndices[prevTransformIndex];
          uint32_t prevVertexCount = prevWorkload.drawData.worldTransformVertexCount(prevTransformIndex);
@@ -608,7 +673,7 @@ index 80703c0..aef8075 100644
                  const float *curPosFloatsRef = &curPosFloats[curVertexIndex * 3];
                  const float *prevPosFloatsRef = &prevPosFloats[prevVertexIndex * 3];
                  float *curVelFloatsRef = &curVelFloats[curVertexIndex * 3];
-@@ -845,7 +943,11 @@ namespace RT64 {
+@@ -845,7 +1008,11 @@ namespace RT64 {
                  matrixIdHash = matrixIdHash * 33 ^ group.matrixId;
  
                  const bool usesIdWithAutoOrdering = (group.matrixId != G_EX_ID_AUTO) && (group.matrixId != G_EX_ID_IGNORE) && (group.ordering == G_EX_ORDER_AUTO);
