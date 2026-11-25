@@ -592,6 +592,45 @@ index 7de5b69..ee599d7 100644
  
          // Create the semaphore the acquire method will use.
          acquiredSemaphore = ext.device->createCommandSemaphore();
+diff --git a/src/hle/rt64_rigid_body.cpp b/src/hle/rt64_rigid_body.cpp
+index fd8b3eb..5a19953 100644
+--- a/src/hle/rt64_rigid_body.cpp
++++ b/src/hle/rt64_rigid_body.cpp
+@@ -7,6 +7,9 @@
+ #include "../include/rt64_extended_gbi.h"
+ #include "common/rt64_math.h"
+ 
++#include <atomic>
++extern "C" std::atomic<uint32_t> g_bt_rt64_teleports;   // rt64_projection_processor.cpp (Banjo-Tooie port)
++
+ namespace RT64 {
+     // RigidBody
+ 
+@@ -21,6 +24,7 @@ namespace RT64 {
+             const float Epsilon = 1e-6f;
+             const float VelocityTolerance = 5.0f; // TODO: Make configurable.
+             const float MagnitudeThreshold = 10.0f; // TODO: Make configurable.
++            const float TeleportDistance = 250.0f;  // Banjo-Tooie port: world units in one game frame
+             hlslpp::float3 prevPosition = prevTransform[3].xyz;
+             hlslpp::float3 curPosition = curTransform[3].xyz;
+             hlslpp::float3 curLinearVelocity = curPosition - prevPosition;
+@@ -30,6 +34,16 @@ namespace RT64 {
+             float dotCurVel = std::max(hlslpp::dot(linearVelocity / std::max(prevVelMag, Epsilon), curLinearVelocity / std::max(curVelMag, Epsilon))[0], Epsilon);
+             curVelMag /= dotCurVel;
+             lerpTranslation = (curVelMag < VelocityTolerance) || (curVelMag / std::max(prevVelMag, Epsilon)) < MagnitudeThreshold;
++            // Banjo-Tooie port (0.9.49): only a real jump counts as a teleport. Something that slows
++            // almost to a stop and moves on (the Rare and Nintendo logos bobbing up and down) moves
++            // 10x further than the frame before at every turning point, so it wasn't blended right
++            // there and hopped against the blended camera. A teleport now also has to be far.
++            if (!lerpTranslation && (curVelMag < TeleportDistance)) {
++                lerpTranslation = true;
++            }
++            else if (!lerpTranslation) {
++                g_bt_rt64_teleports.fetch_add(1, std::memory_order_relaxed);
++            }
+             linearVelocity = curLinearVelocity;
+         }
+         else {
 diff --git a/src/hle/rt64_state.cpp b/src/hle/rt64_state.cpp
 index 2970e71..aff2b57 100644
 --- a/src/hle/rt64_state.cpp
@@ -2140,10 +2179,10 @@ index f2eee70..b64d898 100644
  
              struct {
 diff --git a/src/render/rt64_projection_processor.cpp b/src/render/rt64_projection_processor.cpp
-index 41110e5..09d315d 100644
+index 41110e5..4c9356d 100644
 --- a/src/render/rt64_projection_processor.cpp
 +++ b/src/render/rt64_projection_processor.cpp
-@@ -23,6 +23,10 @@ std::atomic<uint32_t> g_bt_rt64_proj_adjusted_sky{0};
+@@ -23,6 +23,12 @@ std::atomic<uint32_t> g_bt_rt64_proj_adjusted_sky{0};
  std::atomic<uint32_t> g_bt_rt64_proj_adjusted_other{0};
  std::atomic<uint32_t> g_bt_rt64_proj_skipped_sky{0};
  std::atomic<uint32_t> g_bt_rt64_proj_skipped_other{0};
@@ -2151,10 +2190,12 @@ index 41110e5..09d315d 100644
 +// frames, or not (so it jumped).
 +std::atomic<uint32_t> g_bt_rt64_cam_lerped{0};
 +std::atomic<uint32_t> g_bt_rt64_cam_not_lerped{0};
++// Objects RT64 took to have teleported (not blended that frame), 0.9.49.
++std::atomic<uint32_t> g_bt_rt64_teleports{0};
  }
  
  namespace RT64 {
-@@ -236,6 +240,9 @@ namespace RT64 {
+@@ -236,6 +242,9 @@ namespace RT64 {
                  // We only interpolate the projection if the view matrix has been interpolated.
                  const bool interpolateProjection = rigidBody->lerpTranslation || rigidBody->lerpRotation;
                  traceInterpolateProjection = interpolateProjection;
@@ -2164,7 +2205,7 @@ index 41110e5..09d315d 100644
                  if (interpolateProjection) {
                      projMatrix = lerpMatrix(adjustedPrevProj, curProjTransform, p.curFrameWeight);
                      prevProjTransform = lerpMatrix(adjustedPrevProj, curProjTransform, p.prevFrameWeight);
-@@ -246,6 +253,7 @@ namespace RT64 {
+@@ -246,6 +255,7 @@ namespace RT64 {
                  }
              }
              else {

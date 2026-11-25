@@ -1404,6 +1404,7 @@ extern std::atomic<uint32_t> g_bt_rt64_proj_id_ortho;
 extern std::atomic<uint32_t> g_bt_rt64_proj_adjusted_sky;
 extern std::atomic<uint32_t> g_bt_rt64_cam_lerped;
 extern std::atomic<uint32_t> g_bt_rt64_cam_not_lerped;
+extern std::atomic<uint32_t> g_bt_rt64_teleports;
 extern std::atomic<uint32_t> g_bt_rt64_proj_adjusted_other;
 extern std::atomic<uint32_t> g_bt_rt64_proj_skipped_sky;
 extern std::atomic<uint32_t> g_bt_rt64_proj_skipped_other;
@@ -1486,10 +1487,12 @@ extern "C" void tooie_rt64_begin_frame(uint8_t* rdram, recomp_context* ctx) {
             const uint32_t lerped = g_bt_rt64_cam_lerped.load(std::memory_order_relaxed);
             const uint32_t notLerped = g_bt_rt64_cam_not_lerped.load(std::memory_order_relaxed);
             const uint32_t mismatch = g_bt_rt64_projection_mismatches.load(std::memory_order_relaxed);
-            std::fprintf(stderr, "Perf camera: turning %d of %zu game frames, uneven steps %d, stops mid-turn %d, biggest step %.1f deg | rendered with the camera blended %u, not blended %u, projection mismatches %u\n",
+            static uint32_t lastTeleports = 0;
+            const uint32_t teleports = g_bt_rt64_teleports.load(std::memory_order_relaxed);
+            std::fprintf(stderr, "Perf camera: turning %d of %zu game frames, uneven steps %d, stops mid-turn %d, biggest step %.1f deg | rendered with the camera blended %u, not blended %u, projection mismatches %u | teleports (objects not blended) %u\n",
                          turning, yawSteps.size(), uneven, stops, maxStep,
-                         lerped - lastLerped, notLerped - lastNotLerped, mismatch - lastMismatch);
-            lastLerped = lerped; lastNotLerped = notLerped; lastMismatch = mismatch;
+                         lerped - lastLerped, notLerped - lastNotLerped, mismatch - lastMismatch, teleports - lastTeleports);
+            lastLerped = lerped; lastNotLerped = notLerped; lastMismatch = mismatch; lastTeleports = teleports;
             std::fflush(stderr);
             gaps.clear();
             yawSteps.clear();
