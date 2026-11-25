@@ -1418,6 +1418,12 @@ extern "C" void bt_android_perf_hint_add_thread();
 extern "C" void bt_android_set_thread_role(int role);
 #endif
 
+// The game's rate as measured from its frames (0 = not yet), the rate its VI divisor gives, and
+// how many frames the two disagreed (0.9.50).
+static int g_bt_measured_rate = 0;
+static uint32_t g_bt_vi_rate = 0;
+static uint32_t g_bt_rate_overrides = 0;
+
 extern "C" void tooie_rt64_begin_frame(uint8_t* rdram, recomp_context* ctx) {
     (void)ctx;
 #if defined(__ANDROID__)
@@ -1457,6 +1463,21 @@ extern "C" void tooie_rt64_begin_frame(uint8_t* rdram, recomp_context* ctx) {
             gaps.push_back(std::chrono::duration<float, std::milli>(now - last).count());
         }
         last = now;
+        // The rate the game really runs at (0.9.50): the median of the last 9 gaps, snapped to
+        // 20/30/60 and held until a new rate has lasted 6 frames. The VI divisor RT64 was told
+        // can disagree with it (title screens run at 20 Hz), which spaces the in-between frames
+        // wrongly: a small regular jitter.
+        if (!gaps.empty()) {
+            static float ring[9]; static int ringN = 0, ringAt = 0, candidate = 0, candidateRun = 0;
+            ring[ringAt] = gaps.back(); ringAt = (ringAt + 1) % 9; if (ringN < 9) ringN++;
+            if (ringN >= 5) {
+                float r[9]; std::copy(ring, ring + ringN, r); std::sort(r, r + ringN);
+                const float m = r[ringN / 2];
+                const int rate = m > 42.0f ? 20 : (m > 25.0f ? 30 : 60);
+                if (rate == candidate) candidateRun++; else { candidate = rate; candidateRun = 1; }
+                if (candidateRun >= 6 || g_bt_measured_rate == 0) g_bt_measured_rate = candidate;
+            }
+        }
         if (windowStart.time_since_epoch().count() == 0) windowStart = now;
         if (now - windowStart >= std::chrono::seconds(5) && gaps.size() > 10) {
             std::vector<float> g = gaps;
@@ -1467,8 +1488,11 @@ extern "C" void tooie_rt64_begin_frame(uint8_t* rdram, recomp_context* ctx) {
                 if (std::fabs(gaps[i] - med) > 5.0f) off++;
                 if (i > 0 && std::fabs(gaps[i] - gaps[i - 1]) > 8.0f) jumps++;
             }
-            std::fprintf(stderr, "Perf game frames: %zu, gap median %.1f ms, p10 %.1f, p90 %.1f, max %.1f | off by > 5 ms %d, jumps > 8 ms %d\n",
-                         gaps.size(), med, g[g.size() / 10], g[g.size() * 9 / 10], g.back(), off, jumps);
+            static uint32_t lastOverrides = 0;
+            std::fprintf(stderr, "Perf game frames: %zu, gap median %.1f ms, p10 %.1f, p90 %.1f, max %.1f | off by > 5 ms %d, jumps > 8 ms %d | rate measured %d, VI %u, frames corrected %u\n",
+                         gaps.size(), med, g[g.size() / 10], g[g.size() * 9 / 10], g.back(), off, jumps,
+                         g_bt_measured_rate, g_bt_vi_rate, g_bt_rate_overrides - lastOverrides);
+            lastOverrides = g_bt_rate_overrides;
             // Camera: game frames spent turning, how evenly (a step half or double the one before
             // is uneven; a stop in the middle of a turn is a hitch), and whether RT64 blended it.
             int turning = 0, uneven = 0, stops = 0;
@@ -1596,8 +1620,13 @@ extern "C" void tooie_rt64_begin_frame(uint8_t* rdram, recomp_context* ctx) {
     // the usual 30 Hz, 3 for the 20 Hz some overlays select. Report the rate
     // the game is actually running at, which is what RT64 interpolates from.
     const uint32_t divisor = read_word(rdram, kViRetraceInterval);
-    const uint32_t refresh_rate =
+    const uint32_t vi_rate =
         (divisor > 0U && divisor <= 60U) ? 60U / divisor : 30U;
+    // 0.9.50: the rate measured from the game's own frames wins when it disagrees.
+    const uint32_t refresh_rate =
+        g_bt_measured_rate != 0 ? static_cast<uint32_t>(g_bt_measured_rate) : vi_rate;
+    g_bt_vi_rate = vi_rate;
+    if (refresh_rate != vi_rate) ++g_bt_rate_overrides;
     if (!append_command(rdram, kRenderBufferState, kSetRefreshRateWord0,
                         refresh_rate)) {
         note_append_failure(1U);
