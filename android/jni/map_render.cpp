@@ -2078,6 +2078,10 @@ int bt_area_objects(const uint8_t* rdram, float* out, int max) {
             // Hags' area 0x152 (marks 24 Nov: Banjo walked up to it and learned a move). Shown
             // again from 0.9.40 (the user wants move spots on the map).
             case 0x0309: case 0x030B: case 0x0311: kind = 10; break;
+            // A doorway (an exit to another area): in every doorway of every area seen (Jinjo
+            // Village's 14, Mayahem Temple's, Spiral Mountain's; checked against the doors the
+            // user walked through, 24 Nov), on the doorway's floor, beside the exit trigger.
+            case 0x024E: kind = 17; break;
             case 0x019D: kind = 16; break;   // silo: Isle o' Hags' warp domes (marks 23 Nov: Banjo
                                              // inside it stood exactly on its entry; 0x0004 beside it
                                              // is probably where it leads)

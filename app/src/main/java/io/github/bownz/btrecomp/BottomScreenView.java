@@ -483,9 +483,18 @@ public final class BottomScreenView extends View {
             // Doors used (learned as you play, kept between sessions); the latest brighter.
             int doorsHere = GameState.area();
             MapDoors.Door latestDoor = MapDoors.latest(doorsHere);
-            for (MapDoors.Door door : MapDoors.doors(doorsHere)) {
+            java.util.List<MapDoors.Door> learned = MapDoors.doors(doorsHere);
+            for (MapDoors.Door door : learned) {
                 drawEntrance(c, r.centerX() + (door.x - cx) * viewScale, r.centerY() + (door.z - cz) * viewScale,
                     2.2f * iconScale * u, door == latestDoor);
+            }
+            // Doorways from the level's setup (0.9.43): shown before they've been used; a learned
+            // door there (which knows where it leads) takes its place.
+            float[] objs = currentObjects();
+            for (int i = 0; i + 3 < objs.length; i += 4) {
+                if ((int) objs[i + 3] != GameState.OBJ_DOOR || nearLearned(learned, objs[i], objs[i + 2])) continue;
+                drawEntrance(c, r.centerX() + (objs[i] - cx) * viewScale, r.centerY() + (objs[i + 2] - cz) * viewScale,
+                    2.2f * iconScale * u, false);
             }
             drawDoorTag(c, r, cx, cz, viewScale, now);
             // Your own markers.
@@ -864,7 +873,7 @@ public final class BottomScreenView extends View {
     private int doorArea = GameState.UNKNOWN, arrivedFrom = GameState.UNKNOWN;
     private long doorAreaSince;
     private float[] doorLastPos, exitPos;
-    private String doorLastName;
+    private String doorLastName, stayName;
     private boolean arrivalNoted = true;
 
     private static boolean realArea(int area) {
@@ -905,6 +914,13 @@ public final class BottomScreenView extends View {
             return;
         }
         arrivalNoted = true;
+        // The area's name, only when the game has just written a new one (it doesn't on every
+        // doorway, so the string can still be the last area's).
+        String fresh = GameState.areaName();
+        if (fresh != null && !fresh.isEmpty() && !fresh.equals(stayName)) {
+            MapDoors.nameArea(area, fresh);
+        }
+        if (fresh != null && !fresh.isEmpty()) stayName = fresh;
         if (!realArea(arrivedFrom)) {
             return;   // loaded a save or came from the title: no doorway
         }
@@ -1430,12 +1446,22 @@ public final class BottomScreenView extends View {
             if (d < reach && (d < bestD || (d <= bestD && kind == GameState.OBJ_JAMJARS))) { bestD = d; best = i; }   // Jamjars over his silo
         }
         // Doors: "To <where it leads>"
-        for (MapDoors.Door d : MapDoors.doors(GameState.area())) {
+        java.util.List<MapDoors.Door> learnedHere = MapDoors.doors(GameState.area());
+        for (MapDoors.Door d : learnedHere) {
             float ix = r.centerX() + (d.x - cx) * s, iy = r.centerY() + (d.z - cz) * s;
             float dd = (float) Math.hypot(ix - x, iy - y);
             if (dd < 4f * u && dd < bestD) {
                 bestD = dd; best = -2; doorTagX = d.x; doorTagZ = d.z;
-                doorTagName = d.name != null ? "To " + titleCase(d.name.replace("( ", "(").replace(" )", ")")) : "Door";
+                doorTagName = doorLabel(d);
+            }
+        }
+        for (int i = 0; i + 3 < o.length; i += 4) {
+            if ((int) o[i + 3] != GameState.OBJ_DOOR || nearLearned(learnedHere, o[i], o[i + 2])) continue;
+            float ix = r.centerX() + (o[i] - cx) * s, iy = r.centerY() + (o[i + 2] - cz) * s;
+            float dd = (float) Math.hypot(ix - x, iy - y);
+            if (dd < 4f * u && dd < bestD) {
+                bestD = dd; best = -2; doorTagX = o[i]; doorTagZ = o[i + 2];
+                doorTagName = "Door (not used yet)";
             }
         }
         if (best == -2) {
@@ -1451,6 +1477,16 @@ public final class BottomScreenView extends View {
         Haptics.tap(this);
         invalidate();
         return true;
+    }
+
+    private static boolean nearLearned(java.util.List<MapDoors.Door> learned, float x, float z) {
+        for (MapDoors.Door d : learned) if (Math.hypot(d.x - x, d.z - z) < 400) return true;
+        return false;
+    }
+
+    private static String doorLabel(MapDoors.Door d) {
+        String n = d != null ? MapDoors.nameOf(d.to) : null;
+        return n != null ? "To " + titleCase(n.replace("( ", "(").replace(" )", ")")) : "Door";
     }
 
     private float doorTagX, doorTagZ;

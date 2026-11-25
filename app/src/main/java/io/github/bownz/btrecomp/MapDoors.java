@@ -40,6 +40,9 @@ final class MapDoors {
     }
 
     private static final HashMap<Integer, ArrayList<Door>> byArea = new HashMap<>();
+    // Area names, learned when the game writes one on entering (it doesn't for every doorway:
+    // 0.9.40 named all of Jinjo Village's doors after the last name written, 24 Nov).
+    private static final HashMap<Integer, String> names = new HashMap<>();
     private static File file;
     private static long lastUsed = 1;
 
@@ -52,6 +55,10 @@ final class MapDoors {
             String line;
             while ((line = r.readLine()) != null) {
                 String[] v = line.trim().split(" ");
+                if (v.length >= 3 && v[0].equals("name")) {
+                    try { names.put(Integer.parseInt(v[1]), v[2].replace('_', ' ')); } catch (NumberFormatException ignored) { }
+                    continue;
+                }
                 if (v.length < 6) continue;
                 try {
                     Door d = new Door(Integer.parseInt(v[0]), Float.parseFloat(v[1]), Float.parseFloat(v[2]),
@@ -93,6 +100,21 @@ final class MapDoors {
             byArea.put(area, l);
         }
         return l;
+    }
+
+    /** Notes an area's name, as the game just wrote it on entering. */
+    static synchronized void nameArea(int area, String name) {
+        if (file == null || area < 0 || name == null || name.trim().isEmpty()) return;
+        String n = name.trim();
+        if (n.equals(names.get(area))) return;
+        names.put(area, n);
+        Log.i(TAG, String.format(java.util.Locale.US, "area 0x%X is %s", area, n));
+        save();
+    }
+
+    /** An area's name, or null when the game hasn't named it yet. */
+    static synchronized String nameOf(int area) {
+        return names.get(area);
     }
 
     /** The doors known in an area (a copy). */
@@ -152,6 +174,9 @@ final class MapDoors {
     private static void save() {
         File tmp = new File(file.getPath() + ".tmp");
         try (FileWriter w = new FileWriter(tmp)) {
+            for (java.util.Map.Entry<Integer, String> e : names.entrySet()) {
+                w.write("name " + e.getKey() + " " + e.getValue().replace(' ', '_') + "\n");
+            }
             for (ArrayList<Door> l : byArea.values()) {
                 for (Door d : l) {
                     w.write(String.format(java.util.Locale.US, "%d %.1f %.1f %.1f %d %d %s\n", d.area, d.x, d.y, d.z, d.to, d.flags,
