@@ -2112,6 +2112,39 @@ index f2eee70..b64d898 100644
              } triangles;
  
              struct {
+diff --git a/src/render/rt64_projection_processor.cpp b/src/render/rt64_projection_processor.cpp
+index 41110e5..09d315d 100644
+--- a/src/render/rt64_projection_processor.cpp
++++ b/src/render/rt64_projection_processor.cpp
+@@ -23,6 +23,10 @@ std::atomic<uint32_t> g_bt_rt64_proj_adjusted_sky{0};
+ std::atomic<uint32_t> g_bt_rt64_proj_adjusted_other{0};
+ std::atomic<uint32_t> g_bt_rt64_proj_skipped_sky{0};
+ std::atomic<uint32_t> g_bt_rt64_proj_skipped_other{0};
++// Smoothness (0.9.46): rendered frames where the gameplay camera was blended between two game
++// frames, or not (so it jumped).
++std::atomic<uint32_t> g_bt_rt64_cam_lerped{0};
++std::atomic<uint32_t> g_bt_rt64_cam_not_lerped{0};
+ }
+ 
+ namespace RT64 {
+@@ -236,6 +240,9 @@ namespace RT64 {
+                 // We only interpolate the projection if the view matrix has been interpolated.
+                 const bool interpolateProjection = rigidBody->lerpTranslation || rigidBody->lerpRotation;
+                 traceInterpolateProjection = interpolateProjection;
++                if (curProjGroup.matrixId == 0x00001000U) {
++                    (interpolateProjection ? g_bt_rt64_cam_lerped : g_bt_rt64_cam_not_lerped).fetch_add(1, std::memory_order_relaxed);
++                }
+                 if (interpolateProjection) {
+                     projMatrix = lerpMatrix(adjustedPrevProj, curProjTransform, p.curFrameWeight);
+                     prevProjTransform = lerpMatrix(adjustedPrevProj, curProjTransform, p.prevFrameWeight);
+@@ -246,6 +253,7 @@ namespace RT64 {
+                 }
+             }
+             else {
++                if (curProjGroup.matrixId == 0x00001000U) g_bt_rt64_cam_not_lerped.fetch_add(1, std::memory_order_relaxed);
+                 prevViewTransform = viewMatrix;
+                 prevProjTransform = projMatrix;
+             }
 diff --git a/src/render/rt64_raster_shader.cpp b/src/render/rt64_raster_shader.cpp
 index 721a01e..7b90d73 100644
 --- a/src/render/rt64_raster_shader.cpp

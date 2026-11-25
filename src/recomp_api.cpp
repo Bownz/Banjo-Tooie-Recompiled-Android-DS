@@ -1402,6 +1402,8 @@ extern std::atomic<uint32_t> g_bt_rt64_proj_id_gameplay;
 extern std::atomic<uint32_t> g_bt_rt64_proj_id_sky;
 extern std::atomic<uint32_t> g_bt_rt64_proj_id_ortho;
 extern std::atomic<uint32_t> g_bt_rt64_proj_adjusted_sky;
+extern std::atomic<uint32_t> g_bt_rt64_cam_lerped;
+extern std::atomic<uint32_t> g_bt_rt64_cam_not_lerped;
 extern std::atomic<uint32_t> g_bt_rt64_proj_adjusted_other;
 extern std::atomic<uint32_t> g_bt_rt64_proj_skipped_sky;
 extern std::atomic<uint32_t> g_bt_rt64_proj_skipped_other;
@@ -1430,8 +1432,24 @@ extern "C" void tooie_rt64_begin_frame(uint8_t* rdram, recomp_context* ctx) {
     // two game frames by time, so uneven game frames show as uneven motion (camera judder) even
     // when the screen holds 60. Every 5 s: the gaps between game frames.
     {
-        static std::vector<float> gaps;
+        static std::vector<float> gaps, yawSteps;
         static auto last = std::chrono::steady_clock::time_point{};
+        // The game camera's turn per game frame (yaw, 0x8012CEAC, degrees): if the game itself
+        // turns unevenly (a step, then none), blending can't hide it.
+        {
+            static float prevYaw = 0; static bool havePrev = false;
+            const uint32_t yw = read_word(rdram, 0x8012CEACU);
+            float yaw; std::memcpy(&yaw, &yw, sizeof yaw);
+            if (std::isfinite(yaw)) {
+                if (havePrev) {
+                    float d = yaw - prevYaw;
+                    while (d > 180.0f) d -= 360.0f;
+                    while (d < -180.0f) d += 360.0f;
+                    yawSteps.push_back(d);
+                }
+                prevYaw = yaw; havePrev = true;
+            }
+        }
         static auto windowStart = std::chrono::steady_clock::time_point{};
         const auto now = std::chrono::steady_clock::now();
         if (last.time_since_epoch().count() != 0) {
@@ -1450,8 +1468,31 @@ extern "C" void tooie_rt64_begin_frame(uint8_t* rdram, recomp_context* ctx) {
             }
             std::fprintf(stderr, "Perf game frames: %zu, gap median %.1f ms, p10 %.1f, p90 %.1f, max %.1f | off by > 5 ms %d, jumps > 8 ms %d\n",
                          gaps.size(), med, g[g.size() / 10], g[g.size() * 9 / 10], g.back(), off, jumps);
+            // Camera: game frames spent turning, how evenly (a step half or double the one before
+            // is uneven; a stop in the middle of a turn is a hitch), and whether RT64 blended it.
+            int turning = 0, uneven = 0, stops = 0;
+            float maxStep = 0;
+            for (size_t i = 0; i < yawSteps.size(); i++) {
+                const float a = std::fabs(yawSteps[i]);
+                maxStep = std::max(maxStep, a);
+                if (a > 0.3f) turning++;
+                if (i > 0) {
+                    const float b = std::fabs(yawSteps[i - 1]);
+                    if (a > 0.3f && b > 0.3f && (a > 2.0f * b || b > 2.0f * a)) uneven++;
+                    if (a < 0.05f && b > 0.5f && i + 1 < yawSteps.size() && std::fabs(yawSteps[i + 1]) > 0.5f) stops++;
+                }
+            }
+            static uint32_t lastLerped = 0, lastNotLerped = 0, lastMismatch = 0;
+            const uint32_t lerped = g_bt_rt64_cam_lerped.load(std::memory_order_relaxed);
+            const uint32_t notLerped = g_bt_rt64_cam_not_lerped.load(std::memory_order_relaxed);
+            const uint32_t mismatch = g_bt_rt64_projection_mismatches.load(std::memory_order_relaxed);
+            std::fprintf(stderr, "Perf camera: turning %d of %zu game frames, uneven steps %d, stops mid-turn %d, biggest step %.1f deg | rendered with the camera blended %u, not blended %u, projection mismatches %u\n",
+                         turning, yawSteps.size(), uneven, stops, maxStep,
+                         lerped - lastLerped, notLerped - lastNotLerped, mismatch - lastMismatch);
+            lastLerped = lerped; lastNotLerped = notLerped; lastMismatch = mismatch;
             std::fflush(stderr);
             gaps.clear();
+            yawSteps.clear();
             windowStart = now;
         }
     }
