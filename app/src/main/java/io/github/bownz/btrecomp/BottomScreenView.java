@@ -484,13 +484,14 @@ public final class BottomScreenView extends View {
             int doorsHere = GameState.area();
             MapDoors.Door latestDoor = MapDoors.latest(doorsHere);
             java.util.List<MapDoors.Door> learned = MapDoors.doors(doorsHere);
+            float[] objs = currentObjects();
             for (MapDoors.Door door : learned) {
+                if (nearWarp(objs, door.x, door.z)) continue;   // warp pads and silos aren't doors (user, 24 Nov)
                 drawEntrance(c, r.centerX() + (door.x - cx) * viewScale, r.centerY() + (door.z - cz) * viewScale,
                     2.2f * iconScale * u, door == latestDoor);
             }
             // Doorways from the level's setup (0.9.43): shown before they've been used; a learned
             // door there (which knows where it leads) takes its place.
-            float[] objs = currentObjects();
             for (int i = 0; i + 3 < objs.length; i += 4) {
                 if ((int) objs[i + 3] != GameState.OBJ_DOOR || nearLearned(learned, objs[i], objs[i + 2])) continue;
                 drawEntrance(c, r.centerX() + (objs[i] - cx) * viewScale, r.centerY() + (objs[i + 2] - cz) * viewScale,
@@ -1448,6 +1449,7 @@ public final class BottomScreenView extends View {
         // Doors: "To <where it leads>"
         java.util.List<MapDoors.Door> learnedHere = MapDoors.doors(GameState.area());
         for (MapDoors.Door d : learnedHere) {
+            if (nearWarp(o, d.x, d.z)) continue;
             float ix = r.centerX() + (d.x - cx) * s, iy = r.centerY() + (d.z - cz) * s;
             float dd = (float) Math.hypot(ix - x, iy - y);
             if (dd < 4f * u && dd < bestD) {
@@ -1477,6 +1479,15 @@ public final class BottomScreenView extends View {
         Haptics.tap(this);
         invalidate();
         return true;
+    }
+
+    /** Within 600 units of a warp pad or silo: going through one changes area, but it isn't a door. */
+    private static boolean nearWarp(float[] objs, float x, float z) {
+        for (int i = 0; i + 3 < objs.length; i += 4) {
+            int k = (int) objs[i + 3];
+            if ((k == GameState.OBJ_WARP_PAD || k == GameState.OBJ_SILO) && Math.hypot(objs[i] - x, objs[i + 2] - z) < 600) return true;
+        }
+        return false;
     }
 
     private static boolean nearLearned(java.util.List<MapDoors.Door> learned, float x, float z) {

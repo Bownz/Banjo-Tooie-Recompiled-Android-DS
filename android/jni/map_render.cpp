@@ -2114,6 +2114,40 @@ int bt_area_objects(const uint8_t* rdram, float* out, int max) {
         out[4 * n] = float(x); out[4 * n + 1] = float(y); out[4 * n + 2] = float(z); out[4 * n + 3] = float(kind);
         n++;
     }
+    // Doorways: 0x024E also marks where Banjo arrives by warp pad or silo, and level entrances
+    // with no door (user, 24 Nov: "I don't want the door icon on warp domes or warp pads";
+    // a desert area showed one where there's no door). Kept only with an exit trigger
+    // (category 0x0A) within 800 units (every Jinjo Village doorway has one within 100), and
+    // not within 600 units of a warp pad or silo.
+    {
+        std::vector<std::pair<float, float>> triggers;
+        for (int k = 0; k < count; k++) {
+            const uint32_t a = base + 0x18 + uint32_t(k) * size;
+            if ((ram.u16(a + 6) & 0x7F) == 0x0A) triggers.push_back({ float(ram.s16(a)), float(ram.s16(a + 4)) });
+        }
+        int m = 0;
+        for (int i = 0; i < n; i++) {
+            bool keep = true;
+            if (out[4 * i + 3] == 17.0f) {
+                bool trig = false;
+                for (auto& [tx, tz] : triggers) {
+                    const float dx = tx - out[4 * i], dz = tz - out[4 * i + 2];
+                    if (dx * dx + dz * dz < 800.0f * 800.0f) { trig = true; break; }
+                }
+                keep = trig;
+                for (int j = 0; j < n && keep; j++) {
+                    if (out[4 * j + 3] != 15.0f && out[4 * j + 3] != 16.0f) continue;
+                    const float dx = out[4 * j] - out[4 * i], dz = out[4 * j + 2] - out[4 * i + 2];
+                    if (dx * dx + dz * dz < 600.0f * 600.0f) keep = false;
+                }
+            }
+            if (keep) {
+                for (int c4 = 0; c4 < 4; c4++) out[4 * m + c4] = out[4 * i + c4];
+                m++;
+            }
+        }
+        n = m;
+    }
     // Jamjars on his silo: his entry is where he pops out, about 130 units beside the silo's
     // stump, so his icon sat off to one side of it (Mayahem Temple, user 24 Nov).
     for (int i = 0; i < n; i++) {
