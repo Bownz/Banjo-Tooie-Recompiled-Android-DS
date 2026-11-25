@@ -469,7 +469,7 @@ index d7caa12..bc247dc 100644
                  break;
              }
 diff --git a/src/hle/rt64_game_frame.cpp b/src/hle/rt64_game_frame.cpp
-index 80703c0..3462b84 100644
+index 80703c0..12450f2 100644
 --- a/src/hle/rt64_game_frame.cpp
 +++ b/src/hle/rt64_game_frame.cpp
 @@ -10,6 +10,8 @@
@@ -526,8 +526,8 @@ index 80703c0..3462b84 100644
 +                    if (!cm.transforms[t].mapped) {
 +                        frameMissed++;
 +                        if (missedLen + 48 < sizeof(missed)) {
-+                            const hlslpp::float3 pos = cw.drawData.worldTransforms[t][3].xyz;
-+                            missedLen += snprintf(missed + missedLen, sizeof(missed) - missedLen, " (%.0f %.0f %.0f v%u)", float(pos.x), float(pos.y), float(pos.z), verts);
++                            const float *pos = cw.drawData.worldTransforms[t][3];
++                            missedLen += snprintf(missed + missedLen, sizeof(missed) - missedLen, " (%.0f %.0f %.0f v%u)", pos[0], pos[1], pos[2], verts);
 +                        }
 +                    }
 +                }
@@ -541,8 +541,8 @@ index 80703c0..3462b84 100644
 +
 +                    frameLeft++;
 +                    if (leftLen + 48 < sizeof(left)) {
-+                        const hlslpp::float3 pos = pw.drawData.worldTransforms[t][3].xyz;
-+                        leftLen += snprintf(left + leftLen, sizeof(left) - leftLen, " (%.0f %.0f %.0f v%u)", float(pos.x), float(pos.y), float(pos.z), verts);
++                        const float *pos = pw.drawData.worldTransforms[t][3];
++                        leftLen += snprintf(left + leftLen, sizeof(left) - leftLen, " (%.0f %.0f %.0f v%u)", pos[0], pos[1], pos[2], verts);
 +                    }
 +                }
 +            }
