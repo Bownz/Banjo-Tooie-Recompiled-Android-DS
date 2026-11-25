@@ -225,11 +225,17 @@ final class Diagnostics {
     private static File zipWithProbe(Context c, File report) throws IOException {
         File base = c.getExternalFilesDir(null);
         File probe = base != null ? new File(base, "probe") : null;
-        File[] files = probe != null ? probe.listFiles() : null;
-        if (files == null || files.length == 0) {
+        File[] marks = probe != null ? probe.listFiles() : null;
+        // The doors learned so far (MapDoors, 0.9.43): kept between sessions, unlike the log.
+        File doors = new File(c.getFilesDir(), "doors.txt");
+        java.util.List<File> list = new java.util.ArrayList<>();
+        if (marks != null) list.addAll(java.util.Arrays.asList(marks));
+        java.util.Collections.sort(list);
+        if (doors.isFile()) list.add(doors);
+        if (list.isEmpty()) {
             return null;
         }
-        java.util.Arrays.sort(files);
+        File[] files = list.toArray(new File[0]);
         File zip = new File(report.getParentFile(), report.getName().replace(".txt", ".zip"));
         byte[] buffer = new byte[1 << 16];
         try (java.util.zip.ZipOutputStream out = new java.util.zip.ZipOutputStream(new FileOutputStream(zip))) {
@@ -240,7 +246,7 @@ final class Diagnostics {
                 if (!f.isFile()) {
                     continue;
                 }
-                java.util.zip.ZipEntry entry = new java.util.zip.ZipEntry(f == report ? f.getName() : "probe/" + f.getName());
+                java.util.zip.ZipEntry entry = new java.util.zip.ZipEntry(f == report || f == doors ? f.getName() : "probe/" + f.getName());
                 out.putNextEntry(entry);
                 try (InputStream in = new java.io.FileInputStream(f)) {
                     int n;
