@@ -40,6 +40,12 @@ extern "C" void bt_android_set_gpu_keep_awake(bool on);           // android/jni
 extern "C" void bt_android_set_perf_hints(bool on);               // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_frame_pacing(bool on);             // android/jni/perf_hint.cpp
 extern "C" void bt_rt64_set_blend_untagged(bool on);              // lib/rt64 (android patch), 0.9.47
+extern "C" void bt_set_interp_mode(int mode);                     // src/recomp_api.cpp, 0.9.48
+static void apply_interp_test(uint32_t mode) {
+    bt_set_interp_mode(int(mode));
+    bt_rt64_set_blend_untagged(mode != 3u);
+    std::printf("Interpolation Test: mode %u\n", mode);
+}
 extern "C" void bt_android_set_shared_gpu_queue(bool on);         // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_fast_clears(bool on);              // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_overlap_frames(bool on);           // android/jni/perf_hint.cpp
@@ -716,19 +722,25 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
                 bt_android_set_frame_pacing(std::get<uint32_t>(cur) == 1u);
             });
+        static EnumOptionVector interp_options = {
+            {0u, "Normal", "Normal"},
+            {1u, "CameraNotBlended", "Camera not blended"},
+            {2u, "CameraRotationAware", "Camera rotation-aware"},
+            {3u, "OnlyTagged", "Only tagged objects"},
+        };
         graphics_config.add_enum_option(
-            "android_blend_untagged",
-            "Blend Untagged Objects",
-            "At 60 FPS, the in-between frames blend Banjo, the camera and the sky. Off: everything "
-            "else is drawn where the game put it (moves at the game's own rate, no flicker). On: the "
-            "renderer guesses which piece is which between frames and blends those too, which made "
-            "the Rare logo flick up and down. Off by default from 0.9.47.",
-            onoff_options,
+            "android_interp_test",
+            "Interpolation Test",
+            "For finding the 60 FPS jitter (the Rare and Nintendo logos). Normal: everything blended. "
+            "Camera not blended: the camera moves at the game's own rate. Camera rotation-aware: the "
+            "camera is blended with its rotation and position separately. Only tagged objects: just "
+            "Banjo, the camera and the sky are blended.",
+            interp_options,
             0u
         );
-        graphics_config.add_option_change_callback("android_blend_untagged",
+        graphics_config.add_option_change_callback("android_interp_test",
             [](recomp::config::ConfigValueVariant cur, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext) {
-                bt_rt64_set_blend_untagged(std::get<uint32_t>(cur) == 1u);
+                apply_interp_test(std::get<uint32_t>(cur));
             });
         static EnumOptionVector live_options = {
             {0u, "Off", "Off"},
@@ -918,9 +930,9 @@ void bt::android::after_config_loaded() {
         bt_android_set_perf_hints(h != nullptr && *h == 1u);
         bt_android_set_frame_pacing(p != nullptr && *p == 1u);
         {
-            const recomp::config::ConfigValueVariant blend = graphics.get_option_value("android_blend_untagged");
-            const uint32_t* b = std::get_if<uint32_t>(&blend);
-            bt_rt64_set_blend_untagged(b != nullptr && *b == 1u);
+            const recomp::config::ConfigValueVariant interp = graphics.get_option_value("android_interp_test");
+            const uint32_t* m = std::get_if<uint32_t>(&interp);
+            apply_interp_test(m != nullptr ? *m : 0u);
         }
         std::printf("Performance Hints: %s, Frame Pacing: %s\n", (h != nullptr && *h == 1u) ? "on" : "off", (p != nullptr && *p == 1u) ? "on" : "off");
         std::fflush(stdout);

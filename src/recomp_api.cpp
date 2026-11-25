@@ -1864,6 +1864,13 @@ extern "C" void tooie_rt64_sky_layer(uint8_t* rdram, recomp_context* ctx) {
 //
 // `cursor_address` is the guest address of the cursor word: `$s0` for
 // func_800E44FC, the stack slot `0x34($sp)` for func_800E42F0.
+// Video > Interpolation Test (0.9.48): 0 normal, 1 camera not blended (projections tagged
+// G_EX_ID_IGNORE), 2 camera blended rotation-aware (decomposed), 3 only tagged objects (camera
+// as normal; untagged pieces not blended, set in RT64). Found with the Rare and Nintendo logos,
+// which flick up and down at 60 (25 Nov).
+static std::atomic<int> g_bt_interp_mode{0};
+extern "C" void bt_set_interp_mode(int mode) { g_bt_interp_mode.store(mode); }
+
 extern "C" void tooie_rt64_tag_projection(uint8_t* rdram, recomp_context* ctx,
                                           uint32_t kind,
                                           uint32_t cursor_address) {
@@ -1871,6 +1878,7 @@ extern "C" void tooie_rt64_tag_projection(uint8_t* rdram, recomp_context* ctx,
     if (rt64_disabled() || rt64_proj_off()) {
         return;
     }
+    const int interpMode = g_bt_interp_mode.load(std::memory_order_relaxed);
 
     uint32_t transform_id = kOrthoProjectionId;
     uint32_t flags = kProjectionGroupFlags;
@@ -1894,6 +1902,12 @@ extern "C" void tooie_rt64_tag_projection(uint8_t* rdram, recomp_context* ctx,
         }
     }
 
+    if (interpMode == 1) {
+        transform_id = G_EX_ID_IGNORE;
+    }
+    else if (interpMode == 2) {
+        flags |= (G_EX_INTERPOLATE_DECOMPOSE << 2);
+    }
     if (append_matrix_group(rdram, cursor_address, transform_id, flags)) {
         ++g_frame_projections;
         if (g_frame_proj_count < kProjectionIdLogCount) {

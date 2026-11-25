@@ -469,15 +469,15 @@ index d7caa12..bc247dc 100644
                  break;
              }
 diff --git a/src/hle/rt64_game_frame.cpp b/src/hle/rt64_game_frame.cpp
-index 80703c0..90c6f86 100644
+index 80703c0..451ec50 100644
 --- a/src/hle/rt64_game_frame.cpp
 +++ b/src/hle/rt64_game_frame.cpp
 @@ -23,6 +23,9 @@ std::atomic<uint32_t> g_bt_rt64_matched_transforms{0};
  // is a wrong blend that no longer happens -- and a zero count with the ids
  // implemented would mean the ids are not reaching RT64.
  std::atomic<uint32_t> g_bt_rt64_projection_mismatches{0};
-+// Video > Blend Untagged Objects (0.9.47): off by default.
-+std::atomic<bool> g_bt_rt64_blend_untagged{false};
++// Video > Interpolation Test (0.9.48): false only in "Only tagged objects".
++std::atomic<bool> g_bt_rt64_blend_untagged{true};
 +void bt_rt64_set_blend_untagged(bool on) { g_bt_rt64_blend_untagged.store(on); }
  // Counts the projection ids RT64 actually saw, bucketed by kind. The point is
  // to distinguish "the game emitted the tags" from "RT64 received them": an
