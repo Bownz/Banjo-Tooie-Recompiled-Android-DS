@@ -469,19 +469,21 @@ index d7caa12..bc247dc 100644
                  break;
              }
 diff --git a/src/hle/rt64_game_frame.cpp b/src/hle/rt64_game_frame.cpp
-index 80703c0..fbc096b 100644
+index 80703c0..594c50d 100644
 --- a/src/hle/rt64_game_frame.cpp
 +++ b/src/hle/rt64_game_frame.cpp
-@@ -10,6 +10,8 @@
+@@ -9,7 +9,10 @@
+ 
  #include "xxHash/xxh3.h"
  
++#include <algorithm>
  #include <atomic>
 +#include <chrono>
 +#include <cstdio>
  
  // TEMPORARY diagnostic (Banjo-Tooie port). Counts the transforms matched by
  // explicit id in the player's id range, which is what tells "the game emitted
-@@ -23,6 +25,15 @@ std::atomic<uint32_t> g_bt_rt64_matched_transforms{0};
+@@ -23,6 +26,15 @@ std::atomic<uint32_t> g_bt_rt64_matched_transforms{0};
  // is a wrong blend that no longer happens -- and a zero count with the ids
  // implemented would mean the ids are not reaching RT64.
  std::atomic<uint32_t> g_bt_rt64_projection_mismatches{0};
@@ -497,7 +499,7 @@ index 80703c0..fbc096b 100644
  // Counts the projection ids RT64 actually saw, bucketed by kind. The point is
  // to distinguish "the game emitted the tags" from "RT64 received them": an
  // append into a display list can return success and still be overwritten by the
-@@ -412,6 +423,150 @@ namespace RT64 {
+@@ -412,6 +424,150 @@ namespace RT64 {
          matchScenes(perspectiveScenes, prevFrame.perspectiveScenes);
          matchScenes(orthographicScenes, prevFrame.orthographicScenes);
  
@@ -648,7 +650,55 @@ index 80703c0..fbc096b 100644
          if (!workloadsModified.empty()) {
              thread_local std::vector<BufferUploader::Upload> uploads;
              uploads.clear();
-@@ -781,14 +936,22 @@ namespace RT64 {
+@@ -629,7 +785,46 @@ namespace RT64 {
+         const RigidBody *prevRigidBody;
+         const hlslpp::float4x4 &firstCurViewProj = firstCurWorkload.drawData.viewProjTransforms[firstCurProj.transformsIndex];
+         const hlslpp::float4x4 &firstPrevViewProj = firstPrevWorkload.drawData.viewProjTransforms[firstPrevProj.transformsIndex];
+-        for (const IndexPair &indices : transformCheckSet) {
++        // Banjo-Tooie port (0.9.55): every object is checked against every object drawn the same
++        // way last frame, so 40 identical bushes cost 1600 full checks (decompositions). Keep the
++        // 4 nearest by position for each; the right partner is almost always the nearest anyway.
++        thread_local std::vector<IndexPair> btCheckList;
++        thread_local std::vector<std::pair<float, uint32_t>> btNear;
++        btCheckList.clear();
++        {
++            constexpr size_t BtKeep = 4;
++            auto it = transformCheckSet.begin();
++            while (it != transformCheckSet.end()) {
++                auto groupEnd = it;
++                size_t groupSize = 0;
++                while ((groupEnd != transformCheckSet.end()) && (groupEnd->first == it->first)) {
++                    ++groupEnd;
++                    ++groupSize;
++                }
++
++                if (groupSize <= BtKeep) {
++                    btCheckList.insert(btCheckList.end(), it, groupEnd);
++                }
++                else {
++                    const float *cpos = firstCurWorkload.drawData.worldTransforms[it->first][3];
++                    btNear.clear();
++                    for (auto g = it; g != groupEnd; ++g) {
++                        const float *ppos = firstPrevWorkload.drawData.worldTransforms[g->second][3];
++                        const float dx = cpos[0] - ppos[0], dy = cpos[1] - ppos[1], dz = cpos[2] - ppos[2];
++                        btNear.emplace_back(dx * dx + dy * dy + dz * dz, g->second);
++                    }
++
++                    std::partial_sort(btNear.begin(), btNear.begin() + BtKeep, btNear.end());
++                    for (size_t k = 0; k < BtKeep; k++) {
++                        btCheckList.emplace_back(it->first, btNear[k].second);
++                    }
++                }
++
++                it = groupEnd;
++            }
++        }
++
++        for (const IndexPair &indices : btCheckList) {
+             const hlslpp::float4x4 &curTransform = firstCurWorkload.drawData.worldTransforms[indices.first];
+             const hlslpp::float4x4 &prevTransform = firstPrevWorkload.drawData.worldTransforms[indices.second];
+             prevRigidBody = (firstPrevWorkloadMap != nullptr) ? &firstPrevWorkloadMap->transforms[indices.second].rigidBody : nullptr;
+@@ -781,14 +976,22 @@ namespace RT64 {
          uint32_t curVertexCount = curWorkload.drawData.worldTransformVertexCount(curTransformIndex);
          uint32_t prevVertexIndex = prevWorkload.drawData.worldTransformVertexIndices[prevTransformIndex];
          uint32_t prevVertexCount = prevWorkload.drawData.worldTransformVertexCount(prevTransformIndex);
@@ -673,7 +723,7 @@ index 80703c0..fbc096b 100644
                  const float *curPosFloatsRef = &curPosFloats[curVertexIndex * 3];
                  const float *prevPosFloatsRef = &prevPosFloats[prevVertexIndex * 3];
                  float *curVelFloatsRef = &curVelFloats[curVertexIndex * 3];
-@@ -845,7 +1008,11 @@ namespace RT64 {
+@@ -845,7 +1048,11 @@ namespace RT64 {
                  matrixIdHash = matrixIdHash * 33 ^ group.matrixId;
  
                  const bool usesIdWithAutoOrdering = (group.matrixId != G_EX_ID_AUTO) && (group.matrixId != G_EX_ID_IGNORE) && (group.ordering == G_EX_ORDER_AUTO);
@@ -1116,13 +1166,15 @@ index 7a8c13b..bd198be 100644
          VI lastScreenVI;
          uint64_t lastScreenHash;
 diff --git a/src/hle/rt64_workload_queue.cpp b/src/hle/rt64_workload_queue.cpp
-index 5a331aa..678c219 100644
+index 5a331aa..4786528 100644
 --- a/src/hle/rt64_workload_queue.cpp
 +++ b/src/hle/rt64_workload_queue.cpp
-@@ -4,13 +4,358 @@
+@@ -3,6 +3,15 @@
+ //
  
  #include "rt64_workload_queue.h"
- 
++#include <algorithm>
++
 +#if defined(__ANDROID__)
 +// Android performance hints (android/jni/perf_hint.cpp in the game), if linked in.
 +extern "C" void bt_android_perf_hint_add_thread() __attribute__((weak));
@@ -1130,10 +1182,10 @@ index 5a331aa..678c219 100644
 +extern "C" int64_t bt_android_perf_hint_now_ns() __attribute__((weak));
 +extern "C" bool bt_android_gpu_keep_awake() __attribute__((weak));
 +#endif
-+
+ 
  #include "common/rt64_thread.h"
  
- #include "rt64_present_queue.h"
+@@ -10,7 +19,344 @@
  
  #define ENABLE_HIGH_RESOLUTION_RENDERER 1
  
@@ -1478,7 +1530,7 @@ index 5a331aa..678c219 100644
      // WorkloadQueue
  
      WorkloadQueue::WorkloadQueue() {
-@@ -86,8 +431,33 @@ namespace RT64 {
+@@ -86,8 +432,33 @@ namespace RT64 {
  
      void WorkloadQueue::waitForIdle() {
          std::unique_lock<std::mutex> threadLock(threadMutex);
@@ -1512,7 +1564,7 @@ index 5a331aa..678c219 100644
      void WorkloadQueue::waitForWorkloadId(uint64_t waitId) {
          std::unique_lock<std::mutex> workloadLock(workloadIdMutex);
          workloadIdCondition.wait(workloadLock, [&]() {
-@@ -102,7 +472,11 @@ namespace RT64 {
+@@ -102,7 +473,11 @@ namespace RT64 {
          vertexProcessor = std::make_unique<VertexProcessor>(ext.device);
          framebufferRenderer = std::make_unique<FramebufferRenderer>(ext.workloadGraphicsWorker, true, ext.createdGraphicsAPI, ext.shaderLibrary);
          renderFramebufferManager = std::make_unique<RenderFramebufferManager>(ext.device);
@@ -1524,7 +1576,7 @@ index 5a331aa..678c219 100644
  
          projectionProcessor.setup(ext.workloadGraphicsWorker);
          transformProcessor.setup(ext.workloadGraphicsWorker);
-@@ -188,7 +562,25 @@ namespace RT64 {
+@@ -188,7 +563,25 @@ namespace RT64 {
          switch (resolutionMode) {
          case UserConfiguration::Resolution::WindowIntegerScale:
              if (ext.sharedResources->swapChainHeight > 0) {
@@ -1550,7 +1602,7 @@ index 5a331aa..678c219 100644
              }
              else {
                  resolutionMultiplier = 1.0f;
-@@ -226,6 +618,12 @@ namespace RT64 {
+@@ -226,6 +619,12 @@ namespace RT64 {
                  workloadConfig.targetRate = ext.sharedResources->swapChainRate;
              }
  
@@ -1563,7 +1615,7 @@ index 5a331aa..678c219 100644
              break;
          case UserConfiguration::RefreshRate::Original:
          default:
-@@ -254,6 +652,9 @@ namespace RT64 {
+@@ -254,6 +653,9 @@ namespace RT64 {
          workloadConfig.postBlendNoiseNegative = ext.sharedResources->emulatorConfig.dither.postBlendNoiseNegative;
          
          if (ext.sharedResources->fbConfigChanged || sizeChanged) {
@@ -1573,7 +1625,7 @@ index 5a331aa..678c219 100644
              {
                  // Wait until the other queue has stopped using the interpolated color targets.
                  std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
-@@ -273,12 +674,26 @@ namespace RT64 {
+@@ -273,12 +675,26 @@ namespace RT64 {
              ext.sharedResources->interpolatedColorTargets.clear();
          }
  
@@ -1600,7 +1652,7 @@ index 5a331aa..678c219 100644
      }
  
      void WorkloadQueue::threadConfigurationValidate() {
-@@ -300,7 +715,14 @@ namespace RT64 {
+@@ -300,7 +716,14 @@ namespace RT64 {
          RenderTargetManager &targetManager = ext.sharedResources->renderTargetManager;
          const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
  
@@ -1615,7 +1667,7 @@ index 5a331aa..678c219 100644
  
          const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
          const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
-@@ -484,6 +906,10 @@ namespace RT64 {
+@@ -484,6 +907,10 @@ namespace RT64 {
  
                      if (colorTarget != nullptr) {
                          rtWidth = std::max(rtWidth, colorTarget->width);
@@ -1626,7 +1678,7 @@ index 5a331aa..678c219 100644
                          rtHeight = std::max(rtHeight, colorTarget->height);
                          chosenRt = colorTarget;
                      }
-@@ -635,7 +1061,11 @@ namespace RT64 {
+@@ -635,7 +1062,11 @@ namespace RT64 {
                      drawParams.rtEnabled = workloadConfig.raytracingEnabled;
                      drawParams.submissionFrame = workload.submissionFrame;
                      drawParams.deltaTimeMs = deltaTimeMs;
@@ -1638,7 +1690,7 @@ index 5a331aa..678c219 100644
                      drawParams.postBlendNoise = workloadConfig.postBlendNoise;
                      drawParams.postBlendNoiseNegative = workloadConfig.postBlendNoiseNegative;
                      drawParams.maxGameCall = std::min(gameCallCountMax - gameCallCursor, fbPair.gameCallCount);
-@@ -645,6 +1075,12 @@ namespace RT64 {
+@@ -645,6 +1076,12 @@ namespace RT64 {
                  gameCallCursor += fbPair.gameCallCount;
              }
  
@@ -1651,7 +1703,7 @@ index 5a331aa..678c219 100644
              // Create all GPU tile mappings and upload them.
              if (!workload.drawData.gpuTiles.empty()) {
                  std::pair<size_t, size_t> gpuTileRange;
-@@ -699,7 +1135,12 @@ namespace RT64 {
+@@ -699,7 +1136,12 @@ namespace RT64 {
  
              workerMutex.lock();
              ext.workloadGraphicsWorker->commandList->begin();
@@ -1664,7 +1716,7 @@ index 5a331aa..678c219 100644
              ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 0);
              framebufferRenderer->endFramebuffers(ext.workloadGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, workloadConfig.raytracingEnabled);
              framebufferRenderer->recordSetup(ext.workloadGraphicsWorker, bufferUploaders, processRSP ? rspProcessor.get() : nullptr, processWorldVertices ? vertexProcessor.get() : nullptr, &workload.outputBuffers, workloadConfig.raytracingEnabled);
-@@ -708,6 +1149,13 @@ namespace RT64 {
+@@ -708,6 +1150,13 @@ namespace RT64 {
              uint32_t framebufferIndex = 0;
              for (uint32_t f = 0; f < fbPairCount; f++) {
                  const FramebufferPair &fbPair = workload.fbPairs[f];
@@ -1678,7 +1730,7 @@ index 5a331aa..678c219 100644
                  bool validTargets = getTargetsFromPair(f);
                  fbManager.recordOperations(ext.workloadGraphicsWorker, &workload.fbChangePool, &workload.fbStorage, ext.shaderLibrary, ext.textureCache,
                      fbPair.startFbOperations, targetManager, fixedResScale, f, workload.submissionFrame);
-@@ -835,22 +1283,62 @@ namespace RT64 {
+@@ -835,22 +1284,62 @@ namespace RT64 {
                  
                  fbManager.recordOperations(ext.workloadGraphicsWorker, &workload.fbChangePool, &workload.fbStorage, ext.shaderLibrary, ext.textureCache,
                      fbPair.endFbOperations, targetManager, fixedResScale, f, workload.submissionFrame);
@@ -1741,7 +1793,7 @@ index 5a331aa..678c219 100644
          }
  
          if ((overrideTarget != nullptr) && !usingMSAA) {
-@@ -880,6 +1368,12 @@ namespace RT64 {
+@@ -880,6 +1369,12 @@ namespace RT64 {
  
      void WorkloadQueue::renderThreadLoop() {
          Thread::setCurrentThreadName("RT64 Workload");
@@ -1754,7 +1806,24 @@ index 5a331aa..678c219 100644
  
          WorkloadConfiguration workloadConfig;
          int64_t logicalTicks = 0;
-@@ -1070,7 +1564,19 @@ namespace RT64 {
+@@ -978,12 +1473,16 @@ namespace RT64 {
+                 bool velocityUploaderUsed = false;
+                 bool tileInterpolationUsed = false;
+                 bool lookAtInterpolationUsed = false;
++                int64_t btMatchStartMicro = 0, btMatchMicro = 0;   // Banjo-Tooie port (0.9.55): matching's share of setup
++                (void)btMatchMicro;
+                 if (requiresFrameMatching) {
+                     matchingProfiler.reset();
+                     matchingProfiler.start();
++                    btMatchStartMicro = workloadTimer.elapsedMicroseconds();
+                     curFrame.match(ext.workloadGraphicsWorker, *this, prevFrame, ext.workloadVelocityUploader, velocityUploaderUsed, tileInterpolationUsed, lookAtInterpolationUsed);
+                     matchingProfiler.end();
+                     matchingProfiler.log();
++                    btMatchMicro = workloadTimer.elapsedMicroseconds() - btMatchStartMicro;
+ 
+                     const bool displayRateAboveOriginal = (workload.viOriginalRate > 0) && (workloadConfig.targetRate > workload.viOriginalRate);
+                     generateInterpolatedFrames = !workload.paused && displayRateAboveOriginal && !interpolationTargetKey.isEmpty();
+@@ -1070,7 +1569,19 @@ namespace RT64 {
                          const int64_t currentTimeMicro = workloadTimer.elapsedMicroseconds() - setupTimeMicro;
                          const int64_t expectedTimeMicro = frame * maxTimePerFrameMicro;
                          const int64_t measuredFrameMicro = renderTimeTotalMicro / framesRendered;
@@ -1775,7 +1844,7 @@ index 5a331aa..678c219 100644
                              displayTicks += workload.viOriginalRate;
                              skippedFrames = true;
                              continue;
-@@ -1117,11 +1623,22 @@ namespace RT64 {
+@@ -1117,11 +1628,22 @@ namespace RT64 {
                      }
  
                      int64_t renderTimeMicro = workloadTimer.elapsedMicroseconds();
@@ -1798,7 +1867,7 @@ index 5a331aa..678c219 100644
  
                      // After one frame is rendered, we indicate the workload has been processed so the present thread can start presenting frames as soon as it can.
                      if (frame == 0) {
-@@ -1162,6 +1679,40 @@ namespace RT64 {
+@@ -1162,6 +1684,43 @@ namespace RT64 {
                      ext.sharedResources->interpolatedCondition.notify_all();
                  }
  
@@ -1817,7 +1886,9 @@ index 5a331aa..678c219 100644
 +                    // before the first frame (matching it with the last, waiting for presentation),
 +                    // the whole game frame, and frames wanted vs rendered.
 +                    static ElapsedTimer androidWorkloadLogTimer;
-+                    static int64_t androidSetupMicro = 0, androidTotalMicro = 0;
++                    static int64_t androidSetupMicro = 0, androidTotalMicro = 0, androidMatchMicro = 0, androidMatchMaxMicro = 0;
++                    androidMatchMicro += btMatchMicro;
++                    androidMatchMaxMicro = std::max(androidMatchMaxMicro, btMatchMicro);
 +                    static uint64_t androidWorkloads = 0, androidWanted = 0, androidRendered = 0;
 +                    androidSetupMicro += setupTimeMicro;
 +                    androidTotalMicro += workloadTimer.elapsedMicroseconds();
@@ -1826,11 +1897,12 @@ index 5a331aa..678c219 100644
 +                    androidRendered += framesRendered;
 +                    if (androidWorkloadLogTimer.elapsedMilliseconds() >= 5000.0) {
 +                        androidWorkloadLogTimer.reset();
-+                        fprintf(stdout, "Perf workload (ms per game frame): setup %.2f, total %.2f; frames rendered %llu of %llu%s\n",
-+                            double(androidSetupMicro) / 1000.0 / double(androidWorkloads), double(androidTotalMicro) / 1000.0 / double(androidWorkloads),
++                        fprintf(stdout, "Perf workload (ms per game frame): setup %.2f (matching %.2f, max %.2f), total %.2f; frames rendered %llu of %llu%s\n",
++                            double(androidSetupMicro) / 1000.0 / double(androidWorkloads), double(androidMatchMicro) / 1000.0 / double(androidWorkloads),
++                            double(androidMatchMaxMicro) / 1000.0, double(androidTotalMicro) / 1000.0 / double(androidWorkloads),
 +                            (unsigned long long)androidRendered, (unsigned long long)androidWanted, androidOverlap ? " (overlapped)" : "");
 +                        fflush(stdout);
-+                        androidSetupMicro = androidTotalMicro = 0;
++                        androidSetupMicro = androidTotalMicro = androidMatchMicro = androidMatchMaxMicro = 0;
 +                        androidWorkloads = androidWanted = androidRendered = 0;
 +                    }
 +                }
@@ -1839,7 +1911,7 @@ index 5a331aa..678c219 100644
                  threadConfigurationValidate();
  
                  if (!workload.paused) {
-@@ -1174,6 +1725,10 @@ namespace RT64 {
+@@ -1174,6 +1733,10 @@ namespace RT64 {
                  workloadProfiler.reset();
              }
          }
@@ -1850,7 +1922,7 @@ index 5a331aa..678c219 100644
      }
      
      void WorkloadQueue::idleThreadLoop() {
-@@ -1206,6 +1761,14 @@ namespace RT64 {
+@@ -1206,6 +1769,14 @@ namespace RT64 {
              }
  
              if (threadsRunning) {
