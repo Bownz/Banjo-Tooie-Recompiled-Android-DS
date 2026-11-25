@@ -469,7 +469,7 @@ index d7caa12..bc247dc 100644
                  break;
              }
 diff --git a/src/hle/rt64_game_frame.cpp b/src/hle/rt64_game_frame.cpp
-index 80703c0..12450f2 100644
+index 80703c0..aef8075 100644
 --- a/src/hle/rt64_game_frame.cpp
 +++ b/src/hle/rt64_game_frame.cpp
 @@ -10,6 +10,8 @@
@@ -481,17 +481,23 @@ index 80703c0..12450f2 100644
  
  // TEMPORARY diagnostic (Banjo-Tooie port). Counts the transforms matched by
  // explicit id in the player's id range, which is what tells "the game emitted
-@@ -23,6 +25,9 @@ std::atomic<uint32_t> g_bt_rt64_matched_transforms{0};
+@@ -23,6 +25,15 @@ std::atomic<uint32_t> g_bt_rt64_matched_transforms{0};
  // is a wrong blend that no longer happens -- and a zero count with the ids
  // implemented would mean the ids are not reaching RT64.
  std::atomic<uint32_t> g_bt_rt64_projection_mismatches{0};
 +// Video > Interpolation Test (0.9.48): false only in "Only tagged objects".
 +std::atomic<bool> g_bt_rt64_blend_untagged{true};
 +void bt_rt64_set_blend_untagged(bool on) { g_bt_rt64_blend_untagged.store(on); }
++// Interpolation Test "Blend shapes" (0.9.53): untagged objects whose vertices changed between
++// game frames (the game moved the vertices itself, e.g. the spinning Nintendo logo) get their
++// vertices blended too. Counted either way: objects paired whose vertices changed.
++std::atomic<bool> g_bt_rt64_blend_vertices{false};
++void bt_rt64_set_blend_vertices(bool on) { g_bt_rt64_blend_vertices.store(on); }
++std::atomic<uint32_t> g_bt_rt64_vertex_changed{0};
  // Counts the projection ids RT64 actually saw, bucketed by kind. The point is
  // to distinguish "the game emitted the tags" from "RT64 received them": an
  // append into a display list can return success and still be overwritten by the
-@@ -412,6 +417,83 @@ namespace RT64 {
+@@ -412,6 +423,85 @@ namespace RT64 {
          matchScenes(perspectiveScenes, prevFrame.perspectiveScenes);
          matchScenes(orthographicScenes, prevFrame.orthographicScenes);
  
@@ -564,9 +570,11 @@ index 80703c0..12450f2 100644
 +            const auto btNow = std::chrono::steady_clock::now();
 +            if (btNow - btWindow >= std::chrono::seconds(5)) {
 +                btWindow = btNow;
-+                fprintf(stdout, "Perf matching: %llu game frames, %.1f untagged objects per frame, %.2f not paired per frame, %.2f left over per frame, frames with both %llu\n",
++                const uint32_t btChanged = g_bt_rt64_vertex_changed.exchange(0, std::memory_order_relaxed);
++                fprintf(stdout, "Perf matching: %llu game frames, %.1f untagged objects per frame, %.2f not paired per frame, %.2f left over per frame, frames with both %llu | paired with changed vertices %.2f per frame, blended %s\n",
 +                    (unsigned long long)btFrames, btFrames ? double(btAuto) / double(btFrames) : 0.0, btFrames ? double(btMissed) / double(btFrames) : 0.0,
-+                    btFrames ? double(btLeft) / double(btFrames) : 0.0, (unsigned long long)btBothFrames);
++                    btFrames ? double(btLeft) / double(btFrames) : 0.0, (unsigned long long)btBothFrames,
++                    btFrames ? double(btChanged) / double(btFrames) : 0.0, g_bt_rt64_blend_vertices.load(std::memory_order_relaxed) ? "yes" : "no");
 +                fflush(stdout);
 +                btFrames = btAuto = btMissed = btLeft = btBothFrames = 0;
 +            }
@@ -575,7 +583,32 @@ index 80703c0..12450f2 100644
          if (!workloadsModified.empty()) {
              thread_local std::vector<BufferUploader::Upload> uploads;
              uploads.clear();
-@@ -845,7 +927,11 @@ namespace RT64 {
+@@ -781,14 +871,22 @@ namespace RT64 {
+         uint32_t curVertexCount = curWorkload.drawData.worldTransformVertexCount(curTransformIndex);
+         uint32_t prevVertexIndex = prevWorkload.drawData.worldTransformVertexIndices[prevTransformIndex];
+         uint32_t prevVertexCount = prevWorkload.drawData.worldTransformVertexCount(prevTransformIndex);
+-        if (((curGroup.vertexInterpolation != G_EX_COMPONENT_SKIP) || (curGroup.texcoordInterpolation == G_EX_COMPONENT_AUTO)) && (curVertexCount == prevVertexCount)) {
++        // Banjo-Tooie port (0.9.53): untagged objects are checked for changed vertices (counted),
++        // and blended when Interpolation Test is on Blend shapes.
++        const bool btUntagged = (curGroup.matrixId == G_EX_ID_AUTO);
++        const uint8_t btVertexInterpolation = (btUntagged && g_bt_rt64_blend_vertices.load(std::memory_order_relaxed)) ? uint8_t(G_EX_COMPONENT_INTERPOLATE) : curGroup.vertexInterpolation;
++        if (((btVertexInterpolation != G_EX_COMPONENT_SKIP) || btUntagged || (curGroup.texcoordInterpolation == G_EX_COMPONENT_AUTO)) && (curVertexCount == prevVertexCount)) {
+             const std::vector<float> &curPosFloats = curWorkload.drawData.posFloats;
+             const std::vector<float> &prevPosFloats = prevWorkload.drawData.posFloats;
+             std::vector<float> &curVelFloats = curWorkload.drawData.velFloats;
+             curVertexHash = XXH3_64bits(&curPosFloats[curVertexIndex * 3], curVertexCount * 3 * sizeof(float));
+             prevVertexHash = XXH3_64bits(&prevPosFloats[prevVertexIndex * 3], prevVertexCount * 3 * sizeof(float));
+ 
+-            if ((curGroup.vertexInterpolation != G_EX_COMPONENT_SKIP) && (curVertexHash != prevVertexHash)) {
++            if (btUntagged && (curVertexCount > 0) && (curVertexHash != prevVertexHash)) {
++                g_bt_rt64_vertex_changed.fetch_add(1, std::memory_order_relaxed);
++            }
++
++            if ((btVertexInterpolation != G_EX_COMPONENT_SKIP) && (curVertexHash != prevVertexHash)) {
+                 const float *curPosFloatsRef = &curPosFloats[curVertexIndex * 3];
+                 const float *prevPosFloatsRef = &prevPosFloats[prevVertexIndex * 3];
+                 float *curVelFloatsRef = &curVelFloats[curVertexIndex * 3];
+@@ -845,7 +943,11 @@ namespace RT64 {
                  matrixIdHash = matrixIdHash * 33 ^ group.matrixId;
  
                  const bool usesIdWithAutoOrdering = (group.matrixId != G_EX_ID_AUTO) && (group.matrixId != G_EX_ID_IGNORE) && (group.ordering == G_EX_ORDER_AUTO);

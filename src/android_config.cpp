@@ -40,10 +40,12 @@ extern "C" void bt_android_set_gpu_keep_awake(bool on);           // android/jni
 extern "C" void bt_android_set_perf_hints(bool on);               // android/jni/perf_hint.cpp
 extern "C" void bt_android_set_frame_pacing(bool on);             // android/jni/perf_hint.cpp
 extern "C" void bt_rt64_set_blend_untagged(bool on);              // lib/rt64 (android patch), 0.9.47
+extern "C" void bt_rt64_set_blend_vertices(bool on);              // lib/rt64 (android patch), 0.9.53
 extern "C" void bt_set_interp_mode(int mode);                     // src/recomp_api.cpp, 0.9.48
 static void apply_interp_test(uint32_t mode) {
     bt_set_interp_mode(int(mode));
     bt_rt64_set_blend_untagged(mode != 3u);
+    bt_rt64_set_blend_vertices(mode == 4u);
     std::printf("Interpolation Test: mode %u\n", mode);
 }
 extern "C" void bt_android_set_shared_gpu_queue(bool on);         // android/jni/perf_hint.cpp
@@ -727,6 +729,7 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             {1u, "CameraNotBlended", "Camera not blended"},
             {2u, "CameraRotationAware", "Camera rotation-aware"},
             {3u, "OnlyTagged", "Only tagged objects"},
+            {4u, "BlendShapes", "Blend shapes"},
         };
         graphics_config.add_enum_option(
             "android_interp_test",
@@ -734,7 +737,8 @@ void bt::android::initialize_config(const recompui::config::GeneralTabOptions& g
             "For finding the 60 FPS jitter (the Rare and Nintendo logos). Normal: everything blended. "
             "Camera not blended: the camera moves at the game's own rate. Camera rotation-aware: the "
             "camera is blended with its rotation and position separately. Only tagged objects: just "
-            "Banjo, the camera and the sky are blended.",
+            "Banjo, the camera and the sky are blended. Blend shapes: as Normal, and objects whose shape "
+            "the game changes itself (like the spinning logos) are blended too.",
             interp_options,
             0u
         );
