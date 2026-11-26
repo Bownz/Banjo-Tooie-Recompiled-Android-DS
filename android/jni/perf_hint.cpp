@@ -256,7 +256,11 @@ extern "C" void bt_android_perf_hint_frame(int64_t start_ns, int64_t wall_ns, in
     const int64_t cpu = last_cpu_ns == 0 ? wall_ns : std::clamp<int64_t>(cpu_now - last_cpu_ns, 0, wall_ns);
     last_cpu_ns = cpu_now;
     int result;
-    if (api.reportActual2 != nullptr && work_duration != nullptr) {
+    // 0.9.56: CPU only. Reporting the GPU's share too (AWorkDuration) let the system lower the
+    // GPU clock in November (401-475 MHz in Jinjo Village); the goal here is only to get the CPU
+    // cores off their slow clocks (1.65-1.84 GHz of 2.8-3.2 in the 25 Nov logs).
+    constexpr bool kReportGpu = false;
+    if (kReportGpu && api.reportActual2 != nullptr && work_duration != nullptr) {
         api.wdSetStart(work_duration, start_ns > 0 ? start_ns : now_ns() - wall_ns);
         api.wdSetTotal(work_duration, wall_ns);
         api.wdSetCpu(work_duration, std::max<int64_t>(cpu, 1));
